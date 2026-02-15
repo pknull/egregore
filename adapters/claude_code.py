@@ -66,24 +66,27 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 
 def cmd_publish(args: argparse.Namespace) -> None:
-    """Publish an insight to own feed."""
-    content = {
-        "type": "insight",
-        "title": args.title,
-        "observation": args.observation,
-    }
-    if args.context:
-        content["context"] = args.context
-    if args.evidence:
-        content["evidence"] = args.evidence
-    if args.guidance:
-        content["guidance"] = args.guidance
-    if args.confidence is not None:
-        content["confidence"] = args.confidence
-    if args.tags:
-        content["tags"] = args.tags.split(",")
+    """Publish content to own feed."""
+    if args.content_json:
+        content = json.loads(args.content_json)
     else:
-        content["tags"] = []
+        content = {
+            "type": "insight",
+            "title": args.title,
+            "observation": args.observation,
+        }
+        if args.context:
+            content["context"] = args.context
+        if args.evidence:
+            content["evidence"] = args.evidence
+        if args.guidance:
+            content["guidance"] = args.guidance
+        if args.confidence is not None:
+            content["confidence"] = args.confidence
+        if args.tags:
+            content["tags"] = args.tags.split(",")
+        else:
+            content["tags"] = []
 
     result = api_request("POST", "/v1/publish", {"content": content}, base_url=args.url)
     if result.get("success"):
@@ -179,9 +182,10 @@ def main() -> None:
     sub.add_parser("identity", help="Show local identity")
 
     # publish
-    pub = sub.add_parser("publish", help="Publish an insight")
-    pub.add_argument("--title", required=True, help="Insight title")
-    pub.add_argument("--observation", required=True, help="Core observation")
+    pub = sub.add_parser("publish", help="Publish content")
+    pub.add_argument("--content-json", help="Arbitrary JSON content (overrides other fields)")
+    pub.add_argument("--title", help="Insight title (required unless --content-json)")
+    pub.add_argument("--observation", help="Core observation (required unless --content-json)")
     pub.add_argument("--context", help="Context for the insight")
     pub.add_argument("--evidence", help="Supporting evidence")
     pub.add_argument("--guidance", help="Actionable guidance")

@@ -1,12 +1,11 @@
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
 
 use crate::api::response;
 use crate::api::AppState;
-use crate::feed::models::FeedQuery;
-use crate::identity::PublicId;
+use egregore::feed::models::FeedQuery;
+use egregore::identity::PublicId;
 
 #[derive(Deserialize, Default)]
 pub struct FeedParams {
@@ -42,17 +41,17 @@ pub async fn get_own_feed(
     match result {
         Ok(Ok(msgs)) => {
             let meta = response::ApiMetadata {
-                total: Some(msgs.len() as u64),
+                total: None,
                 limit: params.limit,
                 offset: params.offset,
             };
             response::ok_with_metadata(msgs, meta).into_response()
         }
-        Ok(Err(e)) => e.into_response(),
-        Err(e) => response::err::<()>(
+        Ok(Err(e)) => response::from_error(e),
+        Err(_) => response::err::<()>(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "TASK_ERROR",
-            &e.to_string(),
+            "INTERNAL_ERROR",
+            "failed to query feed",
         )
         .into_response(),
     }
@@ -78,11 +77,11 @@ pub async fn get_feed_by_author(
 
     match result {
         Ok(Ok(msgs)) => response::ok(msgs).into_response(),
-        Ok(Err(e)) => e.into_response(),
-        Err(e) => response::err::<()>(
+        Ok(Err(e)) => response::from_error(e),
+        Err(_) => response::err::<()>(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "TASK_ERROR",
-            &e.to_string(),
+            "INTERNAL_ERROR",
+            "failed to query feed",
         )
         .into_response(),
     }
@@ -106,11 +105,11 @@ pub async fn get_insights(
 
     match result {
         Ok(Ok(msgs)) => response::ok(msgs).into_response(),
-        Ok(Err(e)) => e.into_response(),
-        Err(e) => response::err::<()>(
+        Ok(Err(e)) => response::from_error(e),
+        Err(_) => response::err::<()>(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "TASK_ERROR",
-            &e.to_string(),
+            "INTERNAL_ERROR",
+            "failed to query insights",
         )
         .into_response(),
     }
@@ -122,7 +121,7 @@ pub async fn search_insights(
 ) -> impl IntoResponse {
     let engine = state.engine.clone();
     let query_text = params.q.unwrap_or_default();
-    let limit = params.limit.unwrap_or(20);
+    let limit = params.limit.unwrap_or(20).min(200);
 
     if query_text.is_empty() {
         return response::err::<()>(
@@ -138,11 +137,11 @@ pub async fn search_insights(
 
     match result {
         Ok(Ok(msgs)) => response::ok(msgs).into_response(),
-        Ok(Err(e)) => e.into_response(),
-        Err(e) => response::err::<()>(
+        Ok(Err(e)) => response::from_error(e),
+        Err(_) => response::err::<()>(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "TASK_ERROR",
-            &e.to_string(),
+            "INTERNAL_ERROR",
+            "failed to search insights",
         )
         .into_response(),
     }
@@ -164,11 +163,11 @@ pub async fn get_message_by_hash(
             "message not found",
         )
         .into_response(),
-        Ok(Err(e)) => e.into_response(),
-        Err(e) => response::err::<()>(
+        Ok(Err(e)) => response::from_error(e),
+        Err(_) => response::err::<()>(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "TASK_ERROR",
-            &e.to_string(),
+            "INTERNAL_ERROR",
+            "failed to retrieve message",
         )
         .into_response(),
     }

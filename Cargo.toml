@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "egregore-relay"]
+
 [package]
 name = "egregore"
 version = "0.1.0"
@@ -35,6 +38,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
+rpassword = "7.0"
 
 # Logging
 tracing = "0.1"
@@ -62,6 +66,8 @@ bytes = "1.0"
 [dev-dependencies]
 tempfile = "3.0"
 tokio-test = "0.4"
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"
 
 [profile.release]
 opt-level = 3

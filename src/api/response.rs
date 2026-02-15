@@ -63,37 +63,42 @@ pub fn err<T: Serialize>(status: StatusCode, code: &str, message: &str) -> (Stat
     )
 }
 
-impl IntoResponse for crate::error::EgreError {
-    fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            crate::error::EgreError::IdentityNotFound { .. } => {
-                (StatusCode::NOT_FOUND, "IDENTITY_NOT_FOUND")
-            }
-            crate::error::EgreError::FeedIntegrity { .. } => {
-                (StatusCode::BAD_REQUEST, "FEED_INTEGRITY")
-            }
-            crate::error::EgreError::DuplicateMessage { .. } => {
-                (StatusCode::CONFLICT, "DUPLICATE_MESSAGE")
-            }
-            crate::error::EgreError::SignatureInvalid => {
-                (StatusCode::BAD_REQUEST, "SIGNATURE_INVALID")
-            }
-            crate::error::EgreError::Serialization(_) => {
-                (StatusCode::BAD_REQUEST, "SERIALIZATION_ERROR")
-            }
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
-        };
+pub fn from_error(e: egregore::error::EgreError) -> Response {
+    let (status, code, message) = match &e {
+        egregore::error::EgreError::IdentityNotFound { .. } => {
+            (StatusCode::NOT_FOUND, "IDENTITY_NOT_FOUND", e.to_string())
+        }
+        egregore::error::EgreError::FeedIntegrity { .. } => {
+            (StatusCode::BAD_REQUEST, "FEED_INTEGRITY", e.to_string())
+        }
+        egregore::error::EgreError::DuplicateMessage { .. } => {
+            (StatusCode::CONFLICT, "DUPLICATE_MESSAGE", e.to_string())
+        }
+        egregore::error::EgreError::SignatureInvalid => {
+            (StatusCode::BAD_REQUEST, "SIGNATURE_INVALID", e.to_string())
+        }
+        egregore::error::EgreError::Serialization(_) => {
+            (StatusCode::BAD_REQUEST, "SERIALIZATION_ERROR", e.to_string())
+        }
+        _ => {
+            tracing::warn!(error = %e, "internal error in API handler");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "an internal error occurred".to_string(),
+            )
+        }
+    };
 
-        let body = Json(ApiResponse::<()> {
-            success: false,
-            data: None,
-            error: Some(ApiError {
-                code: code.to_string(),
-                message: self.to_string(),
-            }),
-            metadata: None,
-        });
+    let body = Json(ApiResponse::<()> {
+        success: false,
+        data: None,
+        error: Some(ApiError {
+            code: code.to_string(),
+            message,
+        }),
+        metadata: None,
+    });
 
-        (status, body).into_response()
-    }
+    (status, body).into_response()
 }

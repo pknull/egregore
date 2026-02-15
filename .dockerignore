@@ -1,0 +1,15 @@
+target/
+data/
+relay-data/
+mcp/
+adapters/
+docs/
+tests/
+Memory/
+Work/
+.asha/
+.git/
+.gitignore
+*.md
+*.yml
+*.yaml

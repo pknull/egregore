@@ -6,11 +6,10 @@ use serde::Deserialize;
 
 use crate::api::response;
 use crate::api::AppState;
-use crate::feed::models::Content;
 
 #[derive(Deserialize)]
 pub struct PublishRequest {
-    pub content: Content,
+    pub content: serde_json::Value,
 }
 
 pub async fn publish(
@@ -22,13 +21,13 @@ pub async fn publish(
 
     let result = tokio::task::spawn_blocking(move || engine.publish(&identity, req.content))
         .await
-        .map_err(|e| crate::error::EgreError::Config {
+        .map_err(|e| egregore::error::EgreError::Config {
             reason: format!("task join error: {e}"),
         });
 
     match result {
         Ok(Ok(msg)) => (StatusCode::CREATED, response::ok(msg)).into_response(),
-        Ok(Err(e)) => e.into_response(),
-        Err(e) => e.into_response(),
+        Ok(Err(e)) => response::from_error(e),
+        Err(e) => response::from_error(e),
     }
 }

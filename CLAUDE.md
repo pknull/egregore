@@ -1,41 +1,96 @@
 # Egregore
 
-SSB-inspired decentralized knowledge sharing network for LLMs.
-
-## Architecture
-
-Append-only signed feeds with Ed25519 identity, gossip replication over encrypted TCP (Secret Handshake + Box Stream), local HTTP API for LLM integration.
+Signed append-only feeds with gossip replication and relay store-and-forward. Two binaries: a node daemon for local agents, and a relay server for network bridging.
 
 ## Build & Test
 
 ```bash
-cargo build
-cargo test
-cargo clippy
+cargo build --release    # both binaries
+cargo test               # all workspace tests
+cargo clippy             # lint
 ```
+
+Binaries: `target/release/egregore` (node), `target/release/egregore-relay` (relay).
 
 ## Run
 
 ```bash
-# Generate identity and start daemon
-cargo run -- --data-dir ./data --port 7654
+# Node (generates identity on first run)
+cargo run -- --data-dir ./data
 
-# With encrypted private key
-cargo run -- --data-dir ./data --port 7654 --passphrase
+# Relay
+cargo run -p egregore-relay -- --data-dir ./relay-data
 ```
 
-## Module Layout
+## Workspace Layout
 
-- `identity/` — Ed25519 keypair, signing, key encryption at rest
-- `crypto/` — Secret Handshake, Box Stream, private message boxing
-- `feed/` — Message models, SQLite store, chain validation, FTS5 search
-- `gossip/` — TCP connections, SHS auth, encrypted replication
-- `api/` — Axum HTTP endpoints (localhost:7654)
+```
+src/
+  identity/
+    keys.rs           Ed25519 keypair, Ed25519-to-X25519 conversion
+    signing.rs        Sign/verify operations
+    encryption.rs     Argon2id key encryption at rest
+  crypto/
+    handshake.rs      Secret Handshake (SHS) protocol
+    box_stream.rs     Box Stream encrypted framing
+    private_box.rs    Private Box multi-recipient encryption
+  feed/
+    engine.rs         Publish (sign+chain), ingest (verify+validate), query, search
+    models.rs         Message struct, FeedQuery, UnsignedMessage
+    content_types.rs  Structured content enum (insight, annotation, etc.)
+    store/
+      mod.rs          SQLite schema, initialization, FTS5 setup
+      messages.rs     Message CRUD, chain validation, search
+      peers.rs        Peer storage, follows, relay registration
+  gossip/
+    connection.rs     SHS handshake over TCP, then Box Stream
+    replication.rs    Have/Want/Messages/Done sync protocol
+    client.rs         Sync loop (merge CLI+DB+discovered peers, sync each)
+    server.rs         TCP listener with semaphore + optional auth callback
+    discovery.rs      UDP LAN peer discovery with burst announcements
+    peers.rs          Peer address type
+  api/
+    mod.rs            Axum router setup
+    response.rs       Standard API response envelope
+    routes_feed.rs    GET /v1/feed, /v1/feed/:author, /v1/insights, /v1/message/:hash
+    routes_publish.rs POST /v1/publish
+    routes_peers.rs   GET/POST/DELETE /v1/peers, GET /v1/status
+    routes_follows.rs GET/POST/DELETE /v1/follows
+    routes_identity.rs GET /v1/identity
+    mcp.rs            MCP JSON-RPC 2.0 dispatcher (POST /mcp)
+    mcp_tools.rs      MCP tool definitions and handlers
+  config.rs           CLI config, network key derivation
+  error.rs            Error types (EgreError)
+  main.rs             Node binary entry point
+
+egregore-relay/src/
+  main.rs             Relay binary entry point
+  config.rs           Relay CLI config
+  eviction.rs         TTL-based message eviction
+  api/
+    mod.rs            Relay router
+    routes_register.rs  POST /v1/register, POST /v1/settings
+    routes_directory.rs GET /v1/peers (public directory)
+    routes_feed.rs      GET /v1/feed, /v1/feed/:author
+    routes_status.rs    GET /v1/status
+```
 
 ## Conventions
 
-- `spawn_blocking` for all rusqlite calls (sync lib + async runtime)
-- `#[serde(tag = "type")]` for content type enum
+- `spawn_blocking` for all rusqlite calls (sync library in async runtime)
+- `#[serde(tag = "type")]` for content type enum variants
 - Standard API response: `{ success, data, error, metadata }`
+- Pagination: node uses `limit`/`offset`, relay uses `page`/`per_page`
 - All crypto uses dalek crates (ed25519-dalek, x25519-dalek, curve25519-dalek)
-- Network key (`shs_cap`) isolates network instances
+- Network key string is SHA-256 hashed to produce the 32-byte SHS capability
+- Content size limit: 64 KB per message (enforced in both publish and ingest)
+- Chain integrity: hash-linked per author, gap-tolerant with backfill promotion
+- Ingest order: size check, duplicate check, then Ed25519 verification (cheap before expensive)
+
+## Documentation
+
+- `README.md` — Technical overview, CLI flags, API tables, deployment topologies
+- `docs/architecture.md` — Protocol specification, crypto details, topology reference
+- `docs/operations.md` — Step-by-step procedures for all deployment scenarios
+- `docs/api/node-api.yaml` — OpenAPI 3.0 spec for the node HTTP API
+- `docs/api/relay-api.yaml` — OpenAPI 3.0 spec for the relay HTTP API

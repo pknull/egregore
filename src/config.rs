@@ -13,6 +13,8 @@ pub struct Config {
     pub gossip_interval_secs: u64,
     pub network_key: String,
     pub peers: Vec<String>,
+    pub lan_discovery: bool,
+    pub discovery_port: u16,
 }
 
 impl Default for Config {
@@ -24,6 +26,8 @@ impl Default for Config {
             gossip_interval_secs: 300,
             network_key: DEFAULT_NETWORK_KEY.to_string(),
             peers: Vec::new(),
+            lan_discovery: false,
+            discovery_port: 7656,
         }
     }
 }
@@ -42,5 +46,49 @@ impl Config {
         let mut hasher = Sha256::new();
         hasher.update(self.network_key.as_bytes());
         hasher.finalize().into()
+    }
+
+    /// 8-byte discriminator derived from the network key.
+    /// Double-hashed (SHA-256 of SHA-256) so broadcasting it doesn't
+    /// reveal the SHS network key itself.
+    pub fn network_key_discriminator(&self) -> [u8; 8] {
+        use sha2::{Digest, Sha256};
+        let first = Sha256::digest(self.network_key.as_bytes());
+        let second = Sha256::digest(first);
+        let mut out = [0u8; 8];
+        out.copy_from_slice(&second[..8]);
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discriminator_deterministic() {
+        let config = Config::default();
+        let d1 = config.network_key_discriminator();
+        let d2 = config.network_key_discriminator();
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn discriminator_differs_per_network() {
+        let c1 = Config::default();
+        let c2 = Config {
+            network_key: "other-network-key".to_string(),
+            ..Config::default()
+        };
+        assert_ne!(c1.network_key_discriminator(), c2.network_key_discriminator());
+    }
+
+    #[test]
+    fn discriminator_differs_from_network_key_bytes() {
+        let config = Config::default();
+        let nk = config.network_key_bytes();
+        let disc = config.network_key_discriminator();
+        // Discriminator should NOT be a prefix of the network key
+        assert_ne!(&nk[..8], &disc[..]);
     }
 }

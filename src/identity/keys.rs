@@ -105,6 +105,18 @@ impl Identity {
 }
 
 impl PublicId {
+    /// Validate that a string is a well-formed public ID (`@<base64-32-bytes>.ed25519`).
+    /// Checks prefix, suffix, length (53 chars), and valid base64. Does not verify the
+    /// key is cryptographically valid (i.e., a point on the curve).
+    pub fn is_valid_format(s: &str) -> bool {
+        // @<44 base64 chars>.ed25519 = 1 + 44 + 8 = 53
+        if s.len() != 53 || !s.starts_with('@') || !s.ends_with(".ed25519") {
+            return false;
+        }
+        let b64_part = &s[1..45];
+        B64.decode(b64_part).map_or(false, |bytes| bytes.len() == 32)
+    }
+
     /// Create from a verifying (public) key.
     pub fn from_verifying_key(vk: &VerifyingKey) -> Self {
         let encoded = B64.encode(vk.as_bytes());

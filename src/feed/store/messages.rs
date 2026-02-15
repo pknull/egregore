@@ -1,103 +1,25 @@
-use rusqlite::{params, Connection, OptionalExtension};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::{EgreError, Result};
 use crate::feed::models::{FeedQuery, Message};
 use crate::identity::PublicId;
 
-/// Thread-safe wrapper around a SQLite connection.
-/// All access is synchronous; use tokio::task::spawn_blocking from async code.
-#[derive(Clone)]
-pub struct FeedStore {
-    conn: Arc<Mutex<Connection>>,
-}
+use super::{content_type_name, FeedStore};
 
 impl FeedStore {
-    /// Open (or create) the database at the given path.
-    pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        let store = Self {
-            conn: Arc::new(Mutex::new(conn)),
-        };
-        store.init_schema()?;
-        Ok(store)
-    }
+    // ---- Message operations ----
 
-    /// Open an in-memory database (for tests).
-    pub fn open_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        let store = Self {
-            conn: Arc::new(Mutex::new(conn)),
-        };
-        store.init_schema()?;
-        Ok(store)
-    }
-
-    fn init_schema(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS feeds (
-                author TEXT PRIMARY KEY,
-                latest_sequence INTEGER NOT NULL DEFAULT 0,
-                last_seen TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS messages (
-                hash TEXT PRIMARY KEY,
-                author TEXT NOT NULL,
-                sequence INTEGER NOT NULL,
-                previous TEXT,
-                timestamp TEXT NOT NULL,
-                content_type TEXT NOT NULL,
-                content_json TEXT NOT NULL,
-                signature TEXT NOT NULL,
-                raw_json TEXT NOT NULL,
-                UNIQUE(author, sequence)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_messages_author_seq
-                ON messages(author, sequence);
-
-            CREATE INDEX IF NOT EXISTS idx_messages_content_type
-                ON messages(content_type);
-
-            CREATE INDEX IF NOT EXISTS idx_messages_timestamp
-                ON messages(timestamp);
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                content_text,
-                content='messages',
-                content_rowid='rowid'
-            );
-
-            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-                INSERT INTO messages_fts(rowid, content_text)
-                VALUES (new.rowid, new.content_json);
-            END;
-
-            CREATE TABLE IF NOT EXISTS peers (
-                address TEXT PRIMARY KEY,
-                public_id TEXT,
-                last_connected TEXT,
-                last_synced TEXT
-            );
-            ",
-        )?;
-        Ok(())
-    }
-
-    /// Insert a message. Returns error on duplicate or integrity violation.
-    pub fn insert_message(&self, msg: &Message) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+    /// Insert a message. `chain_valid` indicates whether the hash chain
+    /// linkage to the predecessor has been verified.
+    pub fn insert_message(&self, msg: &Message, chain_valid: bool) -> Result<()> {
+        let conn = self.conn();
         let content_type = content_type_name(&msg.content);
         let content_json = serde_json::to_string(&msg.content)?;
         let raw_json = serde_json::to_string(msg)?;
 
         conn.execute(
-            "INSERT INTO messages (hash, author, sequence, previous, timestamp, content_type, content_json, signature, raw_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO messages (hash, author, sequence, previous, timestamp, content_type, content_json, signature, raw_json, chain_valid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 msg.hash,
                 msg.author.0,
@@ -108,6 +30,7 @@ impl FeedStore {
                 content_json,
                 msg.signature,
                 raw_json,
+                chain_valid as i32,
             ],
         )
         .map_err(|e| match e {
@@ -139,9 +62,35 @@ impl FeedStore {
         Ok(())
     }
 
+    /// Update the chain_valid flag for a message identified by hash.
+    pub fn set_chain_valid(&self, hash: &str, chain_valid: bool) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE messages SET chain_valid = ?1 WHERE hash = ?2",
+            params![chain_valid as i32, hash],
+        )?;
+        Ok(())
+    }
+
+    /// Check if a message's chain is validated.
+    pub fn is_chain_valid(&self, hash: &str) -> Result<bool> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT chain_valid FROM messages WHERE hash = ?1",
+            params![hash],
+            |row| {
+                let valid: i32 = row.get(0)?;
+                Ok(valid != 0)
+            },
+        )
+        .optional()
+        .map(|opt| opt.unwrap_or(false))
+        .map_err(EgreError::from)
+    }
+
     /// Get a message by its hash.
     pub fn get_message(&self, hash: &str) -> Result<Option<Message>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.query_row(
             "SELECT raw_json FROM messages WHERE hash = ?1",
             params![hash],
@@ -157,7 +106,7 @@ impl FeedStore {
 
     /// Get feed messages with pagination.
     pub fn query_messages(&self, query: &FeedQuery) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let mut sql = String::from("SELECT raw_json FROM messages WHERE 1=1");
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -200,8 +149,17 @@ impl FeedStore {
     }
 
     /// Full-text search across message content.
+    /// The query text is wrapped in double-quotes to force FTS5 phrase matching
+    /// and prevent operator injection.
     pub fn search_messages(&self, query_text: &str, limit: u32) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
+        let trimmed = query_text.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Escape embedded double-quotes and wrap as FTS5 phrase literal
+        let sanitized = format!("\"{}\"", trimmed.replace('"', "\"\""));
+
+        let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT m.raw_json FROM messages m
              INNER JOIN messages_fts f ON m.rowid = f.rowid
@@ -211,7 +169,7 @@ impl FeedStore {
         )?;
 
         let rows = stmt
-            .query_map(params![query_text, limit], |row| {
+            .query_map(params![sanitized, limit], |row| {
                 let json: String = row.get(0)?;
                 Ok(json)
             })?
@@ -224,7 +182,7 @@ impl FeedStore {
 
     /// Get the latest sequence number for a feed.
     pub fn get_latest_sequence(&self, author: &PublicId) -> Result<u64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.query_row(
             "SELECT latest_sequence FROM feeds WHERE author = ?1",
             params![author.0],
@@ -235,9 +193,40 @@ impl FeedStore {
         .map_err(EgreError::from)
     }
 
+    /// Get the highest contiguous sequence starting from 1 for an author.
+    /// If sequences are [1,2,3,5,6], returns 3 (gap at 4).
+    /// If sequences are [2,3], returns 0 (missing sequence 1).
+    /// Used by replication to detect gaps that need backfilling.
+    ///
+    /// Uses SQL gap detection (index-backed) instead of loading all sequences.
+    pub fn get_latest_contiguous_sequence(&self, author: &PublicId) -> Result<u64> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT CASE
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM messages WHERE author = ?1 AND sequence = 1
+                ) THEN 0
+                ELSE COALESCE(
+                    (SELECT m1.sequence FROM messages m1
+                     WHERE m1.author = ?1
+                     AND NOT EXISTS (
+                         SELECT 1 FROM messages m2
+                         WHERE m2.author = ?1 AND m2.sequence = m1.sequence + 1
+                     )
+                     ORDER BY m1.sequence ASC
+                     LIMIT 1),
+                    0
+                )
+            END",
+            params![author.0],
+            |row| row.get(0),
+        )
+        .map_err(EgreError::from)
+    }
+
     /// Get all known feeds with their latest sequence numbers.
     pub fn get_all_feeds(&self) -> Result<Vec<(PublicId, u64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let mut stmt = conn.prepare("SELECT author, latest_sequence FROM feeds")?;
         let rows = stmt
             .query_map([], |row| {
@@ -249,6 +238,26 @@ impl FeedStore {
         Ok(rows)
     }
 
+    /// Get a single message by author and sequence number.
+    pub fn get_message_at_sequence(
+        &self,
+        author: &PublicId,
+        sequence: u64,
+    ) -> Result<Option<Message>> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT raw_json FROM messages WHERE author = ?1 AND sequence = ?2",
+            params![author.0, sequence],
+            |row| {
+                let json: String = row.get(0)?;
+                Ok(json)
+            },
+        )
+        .optional()?
+        .map(|json| serde_json::from_str(&json).map_err(EgreError::from))
+        .transpose()
+    }
+
     /// Get messages for a feed starting after a given sequence.
     pub fn get_messages_after(
         &self,
@@ -256,7 +265,7 @@ impl FeedStore {
         after_seq: u64,
         limit: u32,
     ) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT raw_json FROM messages
              WHERE author = ?1 AND sequence > ?2
@@ -277,49 +286,16 @@ impl FeedStore {
     }
 }
 
-fn content_type_name(content: &crate::feed::models::Content) -> &'static str {
-    use crate::feed::models::Content;
-    match content {
-        Content::Insight { .. } => "insight",
-        Content::Endorsement { .. } => "endorsement",
-        Content::Dispute { .. } => "dispute",
-        Content::Query { .. } => "query",
-        Content::Response { .. } => "response",
-        Content::Profile { .. } => "profile",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feed::models::Content;
-    use chrono::Utc;
-
-    fn make_test_message(author: &str, seq: u64, prev: Option<&str>) -> Message {
-        Message {
-            author: PublicId(author.to_string()),
-            sequence: seq,
-            previous: prev.map(|s| s.to_string()),
-            timestamp: Utc::now(),
-            content: Content::Insight {
-                title: format!("Test insight {seq}"),
-                context: None,
-                observation: "Test observation".to_string(),
-                evidence: None,
-                guidance: None,
-                confidence: Some(0.9),
-                tags: vec!["test".to_string()],
-            },
-            hash: format!("hash_{author}_{seq}"),
-            signature: "sig".to_string(),
-        }
-    }
+    use crate::feed::store::make_test_message;
 
     #[test]
     fn insert_and_retrieve() {
         let store = FeedStore::open_memory().unwrap();
         let msg = make_test_message("@alice.ed25519", 1, None);
-        store.insert_message(&msg).unwrap();
+        store.insert_message(&msg, true).unwrap();
 
         let retrieved = store.get_message("hash_@alice.ed25519_1").unwrap().unwrap();
         assert_eq!(retrieved.sequence, 1);
@@ -330,9 +306,9 @@ mod tests {
     fn duplicate_rejected() {
         let store = FeedStore::open_memory().unwrap();
         let msg = make_test_message("@alice.ed25519", 1, None);
-        store.insert_message(&msg).unwrap();
+        store.insert_message(&msg, true).unwrap();
 
-        let result = store.insert_message(&msg);
+        let result = store.insert_message(&msg, true);
         assert!(matches!(result, Err(EgreError::DuplicateMessage { .. })));
     }
 
@@ -341,8 +317,8 @@ mod tests {
         let store = FeedStore::open_memory().unwrap();
         let m1 = make_test_message("@alice.ed25519", 1, None);
         let m2 = make_test_message("@alice.ed25519", 2, Some("hash_@alice.ed25519_1"));
-        store.insert_message(&m1).unwrap();
-        store.insert_message(&m2).unwrap();
+        store.insert_message(&m1, true).unwrap();
+        store.insert_message(&m2, true).unwrap();
 
         let seq = store
             .get_latest_sequence(&PublicId("@alice.ed25519".to_string()))
@@ -354,10 +330,10 @@ mod tests {
     fn query_by_author() {
         let store = FeedStore::open_memory().unwrap();
         store
-            .insert_message(&make_test_message("@alice.ed25519", 1, None))
+            .insert_message(&make_test_message("@alice.ed25519", 1, None), true)
             .unwrap();
         store
-            .insert_message(&make_test_message("@bob.ed25519", 1, None))
+            .insert_message(&make_test_message("@bob.ed25519", 1, None), true)
             .unwrap();
 
         let query = FeedQuery {
@@ -378,11 +354,10 @@ mod tests {
                 Some(format!("hash_@alice.ed25519_{}", i - 1))
             };
             store
-                .insert_message(&make_test_message(
-                    "@alice.ed25519",
-                    i,
-                    prev.as_deref(),
-                ))
+                .insert_message(
+                    &make_test_message("@alice.ed25519", i, prev.as_deref()),
+                    true,
+                )
                 .unwrap();
         }
 
@@ -398,16 +373,14 @@ mod tests {
     fn full_text_search() {
         let store = FeedStore::open_memory().unwrap();
         let mut msg = make_test_message("@alice.ed25519", 1, None);
-        msg.content = Content::Insight {
-            title: "Unique pattern".to_string(),
-            context: None,
-            observation: "Egregore decentralized replication".to_string(),
-            evidence: None,
-            guidance: None,
-            confidence: Some(0.9),
-            tags: vec![],
-        };
-        store.insert_message(&msg).unwrap();
+        msg.content = serde_json::json!({
+            "type": "insight",
+            "title": "Unique pattern",
+            "observation": "Egregore decentralized replication",
+            "confidence": 0.9,
+            "tags": [],
+        });
+        store.insert_message(&msg, true).unwrap();
 
         let results = store.search_messages("decentralized", 10).unwrap();
         assert_eq!(results.len(), 1);

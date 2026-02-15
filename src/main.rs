@@ -1,20 +1,15 @@
 mod api;
-mod config;
-mod crypto;
-mod error;
-mod feed;
-mod gossip;
-mod identity;
 
 use std::sync::Arc;
 
 use clap::Parser;
 use std::path::PathBuf;
 
-use config::Config;
-use feed::engine::FeedEngine;
-use feed::store::FeedStore;
-use identity::Identity;
+use egregore::config::Config;
+use egregore::feed::engine::FeedEngine;
+use egregore::feed::store::FeedStore;
+use egregore::gossip;
+use egregore::identity::Identity;
 
 #[derive(Parser)]
 #[command(name = "egregore", version, about = "SSB-inspired LLM knowledge sharing")]
@@ -42,6 +37,14 @@ struct Cli {
     /// Peer addresses (host:port)
     #[arg(long)]
     peer: Vec<String>,
+
+    /// Enable UDP LAN peer discovery
+    #[arg(long)]
+    lan_discovery: bool,
+
+    /// UDP port for LAN discovery announcements
+    #[arg(long, default_value_t = 7656)]
+    discovery_port: u16,
 }
 
 #[tokio::main]
@@ -61,6 +64,8 @@ async fn main() -> anyhow::Result<()> {
         gossip_port: cli.gossip_port,
         network_key: cli.network_key,
         peers: cli.peer,
+        lan_discovery: cli.lan_discovery,
+        discovery_port: cli.discovery_port,
         ..Config::default()
     };
 
@@ -91,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         identity: identity.clone(),
         engine: engine.clone(),
         config: Arc::new(config.clone()),
+        started_at: std::time::Instant::now(),
     };
     let app = api::router(state);
 
@@ -113,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Start gossip sync loop
+    // Start gossip sync loop (dynamic: reads DB peers each cycle)
     let sync_peers = config.peers.clone();
     let sync_net_key = config.network_key_bytes();
     let sync_identity = identity.clone();
@@ -130,6 +136,20 @@ async fn main() -> anyhow::Result<()> {
         .await;
     });
 
+    // Start LAN discovery if enabled
+    if config.lan_discovery {
+        let disc_config = config.clone();
+        let disc_identity = identity.clone();
+        let disc_engine = engine.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                gossip::discovery::run_discovery(disc_config, disc_identity, disc_engine).await
+            {
+                tracing::error!(error = %e, "LAN discovery failed");
+            }
+        });
+    }
+
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
@@ -141,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn load_encrypted_identity(identity_dir: &std::path::Path) -> anyhow::Result<Identity> {
-    use crate::identity::encryption;
+    use egregore::identity::encryption;
     use ed25519_dalek::SigningKey;
 
     let encrypted_path = identity_dir.join("secret.key.enc");
@@ -168,8 +188,5 @@ fn load_encrypted_identity(identity_dir: &std::path::Path) -> anyhow::Result<Ide
 }
 
 fn prompt_passphrase(prompt: &str) -> anyhow::Result<String> {
-    eprint!("{prompt}");
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
+    Ok(rpassword::prompt_password(prompt)?)
 }

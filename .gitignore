@@ -4,9 +4,12 @@
 .env
 *.db
 *.sqlite
+*.code-workspace
 data/
 
-# Node (mcp/)
+# Legacy (replaced by embedded MCP)
+adapters/
+mcp/
 node_modules/
 dist/
 

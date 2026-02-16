@@ -1,3 +1,9 @@
+//! POST /v1/publish — sign and append a message to the local feed.
+//!
+//! Accepts JSON content, delegates to FeedEngine::publish which signs with
+//! the node's Ed25519 key, chains to the previous message, and stores it.
+//! The message propagates to peers on the next gossip cycle.
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;

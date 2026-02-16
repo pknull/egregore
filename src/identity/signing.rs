@@ -1,3 +1,5 @@
+//! Ed25519 sign/verify wrappers used by feed publishing and SHS authentication.
+
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 
 use crate::error::{EgreError, Result};

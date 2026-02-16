@@ -1,3 +1,9 @@
+//! Message storage — insert, query, search, chain validation tracking.
+//!
+//! `chain_valid` flag: true means the immediate backward link to the predecessor
+//! was verified at ingest time. False means the predecessor was missing (gap).
+//! Backfill promotes the flag when the missing predecessor arrives.
+
 use rusqlite::{params, OptionalExtension};
 
 use crate::error::{EgreError, Result};

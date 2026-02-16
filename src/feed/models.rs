@@ -1,3 +1,14 @@
+//! Feed data model — signed messages forming per-author hash chains.
+//!
+//! Each message is signed by its author's Ed25519 key and linked to its
+//! predecessor via `previous` (SHA-256 hash of the prior message). This forms
+//! an append-only chain per author. Sequence numbers are monotonically increasing
+//! starting at 1.
+//!
+//! Hash chain integrity is verified at ingest time (see feed/engine.rs).
+//! Messages arriving out of order are stored with `chain_valid = false` and
+//! promoted when their predecessor arrives (backfill).
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

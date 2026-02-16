@@ -1,3 +1,16 @@
+//! SQLite storage — messages, feeds, peers, follows, and FTS5 search.
+//!
+//! All access is synchronous (rusqlite). Async callers use `spawn_blocking`.
+//!
+//! Peer storage uses two tables:
+//! - `peers`: address-keyed, from manual add or LAN discovery. Identity unknown
+//!   until first successful SHS handshake backfills public_id.
+//! - `known_peers`: public_id-keyed, from relay registration or completed
+//!   handshakes. Tracks authorization, privacy, timestamps.
+//!
+//! Both contribute to the sync loop's peer list via `list_all_syncable_addresses()`
+//! (SQL UNION, deduplicated).
+
 mod messages;
 mod peers;
 

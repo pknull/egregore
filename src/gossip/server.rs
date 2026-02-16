@@ -1,3 +1,16 @@
+//! Gossip server — incoming connection listener with optional authorization.
+//!
+//! Accepts TCP connections, performs server-side SHS handshake, then runs
+//! bidirectional replication. Authorization runs AFTER handshake succeeds
+//! (identity is verified before the authorization check).
+//!
+//! Node mode: no authorization — accepts any peer on the same network key.
+//! Relay mode: AuthorizeFn checks known_peers.authorized in the database,
+//!   rejecting peers that haven't called POST /v1/register.
+//!
+//! Bounded by semaphore (64 concurrent) and per-connection timeout (120s)
+//! to prevent resource exhaustion.
+
 use std::sync::Arc;
 use std::time::Duration;
 

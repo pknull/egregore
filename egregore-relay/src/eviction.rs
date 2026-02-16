@@ -1,3 +1,10 @@
+//! TTL-based message eviction — relay-only garbage collection.
+//!
+//! Runs hourly, deletes messages older than the configured TTL. After eviction,
+//! chain_valid flags are updated and orphaned feed entries cleaned up. This is
+//! why relays are ephemeral stores — nodes should connect directly to publishers
+//! for authoritative history.
+
 use std::sync::Arc;
 use std::time::Duration;
 

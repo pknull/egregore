@@ -1,3 +1,20 @@
+//! Box Stream — encrypted framing over an authenticated connection.
+//!
+//! After SHS completes, all data flows through Box Stream frames. Each frame
+//! is independently encrypted with ChaCha20-Poly1305 using per-direction keys.
+//!
+//! Frame format:
+//!   [encrypted_header(34 bytes) | encrypted_body(len bytes)]
+//!
+//! The header contains body length + body MAC, encrypted separately. This lets
+//! the reader know exactly how many bytes to expect before attempting body
+//! decryption — no length oracle. Nonces increment per operation (header and
+//! body consume separate slots).
+//!
+//! A goodbye frame (all-zero header plaintext) signals clean stream termination.
+//! Body size capped at 4096 bytes; larger payloads are split by the application
+//! layer (see gossip/replication.rs).
+
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 

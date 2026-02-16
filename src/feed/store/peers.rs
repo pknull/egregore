@@ -1,3 +1,10 @@
+//! Peer storage operations across two tables.
+//!
+//! `peers` (address-keyed): created by manual add or LAN discovery.
+//! `known_peers` (public_id-keyed): created by relay registration or gossip.
+//!
+//! The sync loop queries both for addresses to connect to.
+
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
 

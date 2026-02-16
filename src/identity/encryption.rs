@@ -1,3 +1,11 @@
+//! Key encryption at rest — Argon2id KDF + ChaCha20-Poly1305.
+//!
+//! Protects the Ed25519 signing key on disk when `--passphrase` is used.
+//! Argon2id derives a 32-byte key from passphrase + random salt, then
+//! ChaCha20-Poly1305 encrypts the 32-byte secret. Stored as JSON:
+//! `{ salt, nonce, ciphertext }`. Without the passphrase, the key is
+//! computationally irrecoverable.
+
 use argon2::Argon2;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};

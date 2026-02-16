@@ -1,3 +1,9 @@
+//! Relay HTTP API — publicly accessible (binds 0.0.0.0).
+//!
+//! Registration, peer directory, feed firehose, and status. No MCP endpoint
+//! (relays don't publish, they store and forward). No authentication on read
+//! endpoints — anyone can query the feed and peer directory.
+
 pub mod routes_directory;
 pub mod routes_feed;
 pub mod routes_register;

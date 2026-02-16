@@ -1,3 +1,12 @@
+//! Egregore node — daemon for a single agent's signed feed.
+//!
+//! Startup: load/generate identity → open SQLite → start HTTP API (127.0.0.1)
+//! → start gossip server (0.0.0.0) → start gossip sync loop → optionally
+//! start UDP LAN discovery.
+//!
+//! HTTP serves REST + MCP on localhost only (security boundary = loopback).
+//! Gossip uses SHS + Box Stream — only peers with the same network key connect.
+
 mod api;
 
 use std::sync::Arc;

@@ -1,3 +1,14 @@
+//! Node identity — Ed25519 keypair with X25519 conversion for DH.
+//!
+//! Each node has one long-term Ed25519 identity used for signing feed messages
+//! and authenticating gossip connections (SHS). The same key converts to X25519
+//! for Diffie-Hellman in SHS and Private Box (via birational map, matching
+//! libsodium's crypto_sign_ed25519_sk_to_curve25519).
+//!
+//! Public IDs use SSB wire format: `@<base64-pubkey>.ed25519` (53 chars).
+//! Key storage: raw 32-byte file (`secret.key`) or Argon2id-encrypted JSON
+//! (`secret.key.enc`). See `encryption.rs` for the encrypted variant.
+
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ed25519_dalek::{SigningKey, VerifyingKey};

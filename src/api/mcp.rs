@@ -1,3 +1,9 @@
+//! MCP JSON-RPC 2.0 dispatcher — POST /mcp (Streamable HTTP transport).
+//!
+//! Native LLM interface. Handles initialize, ping, tools/list, tools/call.
+//! Notifications (no `id` field) return 202 Accepted with empty body.
+//! Tool definitions and handlers live in mcp_tools.rs.
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

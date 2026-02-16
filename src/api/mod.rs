@@ -1,3 +1,12 @@
+//! HTTP API — localhost-only REST + MCP JSON-RPC endpoint.
+//!
+//! All endpoints bind to 127.0.0.1 (binding happens in main.rs). Only local
+//! processes can access the API — there is no authentication on the HTTP layer.
+//! The security boundary is the loopback interface itself.
+//!
+//! Routes: feed queries, publish, peer management, follows, identity, status,
+//! and the MCP JSON-RPC 2.0 endpoint at POST /mcp.
+
 pub mod mcp;
 pub mod mcp_tools;
 pub mod response;

@@ -1,3 +1,16 @@
+//! Private Box — multi-recipient message encryption.
+//!
+//! Encrypts a message so only named recipients can read it. DH(sender, recipient)
+//! encrypts a random symmetric key per recipient; the body is encrypted once with
+//! that symmetric key.
+//!
+//! Wire format:
+//!   [nonce(12) | recipient_count(1) | per_recipient_key(48 each) | encrypted_body]
+//!
+//! Recipients try-decrypt each key slot; success identifies their entry.
+//! Non-recipients get `Ok(None)`. Recipient count is visible; identities are not.
+//! Max 255 recipients per message.
+
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use rand::RngCore;

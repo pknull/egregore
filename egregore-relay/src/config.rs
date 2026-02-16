@@ -1,3 +1,5 @@
+//! Relay-specific configuration — limits beyond what the shared Config provides.
+
 /// Relay-specific configuration (beyond the shared Config).
 #[derive(Debug, Clone)]
 pub struct RelayConfig {

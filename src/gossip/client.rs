@@ -1,3 +1,14 @@
+//! Gossip sync loop — outgoing connections to known peers.
+//!
+//! Each cycle: merge CLI peers + DB peers → build replication config → sync each.
+//! A single `ReplicationConfig` is built per cycle from the follows table:
+//! - Empty follows → replicate ALL feeds (open replication, the default)
+//! - Any follows added → only request those authors
+//!
+//! Per-peer sync: TCP connect → SHS handshake → bidirectional replication → close.
+//! The replication protocol (Have/Want/Messages/Done) runs over Box Stream.
+//! See gossip/replication.rs for the wire protocol.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,3 +1,9 @@
+//! MCP tool definitions and handlers — 10 tools wrapping the REST API.
+//!
+//! Each tool maps 1:1 to a REST endpoint. Tool schemas define the JSON
+//! input parameters; handlers delegate to the same FeedEngine/FeedStore
+//! operations as the REST routes.
+
 use serde::Serialize;
 use serde_json::Value;
 

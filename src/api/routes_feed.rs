@@ -1,3 +1,8 @@
+//! Feed query endpoints — read messages from the local SQLite store.
+//!
+//! Messages from remote authors appear here only after gossip replication
+//! has synced them. All queries are local reads — no network calls.
+
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use serde::Deserialize;

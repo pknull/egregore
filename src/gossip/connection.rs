@@ -1,3 +1,16 @@
+//! Secure transport — SHS handshake + Box Stream over TCP.
+//!
+//! `SecureConnection` wraps a TCP stream with authenticated encryption.
+//! After construction (via `connect` for outgoing or `accept` for incoming),
+//! all data is encrypted with per-direction ChaCha20-Poly1305 keys derived
+//! from the handshake.
+//!
+//! The handshake verifies both peers share the same network key and proves
+//! their Ed25519 identity. After that, `send`/`recv` handle Box Stream
+//! framing transparently. Connection closes with a goodbye frame.
+//!
+//! Used by gossip/client.rs (outgoing sync) and gossip/server.rs (incoming).
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 

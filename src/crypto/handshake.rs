@@ -1,3 +1,21 @@
+//! Secret Handshake (SHS) — 4-step mutual authentication over TCP.
+//!
+//! Based on Dominic Tarr's SHS from Secure Scuttlebutt. Establishes mutual
+//! identity proof and derives per-direction encryption keys for Box Stream.
+//!
+//! Protocol flow:
+//!   1. Client → Server: ephemeral_pk + HMAC(network_key, ephemeral_pk)
+//!   2. Server → Client: same format (proves both know the network key)
+//!   3. Client → Server: encrypted(sign(network_key | server_eph_pk | H(shared)))
+//!   4. Server → Client: encrypted(sign(network_key | client_eph_pk | H(shared)))
+//!
+//! Security properties:
+//! - Network key as capability: wrong key → HMAC fails at step 1/2, partitioning
+//!   networks. Nodes on different keys can't even begin a handshake.
+//! - Ephemeral DH (X25519) provides forward secrecy.
+//! - Ed25519 signatures prove long-term identity after shared secret is established.
+//! - Directional session keys (client→server ≠ server→client) prevent reflection.
+
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use ed25519_dalek::{Signature, Signer, Verifier};

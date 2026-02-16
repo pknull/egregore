@@ -1,3 +1,15 @@
+//! Egregore relay — store-and-forward bridge for gossip networks.
+//!
+//! Differs from a node in three ways:
+//! 1. HTTP binds to 0.0.0.0 (publicly accessible, serves peer directory).
+//! 2. Gossip requires authorization: peers must POST /v1/register first.
+//!    AuthorizeFn checks known_peers.authorized before accepting gossip.
+//! 3. TTL eviction loop: messages older than --ttl-days are purged hourly.
+//!
+//! The relay has no outgoing sync loop. It accepts incoming connections from
+//! registered agents, replicates their feeds, and serves them to other agents
+//! and HTTP readers. Effectively a NAT bridge for gossip meshes.
+
 mod api;
 mod config;
 mod eviction;

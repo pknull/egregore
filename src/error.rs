@@ -1,3 +1,5 @@
+//! Error types — identity, feed integrity, crypto, storage, and peer communication.
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

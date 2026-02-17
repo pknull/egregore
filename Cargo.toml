@@ -54,6 +54,10 @@ base64 = "0.22"
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Streaming
+async-stream = "0.3"
+futures = "0.3"
+
 # HTTP client (for adapters/examples)
 reqwest = { version = "0.12", features = ["json"] }
 

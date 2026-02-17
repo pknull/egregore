@@ -67,6 +67,8 @@ mod hex {
 #[derive(Debug, Clone, Default)]
 pub struct FeedQuery {
     pub author: Option<PublicId>,
+    /// Exclude messages from this author (used for "others only" queries).
+    pub exclude_author: Option<PublicId>,
     pub content_type: Option<String>,
     pub tag: Option<String>,
     pub limit: Option<u32>,

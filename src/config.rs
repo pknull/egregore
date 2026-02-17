@@ -5,6 +5,19 @@ use std::path::PathBuf;
 /// Different keys create isolated networks.
 const DEFAULT_NETWORK_KEY: &str = "egregore-network-v1";
 
+/// Hook configuration for event-driven message handling.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HookConfig {
+    /// Path to executable called when a message arrives.
+    /// Message JSON is passed on stdin.
+    pub on_message: Option<PathBuf>,
+    /// Optional content type filter (e.g., "query", "insight").
+    /// If set, hook only fires for messages matching this type.
+    pub filter_content_type: Option<String>,
+    /// Timeout in seconds for hook execution (default: 30).
+    pub timeout_secs: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub data_dir: PathBuf,
@@ -15,6 +28,9 @@ pub struct Config {
     pub peers: Vec<String>,
     pub lan_discovery: bool,
     pub discovery_port: u16,
+    /// Hook configuration for event-driven handlers.
+    #[serde(default)]
+    pub hooks: HookConfig,
 }
 
 impl Default for Config {
@@ -28,6 +44,7 @@ impl Default for Config {
             peers: Vec::new(),
             lan_discovery: false,
             discovery_port: 7656,
+            hooks: HookConfig::default(),
         }
     }
 }

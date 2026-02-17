@@ -1,15 +1,16 @@
-//! HTTP API — localhost-only REST + MCP JSON-RPC endpoint.
+//! HTTP API — localhost-only REST + MCP JSON-RPC + SSE streaming.
 //!
 //! All endpoints bind to 127.0.0.1 (binding happens in main.rs). Only local
 //! processes can access the API — there is no authentication on the HTTP layer.
 //! The security boundary is the loopback interface itself.
 //!
 //! Routes: feed queries, publish, peer management, follows, identity, status,
-//! and the MCP JSON-RPC 2.0 endpoint at POST /mcp.
+//! the MCP JSON-RPC 2.0 endpoint at POST /mcp, and SSE streaming at GET /v1/events.
 
 pub mod mcp;
 pub mod mcp_tools;
 pub mod response;
+pub mod routes_events;
 pub mod routes_feed;
 pub mod routes_follows;
 pub mod routes_identity;
@@ -58,6 +59,7 @@ pub fn router(state: AppState) -> Router {
             post(routes_follows::add_follow).delete(routes_follows::remove_follow),
         )
         .route("/v1/follows", get(routes_follows::get_follows))
+        .route("/v1/events", get(routes_events::subscribe))
         .route(
             "/mcp",
             post(mcp::mcp_handler)

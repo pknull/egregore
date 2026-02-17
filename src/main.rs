@@ -14,10 +14,11 @@ use std::sync::Arc;
 use clap::Parser;
 use std::path::PathBuf;
 
-use egregore::config::Config;
+use egregore::config::{Config, HookConfig};
 use egregore::feed::engine::FeedEngine;
 use egregore::feed::store::FeedStore;
 use egregore::gossip;
+use egregore::hooks::HookExecutor;
 use egregore::identity::Identity;
 
 #[derive(Parser)]
@@ -54,6 +55,14 @@ struct Cli {
     /// UDP port for LAN discovery announcements
     #[arg(long, default_value_t = 7656)]
     discovery_port: u16,
+
+    /// Path to hook script called when messages arrive
+    #[arg(long)]
+    hook_on_message: Option<PathBuf>,
+
+    /// Filter hook to specific content type (e.g., "query")
+    #[arg(long)]
+    hook_filter_type: Option<String>,
 }
 
 #[tokio::main]
@@ -67,6 +76,12 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    let hooks = HookConfig {
+        on_message: cli.hook_on_message,
+        filter_content_type: cli.hook_filter_type,
+        timeout_secs: Some(30),
+    };
+
     let config = Config {
         data_dir: cli.data_dir,
         port: cli.port,
@@ -75,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
         peers: cli.peer,
         lan_discovery: cli.lan_discovery,
         discovery_port: cli.discovery_port,
+        hooks,
         ..Config::default()
     };
 
@@ -99,6 +115,21 @@ async fn main() -> anyhow::Result<()> {
     // Init feed store
     let store = FeedStore::open(&config.db_path())?;
     let engine = Arc::new(FeedEngine::new(store));
+
+    // Start hook executor if configured
+    if let Some(executor) = HookExecutor::new(config.hooks.clone()) {
+        let mut hook_rx = engine.subscribe();
+        tracing::info!(
+            hook = ?config.hooks.on_message,
+            filter = ?config.hooks.filter_content_type,
+            "hook executor enabled"
+        );
+        tokio::spawn(async move {
+            while let Ok(msg) = hook_rx.recv().await {
+                executor.execute(&msg).await;
+            }
+        });
+    }
 
     // Build API
     let state = api::AppState {

@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::Utc;
+use tokio::sync::broadcast;
 
 use crate::error::{EgreError, Result};
 use crate::feed::models::{FeedQuery, Message, UnsignedMessage};
@@ -11,17 +14,34 @@ use crate::identity::{sign_bytes, verify_signature, Identity};
 const MAX_CONTENT_SIZE: usize = 64 * 1024;
 
 /// Feed engine: append with chain validation, read, verify, search.
+///
+/// Emits events via broadcast channel when messages are published or ingested.
+/// Subscribe with `engine.subscribe()` to receive real-time notifications.
 pub struct FeedEngine {
     store: FeedStore,
+    event_tx: broadcast::Sender<Arc<Message>>,
 }
 
 impl FeedEngine {
     pub fn new(store: FeedStore) -> Self {
-        Self { store }
+        let (event_tx, _) = broadcast::channel(1024);
+        Self { store, event_tx }
     }
 
     pub fn store(&self) -> &FeedStore {
         &self.store
+    }
+
+    /// Subscribe to message events. Returns a receiver that will receive
+    /// Arc<Message> for each published or ingested message.
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Message>> {
+        self.event_tx.subscribe()
+    }
+
+    /// Emit a message event to all subscribers.
+    fn emit(&self, msg: &Message) {
+        // Ignore send errors (no subscribers)
+        let _ = self.event_tx.send(Arc::new(msg.clone()));
     }
 
     /// Publish a new message to the local identity's feed.
@@ -90,6 +110,7 @@ impl FeedEngine {
         };
 
         self.store.insert_message(&message, true)?;
+        self.emit(&message);
         Ok(message)
     }
 
@@ -137,7 +158,9 @@ impl FeedEngine {
         Self::validate_previous_field(msg)?;
 
         let chain_valid = self.validate_chain_links(msg)?;
-        self.store.insert_message(msg, chain_valid)
+        self.store.insert_message(msg, chain_valid)?;
+        self.emit(msg);
+        Ok(())
     }
 
     /// Verify Ed25519 signature and content hash integrity.

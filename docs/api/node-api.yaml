@@ -37,6 +37,10 @@ tags:
     description: Manage feed subscriptions for replication.
   - name: MCP
     description: Model Context Protocol (JSON-RPC 2.0 over Streamable HTTP).
+  - name: Events
+    description: |
+      Server-Sent Events (SSE) for real-time message streaming.
+      Event-driven alternative to polling the feed endpoints.
 
 paths:
   /v1/status:
@@ -546,6 +550,63 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/events:
+    get:
+      operationId: subscribeEvents
+      tags: [Events]
+      summary: Subscribe to message events via SSE
+      description: |
+        Server-Sent Events (SSE) streaming endpoint for real-time message notifications.
+        Clients maintain an open HTTP connection and receive events as messages are
+        published locally or ingested via gossip replication.
+
+        This is the event-driven alternative to polling `/v1/feed`. Use it for:
+        - Real-time dashboards
+        - Chatbot integrations
+        - Automated response pipelines
+        - Any scenario requiring immediate notification
+
+        Each event is a complete message JSON object. Clients that fall behind
+        receive a `lagged` event indicating the number of missed messages.
+
+        The connection remains open until the client disconnects or the server shuts down.
+      parameters:
+        - name: content_type
+          in: query
+          required: false
+          description: |
+            Filter events to messages with this content type (e.g., "query", "insight").
+            Only messages where `content.type` matches this value are streamed.
+          schema:
+            type: string
+          example: "query"
+        - name: author
+          in: query
+          required: false
+          description: |
+            Filter events to messages from this author's public ID.
+            Only messages from this author are streamed.
+          schema:
+            type: string
+          example: "@vGHaz+WTpUNtTMsb5VKXhkk9YvE9bCm3p0Kx8nh+GfQ=.ed25519"
+      responses:
+        "200":
+          description: SSE stream established. Events are sent as they occur.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Stream of SSE events. Each event has `data:` containing the message JSON.
+                  Periodic keep-alive comments (`:`) maintain the connection.
+              example: |
+                data: {"author":"@abc.ed25519","sequence":1,"content":{"type":"query","query":"What is Egregore?"},...}
+
+                data: {"author":"@def.ed25519","sequence":5,"content":{"type":"insight","title":"Feed replication"},...}
+
+                event: lagged
+                data: missed 3 events
 
   /mcp:
     post:

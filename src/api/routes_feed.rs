@@ -2,6 +2,10 @@
 //!
 //! Messages from remote authors appear here only after gossip replication
 //! has synced them. All queries are local reads — no network calls.
+//!
+//! The `/v1/feed` endpoint excludes the local node's own messages by default,
+//! returning only messages from other authors (useful for feed watchers).
+//! Use `?include_self=true` to include own messages in the results.
 
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
@@ -17,6 +21,8 @@ pub struct FeedParams {
     pub limit: Option<u32>,
     pub offset: Option<u32>,
     pub content_type: Option<String>,
+    /// Include own messages in results (default: false).
+    pub include_self: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -25,16 +31,18 @@ pub struct SearchParams {
     pub limit: Option<u32>,
 }
 
-pub async fn get_own_feed(
+pub async fn get_feed(
     State(state): State<AppState>,
     Query(params): Query<FeedParams>,
 ) -> impl IntoResponse {
     let engine = state.engine.clone();
-    let author = state.identity.public_id();
+    let include_self = params.include_self.unwrap_or(false);
+    let self_id = state.identity.public_id();
 
     let result = tokio::task::spawn_blocking(move || {
         engine.query(&FeedQuery {
-            author: Some(author),
+            author: None,
+            exclude_author: if include_self { None } else { Some(self_id) },
             content_type: params.content_type,
             limit: params.limit,
             offset: params.offset,

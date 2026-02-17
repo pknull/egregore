@@ -39,7 +39,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/identity", get(routes_identity::get_identity))
         .route("/v1/publish", post(routes_publish::publish))
-        .route("/v1/feed", get(routes_feed::get_own_feed))
+        .route("/v1/feed", get(routes_feed::get_feed))
         .route("/v1/feed/:author", get(routes_feed::get_feed_by_author))
         .route("/v1/insights", get(routes_feed::get_insights))
         .route("/v1/insights/search", get(routes_feed::search_insights))

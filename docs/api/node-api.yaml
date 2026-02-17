@@ -155,16 +155,28 @@ paths:
 
   /v1/feed:
     get:
-      operationId: getOwnFeed
+      operationId: getFeed
       tags: [Feed]
-      summary: Get the local node's feed
+      summary: Get messages from other authors
       description: |
-        Returns messages from the local node's own feed, ordered by sequence.
-        Supports pagination and optional filtering by content type.
+        Returns messages from all authors except the local node, ordered by
+        timestamp (most recent first). This is the primary endpoint for feed
+        watchers that need to see incoming messages from peers.
+
+        Use `?include_self=true` to include the local node's own messages
+        (full archive view). Use `/v1/feed/{author}` to query a specific
+        author's feed.
       parameters:
         - $ref: "#/components/parameters/LimitParam"
         - $ref: "#/components/parameters/OffsetParam"
         - $ref: "#/components/parameters/ContentTypeParam"
+        - name: include_self
+          in: query
+          required: false
+          description: Include local node's own messages in results.
+          schema:
+            type: boolean
+            default: false
       responses:
         "200":
           description: Feed messages retrieved successfully.

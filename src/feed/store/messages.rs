@@ -121,6 +121,11 @@ impl FeedStore {
             param_values.push(Box::new(author.0.clone()));
         }
 
+        if let Some(ref exclude) = query.exclude_author {
+            sql.push_str(&format!(" AND author != ?{}", param_values.len() + 1));
+            param_values.push(Box::new(exclude.0.clone()));
+        }
+
         if let Some(ref ct) = query.content_type {
             sql.push_str(&format!(" AND content_type = ?{}", param_values.len() + 1));
             param_values.push(Box::new(ct.clone()));

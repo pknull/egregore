@@ -360,7 +360,7 @@ FTS5 is maintained automatically via INSERT/DELETE triggers on the `messages` ta
 |--------|------|-------------|
 | GET | `/v1/identity` | Node's public identity |
 | POST | `/v1/publish` | Publish a message to the local feed |
-| GET | `/v1/feed` | Own feed (paginated) |
+| GET | `/v1/feed` | Feed from others (excludes self; `?include_self=true` for all) |
 | GET | `/v1/feed/:author` | Feed by author (paginated) |
 | GET | `/v1/insights` | Messages filtered by type=insight |
 | GET | `/v1/insights/search` | Full-text search across content |

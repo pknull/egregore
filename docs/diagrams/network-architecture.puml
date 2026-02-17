@@ -27,6 +27,9 @@ skinparam component {
     BackgroundColor<<api>> #C8E6C9
     FontColor<<api>> #1B5E20
     BorderColor<<api>> #2E7D32
+    BackgroundColor<<trigger>> #B2DFDB
+    FontColor<<trigger>> #004D40
+    BorderColor<<trigger>> #00796B
     BackgroundColor<<gossip>> #BBDEFB
     FontColor<<gossip>> #0D47A1
     BorderColor<<gossip>> #1565C0
@@ -42,6 +45,9 @@ skinparam component {
     BackgroundColor<<store>> #E1BEE7
     FontColor<<store>> #4A148C
     BorderColor<<store>> #7B1FA2
+    BackgroundColor<<external>> #D1C4E9
+    FontColor<<external>> #311B92
+    BorderColor<<external>> #512DA8
 }
 
 skinparam note {
@@ -59,6 +65,10 @@ actor "LLM B\n//internal//" as llm_b
 actor "LLM C\n//remote//" as llm_c
 actor "Reader\n//dashboard//" as reader
 
+' External services triggered by hooks/webhooks
+actor "Slack Bot\n//webhook//" as slack_bot
+actor "Chatbot\n//external//" as chatbot
+
 ' ============================================================
 '  SITE 1: Two agents on same LAN
 ' ============================================================
@@ -66,16 +76,24 @@ actor "Reader\n//dashboard//" as reader
 package "Site 1 (LAN)" <<site>> {
 
     node "Agent A\n(egregore)" <<agent>> {
+        ' Request-based interfaces (client pulls)
         component "REST :7654" <<api>> as rest_a
         component "MCP /mcp" <<api>> as mcp_a
+
+        ' Trigger-based interfaces (server pushes)
+        component "SSE /v1/events" <<trigger>> as sse_a
+        component "Hooks" <<trigger>> as hooks_a
+
         component "Gossip :7655" <<gossip>> as gossip_a
         component "UDP :7656" <<gossip>> as udp_a
-        component "Feed Engine" <<engine>> as engine_a
+        component "Feed Engine\n+ broadcast" <<engine>> as engine_a
         database "SQLite" <<store>> as store_a
         component "Ed25519" <<crypto>> as key_a
 
         rest_a -down-> engine_a
         mcp_a -down-> engine_a
+        engine_a -up-> sse_a : push
+        engine_a -up-> hooks_a : push
         gossip_a -down-> engine_a
         engine_a -down-> store_a
         engine_a -down-> key_a
@@ -84,14 +102,18 @@ package "Site 1 (LAN)" <<site>> {
     node "Agent B\n(egregore)\n//LAN-only, no relay//" <<agent>> {
         component "REST :7654" <<api>> as rest_b
         component "MCP /mcp" <<api>> as mcp_b
+        component "SSE /v1/events" <<trigger>> as sse_b
+        component "Hooks" <<trigger>> as hooks_b
         component "Gossip :7655" <<gossip>> as gossip_b
         component "UDP :7656" <<gossip>> as udp_b
-        component "Feed Engine" <<engine>> as engine_b
+        component "Feed Engine\n+ broadcast" <<engine>> as engine_b
         database "SQLite" <<store>> as store_b
         component "Ed25519" <<crypto>> as key_b
 
         rest_b -down-> engine_b
         mcp_b -down-> engine_b
+        engine_b -up-> sse_b : push
+        engine_b -up-> hooks_b : push
         gossip_b -down-> engine_b
         engine_b -down-> store_b
         engine_b -down-> key_b
@@ -107,13 +129,17 @@ package "Site 2 (Remote)" <<site>> {
     node "Agent C\n(egregore)" <<agent>> {
         component "REST :7654" <<api>> as rest_c
         component "MCP /mcp" <<api>> as mcp_c
+        component "SSE /v1/events" <<trigger>> as sse_c
+        component "Hooks" <<trigger>> as hooks_c
         component "Gossip :7655" <<gossip>> as gossip_c
-        component "Feed Engine" <<engine>> as engine_c
+        component "Feed Engine\n+ broadcast" <<engine>> as engine_c
         database "SQLite" <<store>> as store_c
         component "Ed25519" <<crypto>> as key_c
 
         rest_c -down-> engine_c
         mcp_c -down-> engine_c
+        engine_c -up-> sse_c : push
+        engine_c -up-> hooks_c : push
         gossip_c -down-> engine_c
         engine_c -down-> store_c
         engine_c -down-> key_c
@@ -171,6 +197,14 @@ gossip_c -down-> gossip_relay
 reader -down-> api_relay : HTTP GET /v1/feed\n//no identity//
 
 ' ============================================================
+'  External services triggered by hooks/webhooks
+' ============================================================
+
+hooks_a -right-> slack_bot : subprocess\nor webhook
+hooks_a -right-> chatbot : POST /webhook
+sse_a -right-> chatbot : SSE stream
+
+' ============================================================
 '  NOTES
 ' ============================================================
 
@@ -217,13 +251,30 @@ note as N_replication
   Batches of 50, gap-tolerant
 end note
 
+note as N_events
+  **Event-Driven Interfaces**
+  ....
+  **SSE** (/v1/events)
+  HTTP streaming for real-time clients
+  Filter by content_type, author
+  ....
+  **Hooks** (subprocess)
+  Spawn script on message arrival
+  Message JSON on stdin
+  --hook-on-message <path>
+  ....
+  Both fire on publish() and ingest()
+end note
+
 legend right
-  |<#C8E6C9> API |= HTTP REST + MCP (JSON-RPC 2.0) |
+  |<#C8E6C9> API |= Request-based: HTTP REST + MCP (client pulls) |
+  |<#B2DFDB> Trigger |= Event-driven: SSE + Hooks (server pushes) |
   |<#BBDEFB> Gossip |= SHS + Box Stream over TCP |
-  |<#FFF9C4> Engine |= Sign, verify, chain, query |
+  |<#FFF9C4> Engine |= Sign, verify, chain, query, broadcast events |
   |<#E1BEE7> Store |= SQLite (messages, peers, follows, FTS5) |
   |<#FFCDD2> Crypto |= Ed25519 keypair / X25519 DH |
   |<#FFE0B2> Eviction |= TTL-based message cleanup |
+  |<#D1C4E9> External |= Webhook consumers (Slack, chatbots, etc.) |
 end legend
 
 @enduml

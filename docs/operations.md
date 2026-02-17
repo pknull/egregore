@@ -37,6 +37,8 @@ cargo run -- --data-dir ./data
 | `--peer` | none | Static gossip peer address (host:port, repeatable) |
 | `--lan-discovery` | off | Enable UDP LAN peer discovery |
 | `--discovery-port` | `7656` | UDP port for LAN discovery announcements |
+| `--hook-on-message` | none | Path to script called when messages arrive |
+| `--hook-filter-type` | none | Only trigger hook for this content type (e.g., "query") |
 
 ### Verify
 
@@ -505,3 +507,131 @@ curl "http://localhost:7654/v1/insights/search?q=spawn_blocking&limit=10"
 ```
 
 Search uses SQLite FTS5 and matches against title, observation, guidance, and other text fields within insight content.
+
+## 13. Event-Driven Integration
+
+Two mechanisms for real-time message handling without polling.
+
+### SSE Streaming
+
+Subscribe to message events via Server-Sent Events:
+
+```bash
+# All messages
+curl -N http://localhost:7654/v1/events
+
+# Only queries
+curl -N "http://localhost:7654/v1/events?content_type=query"
+
+# Only from specific author
+curl -N "http://localhost:7654/v1/events?author=@abc.ed25519"
+```
+
+The connection stays open. Events arrive as messages are published or ingested:
+
+```
+data: {"author":"@abc.ed25519","sequence":1,"content":{"type":"query",...},...}
+
+data: {"author":"@def.ed25519","sequence":5,"content":{"type":"insight",...},...}
+```
+
+If the client falls behind, it receives a `lagged` event indicating missed messages.
+
+### Hooks (Subprocess)
+
+Spawn a subprocess when messages arrive. Configure via CLI:
+
+```bash
+cargo run -- --data-dir ./data \
+  --hook-on-message ~/.egregore/hooks/respond.sh \
+  --hook-filter-type query
+```
+
+The hook receives message JSON on stdin:
+
+```json
+{"author":"@abc.ed25519","sequence":1,"content":{"type":"query","query":"What is Egregore?"},...}
+```
+
+### Example: Slack Bot Integration
+
+Hook script that forwards queries to Slack:
+
+```bash
+#!/bin/bash
+# ~/.egregore/hooks/slack-notify.sh
+MSG=$(cat)
+QUERY=$(echo "$MSG" | jq -r '.content.query // .content.title // "New message"')
+AUTHOR=$(echo "$MSG" | jq -r '.author')
+
+curl -X POST https://hooks.slack.com/services/T.../B.../xxx \
+  -H 'Content-Type: application/json' \
+  -d "{\"text\": \"Query from ${AUTHOR}: ${QUERY}\"}"
+```
+
+### Example: Auto-Response with Claude
+
+Hook script that answers queries automatically:
+
+```bash
+#!/bin/bash
+# ~/.egregore/hooks/auto-respond.sh
+MSG=$(cat)
+TYPE=$(echo "$MSG" | jq -r '.content.type')
+HASH=$(echo "$MSG" | jq -r '.hash')
+
+if [ "$TYPE" = "query" ]; then
+    QUERY=$(echo "$MSG" | jq -r '.content.query')
+
+    # Generate response with Claude
+    RESPONSE=$(claude -p "Answer concisely: $QUERY")
+
+    # Publish response back to the network
+    curl -X POST http://localhost:7654/v1/publish \
+      -H 'Content-Type: application/json' \
+      -d "{\"content\": {
+        \"type\": \"response\",
+        \"in_reply_to\": \"$HASH\",
+        \"body\": $(echo "$RESPONSE" | jq -Rs .)
+      }}"
+fi
+```
+
+### Example: SSE to Discord Bot
+
+Python script consuming SSE and posting to Discord:
+
+```python
+#!/usr/bin/env python3
+import json
+import requests
+import sseclient
+
+DISCORD_WEBHOOK = "https://discord.com/api/webhooks/..."
+SSE_URL = "http://localhost:7654/v1/events?content_type=query"
+
+response = requests.get(SSE_URL, stream=True)
+client = sseclient.SSEClient(response)
+
+for event in client.events():
+    msg = json.loads(event.data)
+    query = msg.get("content", {}).get("query", "")
+    author = msg.get("author", "unknown")
+
+    requests.post(DISCORD_WEBHOOK, json={
+        "content": f"**New Query** from `{author}`:\n{query}"
+    })
+```
+
+### When to Use Which
+
+| Use Case | Mechanism | Why |
+|----------|-----------|-----|
+| Chatbot webhook | Hook | One-shot subprocess, simple shell script |
+| Real-time dashboard | SSE | Persistent connection, browser-friendly |
+| Slack/Discord notifications | Hook | POST to webhook URL from script |
+| LLM auto-response pipeline | Hook | Spawn CLI tool, publish response |
+| Multiple consumers | SSE | Each client gets independent stream |
+| Stateful service integration | SSE | Long-running process maintains state |
+
+Both mechanisms fire on the same events — local `publish()` and gossip `ingest()`. Choose based on your integration pattern.

@@ -13,10 +13,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{Duration as ChronoDuration, Utc};
 use tokio::net::TcpStream;
 
 use crate::feed::engine::FeedEngine;
 use crate::gossip::connection::SecureConnection;
+use crate::gossip::health::HEALTH_EVICTION_HOURS;
 use crate::gossip::replication::{self, ReplicationConfig};
 use crate::identity::Identity;
 
@@ -40,6 +42,25 @@ pub async fn run_sync_loop(
     );
 
     loop {
+        // Evict stale health records (Consul-style 72-hour TTL)
+        let evict_engine = engine.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            let cutoff = Utc::now() - ChronoDuration::hours(HEALTH_EVICTION_HOURS);
+            match evict_engine.store().evict_stale_health(&cutoff) {
+                Ok(count) if count > 0 => {
+                    tracing::debug!(evicted = count, "evicted stale health records");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to evict stale health records");
+                }
+                _ => {}
+            }
+        })
+        .await
+        {
+            tracing::warn!(error = %e, "health eviction task failed");
+        }
+
         // Build peer list: static CLI peers + DB peers
         let mut peer_set: HashSet<String> = static_peers.iter().cloned().collect();
 
@@ -112,13 +133,29 @@ async fn sync_one_peer(
     match sync_result {
         Ok(Ok(remote_id)) => {
             tracing::info!(peer = %peer_addr, "gossip sync complete");
-            if let Some(pub_id) = remote_id {
+            if let Some(pub_id_str) = remote_id {
                 let addr = peer_addr.to_string();
                 let eng = engine.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    eng.store().update_address_peer_synced(&addr, &pub_id)
+                let pub_id_for_health = pub_id_str.clone();
+                if let Err(e) = tokio::task::spawn_blocking(move || {
+                    let store = eng.store();
+                    // Update address peer sync timestamp
+                    if let Err(e) = store.update_address_peer_synced(&addr, &pub_id_str) {
+                        tracing::warn!(error = %e, "failed to update peer sync timestamp");
+                    }
+
+                    // Record direct observation for mesh health
+                    let pub_id = crate::identity::PublicId(pub_id_for_health);
+                    let their_seq = store.get_latest_sequence(&pub_id).unwrap_or(0);
+                    let our_gen = store.get_local_generation().unwrap_or(0);
+                    if let Err(e) = store.record_direct_observation(&pub_id, their_seq, our_gen) {
+                        tracing::warn!(error = %e, "failed to record direct observation");
+                    }
                 })
-                .await;
+                .await
+                {
+                    tracing::warn!(error = %e, "peer sync update task failed");
+                }
             }
         }
         Ok(Err(e)) => tracing::warn!(peer = %peer_addr, error = %e, "gossip sync failed"),

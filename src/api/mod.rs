@@ -14,6 +14,7 @@ pub mod routes_events;
 pub mod routes_feed;
 pub mod routes_follows;
 pub mod routes_identity;
+pub mod routes_mesh;
 pub mod routes_peers;
 pub mod routes_publish;
 
@@ -54,6 +55,7 @@ pub fn router(state: AppState) -> Router {
             delete(routes_peers::delete_peer),
         )
         .route("/v1/status", get(routes_peers::get_status))
+        .route("/v1/mesh", get(routes_mesh::get_mesh))
         .route(
             "/v1/follows/:author",
             post(routes_follows::add_follow).delete(routes_follows::remove_follow),

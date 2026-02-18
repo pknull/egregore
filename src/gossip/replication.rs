@@ -1,20 +1,30 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+
+use ed25519_dalek::VerifyingKey;
 
 use crate::error::{EgreError, Result};
 use crate::feed::engine::FeedEngine;
 use crate::feed::models::Message;
 use crate::gossip::connection::SecureConnection;
+use crate::gossip::health::{clamp_observation_timestamp, PeerObservation, MAX_PEER_OBSERVATIONS};
 use crate::identity::PublicId;
 
 /// Gossip protocol messages sent over the encrypted connection.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum GossipMessage {
-    /// "I have these feeds at these sequences"
-    Have { feeds: Vec<FeedState> },
+    /// "I have these feeds at these sequences, and these peer observations"
+    Have {
+        feeds: Vec<FeedState>,
+        /// Peer health observations for mesh-wide visibility.
+        /// Empty for old nodes; new nodes include their direct observations.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peer_observations: Vec<PeerObservation>,
+    },
     /// "I want messages from these feeds after these sequences"
     Want { requests: Vec<FeedRequest> },
     /// "Here are messages you requested"
@@ -67,12 +77,27 @@ const MAX_BATCH_PAYLOAD: usize = 3800;
 /// Accounts for: {"type":"messages","messages":[...]}
 const MESSAGE_ENVELOPE_OVERHEAD: usize = 40;
 
+/// Derive a PublicId from an Ed25519 verifying key (used for peer identification).
+fn public_id_from_key(key: &VerifyingKey) -> PublicId {
+    PublicId(format!(
+        "@{}.ed25519",
+        base64::engine::general_purpose::STANDARD.encode(key.as_bytes())
+    ))
+}
+
+/// Safely truncate a public ID string for logging (avoids panic on short strings).
+fn truncate_id(id: &str) -> &str {
+    id.get(..12).unwrap_or(id)
+}
+
 /// Run replication as the initiator (client).
 pub async fn replicate_as_client(
     conn: &mut SecureConnection,
     engine: &Arc<FeedEngine>,
     config: &ReplicationConfig,
 ) -> Result<()> {
+    let remote_peer_id = public_id_from_key(&conn.remote_public_key);
+
     // Send our "have" state
     let have = build_have_message(engine).await?;
     conn.send(&serde_json::to_vec(&have)?).await?;
@@ -80,7 +105,14 @@ pub async fn replicate_as_client(
     // Receive server's "have"
     if let Some(data) = conn.recv().await? {
         let server_have: GossipMessage = serde_json::from_slice(&data)?;
-        if let GossipMessage::Have { feeds: server_feeds } = server_have {
+        if let GossipMessage::Have {
+            feeds: server_feeds,
+            peer_observations,
+        } = server_have
+        {
+            // Merge transitive observations from server
+            merge_peer_observations(engine, peer_observations, &remote_peer_id).await;
+
             let requests = build_want_requests(engine, &server_feeds, config).await?;
 
             // Always send Want (even if empty) so server's handle_peer_wants unblocks
@@ -104,6 +136,8 @@ pub async fn replicate_as_server(
     engine: &Arc<FeedEngine>,
     config: &ReplicationConfig,
 ) -> Result<()> {
+    let remote_peer_id = public_id_from_key(&conn.remote_public_key);
+
     // Receive client's "have"
     let client_have = match conn.recv().await? {
         Some(data) => serde_json::from_slice::<GossipMessage>(&data)?,
@@ -118,7 +152,14 @@ pub async fn replicate_as_server(
     handle_peer_wants(conn, engine).await?;
 
     // Figure out what we want from client's have (filtered by follows)
-    if let GossipMessage::Have { feeds: client_feeds } = client_have {
+    if let GossipMessage::Have {
+        feeds: client_feeds,
+        peer_observations,
+    } = client_have
+    {
+        // Merge transitive observations from client
+        merge_peer_observations(engine, peer_observations, &remote_peer_id).await;
+
         let requests = build_want_requests(engine, &client_feeds, config).await?;
 
         // Always send Want (even if empty) so client's handle_peer_wants unblocks
@@ -132,12 +173,17 @@ pub async fn replicate_as_server(
     Ok(())
 }
 
-/// Build a Have message from local feed state (spawn_blocking for DB access).
+/// Build a Have message from local feed state and peer observations.
 async fn build_have_message(engine: &Arc<FeedEngine>) -> Result<GossipMessage> {
     let eng = engine.clone();
-    let feeds = tokio::task::spawn_blocking(move || eng.store().get_all_feeds())
-        .await
-        .map_err(|e| EgreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+    let (feeds, peer_observations) = tokio::task::spawn_blocking(move || {
+        let store = eng.store();
+        let feeds = store.get_all_feeds()?;
+        let observations = store.get_direct_observations().unwrap_or_default();
+        Ok::<_, EgreError>((feeds, observations))
+    })
+    .await
+    .map_err(|e| EgreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
 
     let feed_states: Vec<FeedState> = feeds
         .into_iter()
@@ -149,11 +195,78 @@ async fn build_have_message(engine: &Arc<FeedEngine>) -> Result<GossipMessage> {
 
     tracing::debug!(
         feed_count = feed_states.len(),
-        feeds = ?feed_states.iter().map(|f| (&f.author.0[..12], f.latest_sequence)).collect::<Vec<_>>(),
+        observation_count = peer_observations.len(),
+        feeds = ?feed_states.iter().map(|f| (truncate_id(&f.author.0), f.latest_sequence)).collect::<Vec<_>>(),
         "built Have message"
     );
 
-    Ok(GossipMessage::Have { feeds: feed_states })
+    Ok(GossipMessage::Have {
+        feeds: feed_states,
+        peer_observations,
+    })
+}
+
+/// Merge peer observations received from a remote peer.
+/// Applies limits and timestamp validation to protect against malicious peers.
+async fn merge_peer_observations(
+    engine: &Arc<FeedEngine>,
+    observations: Vec<PeerObservation>,
+    reported_by: &PublicId,
+) {
+    if observations.is_empty() {
+        return;
+    }
+
+    // Limit observation count to prevent memory exhaustion (Serf-style bounds)
+    let obs_count = observations.len();
+    if obs_count > MAX_PEER_OBSERVATIONS {
+        tracing::warn!(
+            received = obs_count,
+            limit = MAX_PEER_OBSERVATIONS,
+            "peer sent too many observations, truncating"
+        );
+    }
+    let observations: Vec<PeerObservation> = observations
+        .into_iter()
+        .take(MAX_PEER_OBSERVATIONS)
+        .collect();
+
+    let eng = engine.clone();
+    let reporter = reported_by.clone();
+    let truncated_count = observations.len();
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        let store = eng.store();
+        let mut merged = 0;
+        let mut rejected_stale = 0;
+
+        for mut obs in observations {
+            // Validate and clamp timestamp (reject if too old, clamp if in future)
+            match clamp_observation_timestamp(obs.last_seen_at) {
+                Some(clamped) => {
+                    obs.last_seen_at = clamped;
+                    if store.merge_transitive_observation(&obs, &reporter).is_ok() {
+                        merged += 1;
+                    }
+                }
+                None => {
+                    // Observation too old to be useful
+                    rejected_stale += 1;
+                }
+            }
+        }
+
+        tracing::debug!(
+            received = truncated_count,
+            merged = merged,
+            rejected_stale = rejected_stale,
+            reporter = truncate_id(&reporter.0),
+            "merged peer observations"
+        );
+    })
+    .await
+    {
+        tracing::warn!(error = %e, "peer observation merge task failed");
+    }
 }
 
 /// Build Want requests by comparing remote feeds against local state.
@@ -164,7 +277,7 @@ async fn build_want_requests(
 ) -> Result<Vec<FeedRequest>> {
     tracing::debug!(
         remote_feed_count = remote_feeds.len(),
-        remote_feeds = ?remote_feeds.iter().map(|f| (&f.author.0[..12], f.latest_sequence)).collect::<Vec<_>>(),
+        remote_feeds = ?remote_feeds.iter().map(|f| (truncate_id(&f.author.0), f.latest_sequence)).collect::<Vec<_>>(),
         "received peer Have"
     );
 
@@ -188,7 +301,7 @@ async fn build_want_requests(
             // Use contiguous sequence to detect gaps needing backfill
             let our_contiguous = store.get_latest_contiguous_sequence(author)?;
             tracing::debug!(
-                author = &author.0[..12],
+                author = truncate_id(&author.0),
                 remote_seq = remote_seq,
                 our_contiguous = our_contiguous,
                 "comparing feed state"
@@ -202,7 +315,7 @@ async fn build_want_requests(
         }
         tracing::debug!(
             request_count = requests.len(),
-            requests = ?requests.iter().map(|r| (&r.author.0[..12], r.after_sequence)).collect::<Vec<_>>(),
+            requests = ?requests.iter().map(|r| (truncate_id(&r.author.0), r.after_sequence)).collect::<Vec<_>>(),
             "built Want requests"
         );
         Ok(requests)
@@ -279,7 +392,7 @@ async fn handle_peer_wants(
         if let GossipMessage::Want { requests } = msg {
             tracing::debug!(
                 request_count = requests.len(),
-                requests = ?requests.iter().map(|r| (&r.author.0[..12], r.after_sequence)).collect::<Vec<_>>(),
+                requests = ?requests.iter().map(|r| (truncate_id(&r.author.0), r.after_sequence)).collect::<Vec<_>>(),
                 "received peer Want"
             );
             let mut total_sent: usize = 0;
@@ -299,7 +412,7 @@ async fn handle_peer_wants(
 
                     let batch_len = messages.len();
                     tracing::debug!(
-                        author = &req.author.0[..12],
+                        author = truncate_id(&req.author.0),
                         after_seq = after_seq,
                         batch_len = batch_len,
                         "fetched messages for Want"

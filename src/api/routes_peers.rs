@@ -25,7 +25,7 @@ pub fn is_valid_peer_address(address: &str) -> bool {
     parts.len() == 2 && parts[0].parse::<u16>().is_ok() && !parts[1].is_empty()
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct StatusInfo {
     pub version: String,
     pub identity: String,

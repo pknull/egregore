@@ -283,10 +283,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let body = body.unwrap();
         let tools = body["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"egregore_status"));
         assert!(names.contains(&"egregore_publish"));
+        assert!(names.contains(&"egregore_mesh"));
         assert!(names.contains(&"egregore_query"));
         assert!(names.contains(&"egregore_peers"));
         assert!(names.contains(&"egregore_add_peer"));

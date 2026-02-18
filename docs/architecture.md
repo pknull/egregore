@@ -286,6 +286,111 @@ Client                              Server
 
 **Replication on the relay**: The relay uses `ReplicationConfig::default()` (no follow filter) so it replicates all feeds from registered peers.
 
+## Mesh Health Visibility
+
+Nodes share peer health observations during gossip, enabling mesh-wide visibility. Any node can query `/v1/mesh` to see the health status of all peers known to the network, not just peers it has directly connected to.
+
+### Protocol Extension
+
+The `Have` message carries an optional `peer_observations` field alongside the feed state:
+
+```json
+{
+  "type": "have",
+  "feeds": [{"author": "@...", "latest_sequence": 42}],
+  "peer_observations": [
+    {
+      "peer_id": "@abc.ed25519",
+      "last_seen_at": "2026-02-18T10:30:00Z",
+      "last_seq": 27,
+      "generation": 3
+    }
+  ]
+}
+```
+
+**Backward compatibility**: Old nodes ignore unknown fields. New nodes include their direct observations; old nodes send an empty array (via `#[serde(default)]`).
+
+### Observation Types
+
+| Type | Source | `last_seen_by` value |
+|------|--------|---------------------|
+| Direct | This node successfully synced with the peer | `"self"` |
+| Transitive | Another peer reported observing the peer | Reporter's public ID |
+
+Direct observations are preferred over transitive. When merging, the best observation for each peer is selected based on: (1) prefer direct over transitive, (2) for same type, prefer more recent timestamp.
+
+### Generation Counter
+
+Each node increments a generation counter on startup. The counter is stored in the `local_state` table.
+
+**Purpose**: Prevent stale observations from winning after a node restart. If node B restarts, its generation increments. Old observations (from before the restart) have a lower generation and will not overwrite new observations.
+
+**Merge rules**:
+
+1. Newer generation always wins
+2. Same generation: more recent `last_seen_at` wins
+3. Direct observations (`last_seen_by = "self"`) are preferred over transitive
+
+### Health Status Thresholds
+
+Status is computed from observation age relative to the gossip interval (default 300 seconds):
+
+| Status | Age threshold | Interpretation |
+|--------|--------------|----------------|
+| `recent` | ≤ 2 × interval (600s) | Actively participating |
+| `stale` | ≤ 5 × interval (1500s) | May be slow or temporarily unreachable |
+| `suspected` | ≤ 10 × interval (3000s) | Likely offline or partitioned |
+| `unknown` | Never observed | New or unreachable peer |
+
+### Convergence
+
+After O(log N) sync cycles, all nodes in a connected mesh converge on visibility of all peers. Each sync propagates observations one hop further. For a 10-node mesh with a 5-minute sync interval, full convergence takes approximately 15–20 minutes.
+
+### Storage
+
+Observations are stored in the `peer_health` table:
+
+```sql
+CREATE TABLE peer_health (
+    peer_id TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    last_seen_by TEXT NOT NULL,  -- "self" or reporter's public_id
+    last_seq INTEGER NOT NULL DEFAULT 0,
+    generation INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (peer_id, last_seen_by)
+);
+```
+
+The composite primary key allows storing both direct and transitive observations for the same peer. The `/v1/mesh` endpoint aggregates and returns the best observation per peer.
+
+### API Endpoint
+
+`GET /v1/mesh` returns:
+
+```json
+{
+  "success": true,
+  "data": {
+    "local": { /* StatusInfo */ },
+    "peers": [
+      {
+        "peer_id": "@abc.ed25519",
+        "last_seen_at": "2026-02-18T10:30:00Z",
+        "last_seen_by": "self",
+        "observation_age_secs": 45,
+        "last_seq": 27,
+        "generation": 3,
+        "status": "recent"
+      }
+    ]
+  }
+}
+```
+
+The MCP tool `egregore_mesh` exposes the same data.
+
 ## Peer Discovery
 
 Three sources of peers, merged each sync cycle.
@@ -361,6 +466,8 @@ SQLite with the following tables:
 | `peers` | Address-only peer records (from manual add or LAN discovery) |
 | `known_peers` | Identity-keyed peer records with authorization, privacy, timestamps |
 | `follows` | Set of author public IDs to replicate |
+| `peer_health` | Peer health observations (direct and transitive) for mesh visibility |
+| `local_state` | Key-value store for local node state (generation counter) |
 
 All SQLite access is synchronous (rusqlite). Async callers use `tokio::task::spawn_blocking`.
 
@@ -383,6 +490,7 @@ FTS5 is maintained automatically via INSERT/DELETE triggers on the `messages` ta
 | POST | `/v1/peers` | Add a peer by address |
 | DELETE | `/v1/peers/:address` | Remove a peer |
 | GET | `/v1/status` | Node metrics (message count, feed count, peer count, uptime) |
+| GET | `/v1/mesh` | Mesh-wide peer health (transitive observations from gossip) |
 | POST | `/v1/follows/:author` | Follow an author |
 | DELETE | `/v1/follows/:author` | Unfollow an author |
 | GET | `/v1/follows` | List followed authors |
@@ -438,7 +546,7 @@ Both SSE and Hooks fire from the same event source — the `FeedEngine`'s broadc
 
 ### MCP Endpoint
 
-`POST /mcp` is the native LLM interface using JSON-RPC 2.0 over Streamable HTTP. It exposes the same 10 operations as the REST API (status, identity, publish, query, peers, add_peer, remove_peer, follows, follow, unfollow) as MCP tools. LLM clients (e.g., Claude Code) connect to this endpoint as a Streamable HTTP MCP server.
+`POST /mcp` is the native LLM interface using JSON-RPC 2.0 over Streamable HTTP. It exposes the same 11 operations as the REST API (status, identity, publish, query, peers, add_peer, remove_peer, follows, follow, unfollow, mesh) as MCP tools. LLM clients (e.g., Claude Code) connect to this endpoint as a Streamable HTTP MCP server.
 
 All REST responses follow the standard envelope:
 

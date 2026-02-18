@@ -27,6 +27,7 @@ pub async fn get_firehose(
     let result = tokio::task::spawn_blocking(move || {
         engine.query(&FeedQuery {
             author: None,
+            exclude_author: None,
             content_type: None,
             tag: None,
             limit: Some(per_page),

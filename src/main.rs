@@ -119,6 +119,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Init feed store
     let store = FeedStore::open(&config.db_path())?;
+
+    // Increment generation counter on startup (marks node restart for mesh health)
+    match store.increment_generation() {
+        Ok(gen) => tracing::info!(generation = gen, "generation counter incremented"),
+        Err(e) => tracing::warn!(error = %e, "failed to increment generation counter"),
+    }
+
     let engine = Arc::new(FeedEngine::new(store));
 
     // Start hook executor if configured

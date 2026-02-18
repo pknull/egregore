@@ -83,6 +83,7 @@ async fn serve_malicious_messages(
             author: victim_author,
             latest_sequence: messages.len() as u64,
         }],
+        peer_observations: vec![],
     };
     conn.send(&serde_json::to_vec(&have).unwrap())
         .await

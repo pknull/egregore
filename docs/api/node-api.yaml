@@ -35,6 +35,11 @@ tags:
     description: Manage gossip peer connections.
   - name: Follows
     description: Manage feed subscriptions for replication.
+  - name: Mesh
+    description: |
+      Mesh-wide peer health visibility. Returns aggregated observations from
+      gossip replication, providing transitive visibility into all known peers
+      across the network.
   - name: MCP
     description: Model Context Protocol (JSON-RPC 2.0 over Streamable HTTP).
   - name: Events
@@ -551,6 +556,74 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /v1/mesh:
+    get:
+      operationId: getMesh
+      tags: [Mesh]
+      summary: Get mesh-wide peer health
+      description: |
+        Returns aggregated peer health information from gossip replication.
+        This endpoint provides transitive visibility into all peers known to
+        the network, not just peers this node has directly connected to.
+
+        Each node shares its direct observations during gossip sync. After
+        O(log N) sync cycles, all nodes converge on visibility of all peers.
+
+        **Health status thresholds** (based on gossip interval):
+        - `recent`: Seen within 2 sync intervals
+        - `stale`: Seen within 5 sync intervals
+        - `suspected`: Seen within 10 sync intervals
+        - `unknown`: Never seen
+
+        The `last_seen_by` field indicates the observation source:
+        - `self`: Direct observation from this node's gossip connection
+        - `@<base64>.ed25519`: Transitive observation reported by another peer
+
+        The `generation` counter increments each time a node restarts. When
+        merging observations, newer generations always win; for the same
+        generation, more recent timestamps win.
+      responses:
+        "200":
+          description: Mesh health information retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeshHealthResponse"
+              example:
+                success: true
+                data:
+                  local:
+                    version: "0.1.0"
+                    identity: "@vGHaz+WTpUNtTMsb5VKXhkk9YvE9bCm3p0Kx8nh+GfQ=.ed25519"
+                    port: 7654
+                    gossip_port: 7655
+                    peer_count: 3
+                    message_count: 142
+                    feed_count: 5
+                    follow_count: 4
+                    uptime_secs: 3600
+                  peers:
+                    - peer_id: "@abc123=.ed25519"
+                      last_seen_at: "2026-02-18T10:30:00Z"
+                      last_seen_by: "self"
+                      observation_age_secs: 45
+                      last_seq: 27
+                      generation: 3
+                      status: recent
+                    - peer_id: "@def456=.ed25519"
+                      last_seen_at: "2026-02-18T10:25:00Z"
+                      last_seen_by: "@abc123=.ed25519"
+                      observation_age_secs: 345
+                      last_seq: 12
+                      generation: 1
+                      status: stale
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /v1/events:
     get:
       operationId: subscribeEvents
@@ -616,7 +689,7 @@ paths:
       description: |
         Model Context Protocol endpoint using JSON-RPC 2.0 over Streamable HTTP.
         This is the native LLM integration interface, exposing the same capabilities
-        as the REST API through 10 MCP tools.
+        as the REST API through 11 MCP tools.
 
         Supported methods:
         - `initialize` — Returns server capabilities and protocol version
@@ -926,6 +999,71 @@ components:
           description: Seconds since the node process started.
           example: 3600
 
+    MeshPeerInfo:
+      type: object
+      description: Health information for a single peer in the mesh.
+      required:
+        - peer_id
+        - last_seen_by
+        - last_seq
+        - generation
+        - status
+      properties:
+        peer_id:
+          type: string
+          description: Public ID of the observed peer (`@<base64>.ed25519`).
+          example: "@abc123=.ed25519"
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: RFC 3339 timestamp of the last successful sync with this peer. Null if never observed.
+          example: "2026-02-18T10:30:00Z"
+        last_seen_by:
+          type: string
+          description: |
+            Source of this observation. `self` for direct observation from
+            this node's gossip connection, or the reporter's public ID for
+            transitive observations learned from other peers.
+          example: "self"
+        observation_age_secs:
+          type: integer
+          format: uint64
+          nullable: true
+          description: Seconds since the observation was recorded. Null if never observed.
+          example: 45
+        last_seq:
+          type: integer
+          format: uint64
+          description: Latest sequence number observed in this peer's feed.
+          example: 27
+        generation:
+          type: integer
+          format: uint32
+          description: |
+            Restart counter for this peer. Increments each time the peer
+            restarts. Used to prevent stale observations from overwriting
+            fresh data after a restart.
+          example: 3
+        status:
+          $ref: "#/components/schemas/PeerHealthStatus"
+
+    PeerHealthStatus:
+      type: string
+      description: |
+        Health status based on observation age relative to the gossip interval.
+        Thresholds are configured per-node but typically:
+        - `recent`: Within 2 sync intervals
+        - `stale`: Within 5 sync intervals
+        - `suspected`: Within 10 sync intervals
+        - `unknown`: Never observed
+      enum:
+        - recent
+        - stale
+        - suspected
+        - unknown
+      example: recent
+
     IdentityInfo:
       type: object
       required: [public_id, x25519_public]
@@ -1155,6 +1293,27 @@ components:
           enum: [true]
         data:
           $ref: "#/components/schemas/StatusInfo"
+
+    MeshHealthResponse:
+      type: object
+      description: Mesh-wide peer health information.
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          type: object
+          required: [local, peers]
+          properties:
+            local:
+              $ref: "#/components/schemas/StatusInfo"
+              description: Local node status.
+            peers:
+              type: array
+              items:
+                $ref: "#/components/schemas/MeshPeerInfo"
+              description: Health information for all known peers in the mesh.
 
     IdentityResponse:
       type: object

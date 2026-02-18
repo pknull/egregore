@@ -11,6 +11,7 @@
 //! Both contribute to the sync loop's peer list via `list_all_syncable_addresses()`
 //! (SQL UNION, deduplicated).
 
+mod health;
 mod messages;
 mod peers;
 
@@ -94,6 +95,21 @@ const SCHEMA_DDL: &str = "
         first_seen TEXT NOT NULL, last_connected TEXT, last_synced TEXT
     );
     CREATE TABLE IF NOT EXISTS follows (author TEXT PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS peer_health (
+        peer_id TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        last_seen_by TEXT NOT NULL,
+        last_seq INTEGER NOT NULL DEFAULT 0,
+        generation INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (peer_id, last_seen_by)
+    );
+    CREATE INDEX IF NOT EXISTS idx_peer_health_peer ON peer_health(peer_id);
+    CREATE INDEX IF NOT EXISTS idx_peer_health_updated ON peer_health(updated_at);
+    CREATE TABLE IF NOT EXISTS local_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
 ";
 
 impl FeedStore {
@@ -130,6 +146,7 @@ impl FeedStore {
     }
 
     fn run_migrations(conn: &Connection) -> Result<()> {
+        // Migration: add chain_valid column
         let has_chain_valid: bool = conn
             .prepare("SELECT chain_valid FROM messages LIMIT 0")
             .is_ok();
@@ -138,6 +155,40 @@ impl FeedStore {
                 "ALTER TABLE messages ADD COLUMN chain_valid INTEGER NOT NULL DEFAULT 1;",
             )?;
         }
+
+        // Migration: add peer_health table
+        let has_peer_health: bool = conn
+            .prepare("SELECT 1 FROM peer_health LIMIT 0")
+            .is_ok();
+        if !has_peer_health {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS peer_health (
+                    peer_id TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    last_seen_by TEXT NOT NULL,
+                    last_seq INTEGER NOT NULL DEFAULT 0,
+                    generation INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (peer_id, last_seen_by)
+                );
+                CREATE INDEX IF NOT EXISTS idx_peer_health_peer ON peer_health(peer_id);
+                CREATE INDEX IF NOT EXISTS idx_peer_health_updated ON peer_health(updated_at);",
+            )?;
+        }
+
+        // Migration: add local_state table
+        let has_local_state: bool = conn
+            .prepare("SELECT 1 FROM local_state LIMIT 0")
+            .is_ok();
+        if !has_local_state {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS local_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -266,7 +317,7 @@ impl FeedStore {
     }
 }
 
-fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .ok()

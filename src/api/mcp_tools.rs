@@ -1,4 +1,4 @@
-//! MCP tool definitions and handlers — 10 tools wrapping the REST API.
+//! MCP tool definitions and handlers — 11 tools wrapping the REST API.
 //!
 //! Each tool maps 1:1 to a REST endpoint. Tool schemas define the JSON
 //! input parameters; handlers delegate to the same FeedEngine/FeedStore
@@ -7,6 +7,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use super::routes_mesh;
 use super::routes_peers;
 use super::AppState;
 use egregore::feed::models::FeedQuery;
@@ -201,6 +202,15 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["author"]
             }),
         },
+        ToolDefinition {
+            name: "egregore_mesh",
+            description: "Get mesh-wide peer health status showing all known peers, \
+                their last-seen times, and health status (recent/stale/suspected)",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
     ]
 }
 
@@ -216,6 +226,7 @@ pub async fn dispatch_tool(name: &str, args: Value, state: &AppState) -> ToolCal
         "egregore_follows" => tool_follows(state).await,
         "egregore_follow" => tool_follow(args, state).await,
         "egregore_unfollow" => tool_unfollow(args, state).await,
+        "egregore_mesh" => tool_mesh(state).await,
         _ => ToolCallResult::error(format!("Unknown tool: {name}")),
     }
 }
@@ -378,4 +389,9 @@ async fn tool_unfollow(args: Value, state: &AppState) -> ToolCallResult {
     ToolCallResult::from_blocking(result, |()| {
         ToolCallResult::text(serde_json::json!({ "unfollowed": author }).to_string())
     })
+}
+
+async fn tool_mesh(state: &AppState) -> ToolCallResult {
+    let mesh = routes_mesh::build_mesh_health(state).await;
+    ToolCallResult::text(serde_json::to_string_pretty(&mesh).unwrap())
 }

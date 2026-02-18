@@ -11,6 +11,8 @@
 //!
 //! Used by gossip/client.rs (outgoing sync) and gossip/server.rs (incoming).
 
+use std::time::Duration;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -32,6 +34,8 @@ const FRAME_PREFIX_CONTINUATION: u8 = 0x01;
 const MAX_ASSEMBLED_SIZE: usize = 128 * 1024;
 /// Maximum frame size accepted from peer.
 const MAX_FRAME_SIZE: usize = 65536;
+/// Read timeout per frame (prevents slowloris-style connection exhaustion).
+const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// An authenticated, encrypted connection.
 pub struct SecureConnection {
@@ -179,14 +183,21 @@ impl SecureConnection {
 
         loop {
             let mut len_buf = [0u8; 4];
-            match self.stream.read_exact(&mut len_buf).await {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            match tokio::time::timeout(FRAME_READ_TIMEOUT, self.stream.read_exact(&mut len_buf))
+                .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     // Clean connection close
                     return Ok(None);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     return Err(EgreError::Io(e));
+                }
+                Err(_) => {
+                    return Err(EgreError::Peer {
+                        reason: "read timeout".into(),
+                    });
                 }
             }
 
@@ -203,7 +214,11 @@ impl SecureConnection {
             }
 
             let mut frame = vec![0u8; frame_len];
-            self.stream.read_exact(&mut frame).await?;
+            tokio::time::timeout(FRAME_READ_TIMEOUT, self.stream.read_exact(&mut frame))
+                .await
+                .map_err(|_| EgreError::Peer {
+                    reason: "read timeout".into(),
+                })??;
 
             // Minimum frame size: encrypted header (34 bytes)
             if frame.len() < 34 {

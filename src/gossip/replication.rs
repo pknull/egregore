@@ -57,6 +57,8 @@ const BATCH_SIZE: u32 = 50;
 const MAX_MESSAGES_PER_SESSION: usize = 10_000;
 const MAX_MESSAGES_PER_FRAME: usize = 200;
 const MAX_WANT_REQUESTS: usize = 500;
+/// Maximum payload size for Box Stream (4096 bytes with some margin for envelope)
+const MAX_FRAME_SIZE: usize = 3800;
 
 /// Run replication as the initiator (client).
 pub async fn replicate_as_client(
@@ -130,15 +132,21 @@ async fn build_have_message(engine: &Arc<FeedEngine>) -> Result<GossipMessage> {
         .await
         .map_err(|e| EgreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
 
-    Ok(GossipMessage::Have {
-        feeds: feeds
-            .into_iter()
-            .map(|(author, seq)| FeedState {
-                author,
-                latest_sequence: seq,
-            })
-            .collect(),
-    })
+    let feed_states: Vec<FeedState> = feeds
+        .into_iter()
+        .map(|(author, seq)| FeedState {
+            author,
+            latest_sequence: seq,
+        })
+        .collect();
+
+    tracing::debug!(
+        feed_count = feed_states.len(),
+        feeds = ?feed_states.iter().map(|f| (&f.author.0[..12], f.latest_sequence)).collect::<Vec<_>>(),
+        "built Have message"
+    );
+
+    Ok(GossipMessage::Have { feeds: feed_states })
 }
 
 /// Build Want requests by comparing remote feeds against local state.
@@ -147,6 +155,12 @@ async fn build_want_requests(
     remote_feeds: &[FeedState],
     config: &ReplicationConfig,
 ) -> Result<Vec<FeedRequest>> {
+    tracing::debug!(
+        remote_feed_count = remote_feeds.len(),
+        remote_feeds = ?remote_feeds.iter().map(|f| (&f.author.0[..12], f.latest_sequence)).collect::<Vec<_>>(),
+        "received peer Have"
+    );
+
     // Filter by follows first (no DB needed)
     let candidates: Vec<(PublicId, u64)> = remote_feeds
         .iter()
@@ -155,6 +169,7 @@ async fn build_want_requests(
         .collect();
 
     if candidates.is_empty() {
+        tracing::debug!("no candidate feeds after follow filter");
         return Ok(Vec::new());
     }
 
@@ -165,6 +180,12 @@ async fn build_want_requests(
         for (author, remote_seq) in &candidates {
             // Use contiguous sequence to detect gaps needing backfill
             let our_contiguous = store.get_latest_contiguous_sequence(author)?;
+            tracing::debug!(
+                author = &author.0[..12],
+                remote_seq = remote_seq,
+                our_contiguous = our_contiguous,
+                "comparing feed state"
+            );
             if *remote_seq > our_contiguous {
                 requests.push(FeedRequest {
                     author: author.clone(),
@@ -172,6 +193,11 @@ async fn build_want_requests(
                 });
             }
         }
+        tracing::debug!(
+            request_count = requests.len(),
+            requests = ?requests.iter().map(|r| (&r.author.0[..12], r.after_sequence)).collect::<Vec<_>>(),
+            "built Want requests"
+        );
         Ok(requests)
     })
     .await
@@ -183,11 +209,13 @@ async fn receive_messages(
     conn: &mut SecureConnection,
     engine: &Arc<FeedEngine>,
 ) -> Result<()> {
+    tracing::debug!("waiting for messages from peer");
     let mut total_received: usize = 0;
     while let Some(data) = conn.recv().await? {
         let msg: GossipMessage = serde_json::from_slice(&data)?;
         match msg {
             GossipMessage::Messages { messages } => {
+                tracing::debug!(batch_size = messages.len(), "received message batch");
                 if messages.len() > MAX_MESSAGES_PER_FRAME {
                     tracing::warn!(
                         count = messages.len(),
@@ -238,9 +266,15 @@ async fn handle_peer_wants(
     conn: &mut SecureConnection,
     engine: &Arc<FeedEngine>,
 ) -> Result<()> {
+    tracing::debug!("waiting for peer Want message");
     if let Some(data) = conn.recv().await? {
         let msg: GossipMessage = serde_json::from_slice(&data)?;
         if let GossipMessage::Want { requests } = msg {
+            tracing::debug!(
+                request_count = requests.len(),
+                requests = ?requests.iter().map(|r| (&r.author.0[..12], r.after_sequence)).collect::<Vec<_>>(),
+                "received peer Want"
+            );
             let mut total_sent: usize = 0;
             for req in requests.iter().take(MAX_WANT_REQUESTS) {
                 let mut after_seq = req.after_sequence;
@@ -257,10 +291,35 @@ async fn handle_peer_wants(
                     })??;
 
                     let batch_len = messages.len();
+                    tracing::debug!(
+                        author = &req.author.0[..12],
+                        after_seq = after_seq,
+                        batch_len = batch_len,
+                        "fetched messages for Want"
+                    );
                     if !messages.is_empty() {
                         after_seq = messages.last().map(|m| m.sequence).unwrap_or(after_seq);
-                        let response = GossipMessage::Messages { messages };
-                        conn.send(&serde_json::to_vec(&response)?).await?;
+                        // Chunk messages to fit within Box Stream frame limit
+                        let mut chunk = Vec::new();
+                        let mut chunk_size = 50; // Approximate overhead for {"type":"messages","messages":[]}
+                        for m in messages {
+                            let msg_json = serde_json::to_string(&m).unwrap_or_default();
+                            let msg_size = msg_json.len() + 2; // +2 for comma/brackets
+                            if chunk_size + msg_size > MAX_FRAME_SIZE && !chunk.is_empty() {
+                                // Send current chunk
+                                let response = GossipMessage::Messages { messages: chunk };
+                                conn.send(&serde_json::to_vec(&response)?).await?;
+                                chunk = Vec::new();
+                                chunk_size = 50;
+                            }
+                            chunk_size += msg_size;
+                            chunk.push(m);
+                        }
+                        // Send remaining chunk
+                        if !chunk.is_empty() {
+                            let response = GossipMessage::Messages { messages: chunk };
+                            conn.send(&serde_json::to_vec(&response)?).await?;
+                        }
                         total_sent += batch_len;
                     }
 
@@ -272,8 +331,13 @@ async fn handle_peer_wants(
                     break;
                 }
             }
+            tracing::debug!(total_sent = total_sent, "sending Done");
+        } else {
+            tracing::warn!(msg_type = ?msg, "expected Want but got something else");
         }
         conn.send(&serde_json::to_vec(&GossipMessage::Done)?).await?;
+    } else {
+        tracing::debug!("no Want message received");
     }
     Ok(())
 }

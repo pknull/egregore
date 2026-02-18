@@ -60,7 +60,11 @@ struct Cli {
     #[arg(long)]
     hook_on_message: Option<PathBuf>,
 
-    /// Filter hook to specific content type (e.g., "query")
+    /// URL to POST message JSON when messages arrive
+    #[arg(long)]
+    hook_webhook_url: Option<String>,
+
+    /// Filter hooks to specific content type (e.g., "query")
     #[arg(long)]
     hook_filter_type: Option<String>,
 }
@@ -78,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
 
     let hooks = HookConfig {
         on_message: cli.hook_on_message,
+        webhook_url: cli.hook_webhook_url,
         filter_content_type: cli.hook_filter_type,
         timeout_secs: Some(30),
     };
@@ -121,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
         let mut hook_rx = engine.subscribe();
         tracing::info!(
             hook = ?config.hooks.on_message,
+            webhook = ?config.hooks.webhook_url,
             filter = ?config.hooks.filter_content_type,
             "hook executor enabled"
         );

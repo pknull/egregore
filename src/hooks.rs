@@ -1,34 +1,44 @@
-//! Hook executor — spawns subprocesses for event-driven message handling.
+//! Hook executor — spawns subprocesses and webhooks for event-driven message handling.
 //!
 //! When configured, the hook executor receives messages from the FeedEngine's
-//! broadcast channel and spawns a subprocess for each matching message. The
-//! message JSON is passed on stdin.
+//! broadcast channel and:
+//! - Spawns a subprocess for each matching message (on_message)
+//! - POSTs message JSON to a URL (webhook_url)
+//!
+//! Both mechanisms can be used simultaneously.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use reqwest::Client;
 use tokio::time::timeout;
 
 use crate::config::HookConfig;
 use crate::feed::models::Message;
 
-/// Executes hook scripts when messages arrive.
+/// Executes hook scripts and webhooks when messages arrive.
 pub struct HookExecutor {
     config: HookConfig,
+    http_client: Client,
 }
 
 impl HookExecutor {
-    /// Create a new hook executor if a hook is configured.
-    /// Returns None if no hook path is set.
+    /// Create a new hook executor if any hook is configured.
+    /// Returns None if neither on_message nor webhook_url is set.
     pub fn new(config: HookConfig) -> Option<Self> {
-        config.on_message.as_ref()?;
-        Some(Self { config })
+        if config.on_message.is_none() && config.webhook_url.is_none() {
+            return None;
+        }
+        Some(Self {
+            config,
+            http_client: Client::new(),
+        })
     }
 
-    /// Execute the hook for a message.
+    /// Execute all configured hooks for a message.
     ///
-    /// Spawns the configured executable with the message JSON on stdin.
+    /// Runs both subprocess hook and webhook if configured.
     /// Respects content_type filter and timeout settings.
     pub async fn execute(&self, msg: &Message) {
         // Apply content_type filter if configured
@@ -42,17 +52,25 @@ impl HookExecutor {
                 tracing::trace!(
                     filter = %filter,
                     actual = %msg_type,
-                    "hook skipped: content_type mismatch"
+                    "hooks skipped: content_type mismatch"
                 );
                 return;
             }
         }
 
-        let path = match &self.config.on_message {
-            Some(p) => p.clone(),
-            None => return,
-        };
+        // Execute subprocess hook if configured
+        if let Some(ref path) = self.config.on_message {
+            self.execute_subprocess(msg, path.clone()).await;
+        }
 
+        // Execute webhook if configured
+        if let Some(ref url) = self.config.webhook_url {
+            self.execute_webhook(msg, url).await;
+        }
+    }
+
+    /// Execute subprocess hook with message JSON on stdin.
+    async fn execute_subprocess(&self, msg: &Message, path: std::path::PathBuf) {
         let json = match serde_json::to_string(msg) {
             Ok(j) => j,
             Err(e) => {
@@ -107,6 +125,37 @@ impl HookExecutor {
             }
         }
     }
+
+    /// Execute webhook by POSTing message JSON to URL.
+    async fn execute_webhook(&self, msg: &Message, url: &str) {
+        let timeout_secs = self.config.timeout_secs.unwrap_or(30);
+        let hook_timeout = Duration::from_secs(timeout_secs);
+
+        let result = timeout(hook_timeout, async {
+            self.http_client
+                .post(url)
+                .json(msg)
+                .send()
+                .await
+        })
+        .await;
+
+        match result {
+            Ok(Ok(response)) => {
+                if response.status().is_success() {
+                    tracing::debug!(url = %url, status = %response.status(), "webhook completed");
+                } else {
+                    tracing::warn!(url = %url, status = %response.status(), "webhook returned error");
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(url = %url, error = %e, "webhook request failed");
+            }
+            Err(_) => {
+                tracing::warn!(url = %url, timeout_secs, "webhook timed out");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -141,6 +190,25 @@ mod tests {
     fn executor_returns_some_with_path() {
         let config = HookConfig {
             on_message: Some(PathBuf::from("/bin/true")),
+            ..Default::default()
+        };
+        assert!(HookExecutor::new(config).is_some());
+    }
+
+    #[test]
+    fn executor_returns_some_with_webhook_url() {
+        let config = HookConfig {
+            webhook_url: Some("https://example.com/webhook".to_string()),
+            ..Default::default()
+        };
+        assert!(HookExecutor::new(config).is_some());
+    }
+
+    #[test]
+    fn executor_returns_some_with_both() {
+        let config = HookConfig {
+            on_message: Some(PathBuf::from("/bin/true")),
+            webhook_url: Some("https://example.com/webhook".to_string()),
             ..Default::default()
         };
         assert!(HookExecutor::new(config).is_some());

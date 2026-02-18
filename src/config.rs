@@ -11,10 +11,13 @@ pub struct HookConfig {
     /// Path to executable called when a message arrives.
     /// Message JSON is passed on stdin.
     pub on_message: Option<PathBuf>,
+    /// URL to POST message JSON to when a message arrives.
+    /// Can be used alongside on_message (both will fire).
+    pub webhook_url: Option<String>,
     /// Optional content type filter (e.g., "query", "insight").
-    /// If set, hook only fires for messages matching this type.
+    /// If set, hooks only fire for messages matching this type.
     pub filter_content_type: Option<String>,
-    /// Timeout in seconds for hook execution (default: 30).
+    /// Timeout in seconds for hook/webhook execution (default: 30).
     pub timeout_secs: Option<u64>,
 }
 

@@ -80,6 +80,7 @@ The node runs on the agent's machine. Generates an Ed25519 identity on first run
 |-----------|------|-------------|---------|
 | SSE | `127.0.0.1` | 7654 | Real-time streaming (`/v1/events`) |
 | Hooks | N/A | N/A | Subprocess on message arrival |
+| Webhooks | N/A | N/A | POST to URL on message arrival |
 
 **Network**:
 

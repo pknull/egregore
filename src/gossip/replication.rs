@@ -57,8 +57,15 @@ const BATCH_SIZE: u32 = 50;
 const MAX_MESSAGES_PER_SESSION: usize = 10_000;
 const MAX_MESSAGES_PER_FRAME: usize = 200;
 const MAX_WANT_REQUESTS: usize = 500;
-/// Maximum payload size for Box Stream (4096 bytes with some margin for envelope)
-const MAX_FRAME_SIZE: usize = 3800;
+
+/// Target payload size for message batches before connection-layer fragmentation.
+/// Set below 4096 to minimize frame fragmentation for typical message batches.
+/// Note: Individual large messages will be fragmented by SecureConnection::send().
+const MAX_BATCH_PAYLOAD: usize = 3800;
+
+/// Approximate JSON envelope overhead for GossipMessage::Messages wrapper.
+/// Accounts for: {"type":"messages","messages":[...]}
+const MESSAGE_ENVELOPE_OVERHEAD: usize = 40;
 
 /// Run replication as the initiator (client).
 pub async fn replicate_as_client(
@@ -299,22 +306,39 @@ async fn handle_peer_wants(
                     );
                     if !messages.is_empty() {
                         after_seq = messages.last().map(|m| m.sequence).unwrap_or(after_seq);
-                        // Chunk messages to fit within Box Stream frame limit
-                        let mut chunk = Vec::new();
-                        let mut chunk_size = 50; // Approximate overhead for {"type":"messages","messages":[]}
+
+                        // Chunk messages to minimize frame fragmentation.
+                        // Connection layer handles oversized chunks via fragmentation,
+                        // but batching small messages together is more efficient.
+                        let mut chunk: Vec<Message> = Vec::new();
+                        let mut chunk_payload = MESSAGE_ENVELOPE_OVERHEAD;
+
                         for m in messages {
-                            let msg_json = serde_json::to_string(&m).unwrap_or_default();
-                            let msg_size = msg_json.len() + 2; // +2 for comma/brackets
-                            if chunk_size + msg_size > MAX_FRAME_SIZE && !chunk.is_empty() {
-                                // Send current chunk
+                            let msg_size = match serde_json::to_string(&m) {
+                                Ok(json) => json.len() + 2, // +2 for comma/brackets
+                                Err(e) => {
+                                    tracing::warn!(
+                                        seq = m.sequence,
+                                        error = %e,
+                                        "failed to serialize message, skipping"
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // Flush chunk if adding this message would exceed target size
+                            // (but always allow at least one message per chunk)
+                            if chunk_payload + msg_size > MAX_BATCH_PAYLOAD && !chunk.is_empty() {
                                 let response = GossipMessage::Messages { messages: chunk };
                                 conn.send(&serde_json::to_vec(&response)?).await?;
                                 chunk = Vec::new();
-                                chunk_size = 50;
+                                chunk_payload = MESSAGE_ENVELOPE_OVERHEAD;
                             }
-                            chunk_size += msg_size;
+
+                            chunk_payload += msg_size;
                             chunk.push(m);
                         }
+
                         // Send remaining chunk
                         if !chunk.is_empty() {
                             let response = GossipMessage::Messages { messages: chunk };

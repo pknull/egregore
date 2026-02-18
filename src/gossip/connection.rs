@@ -23,6 +23,16 @@ use crate::identity::Identity;
 
 const HELLO_SIZE: usize = 64;
 
+/// Frame prefix indicating final (or only) frame in a fragmented message.
+const FRAME_PREFIX_FINAL: u8 = 0x00;
+/// Frame prefix indicating more frames follow.
+const FRAME_PREFIX_CONTINUATION: u8 = 0x01;
+/// Maximum size for a reassembled message (128 KB).
+/// Prevents memory exhaustion from malicious continuation frames.
+const MAX_ASSEMBLED_SIZE: usize = 128 * 1024;
+/// Maximum frame size accepted from peer.
+const MAX_FRAME_SIZE: usize = 65536;
+
 /// An authenticated, encrypted connection.
 pub struct SecureConnection {
     stream: TcpStream,
@@ -122,14 +132,29 @@ impl SecureConnection {
 
     /// Send data, fragmenting across multiple frames if needed.
     ///
-    /// Uses a 1-byte prefix: 0x00 = final/only frame, 0x01 = continuation.
+    /// Uses a 1-byte prefix: FRAME_PREFIX_FINAL (0x00) for final/only frame,
+    /// FRAME_PREFIX_CONTINUATION (0x01) for continuation frames.
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
-        let chunks: Vec<&[u8]> = data.chunks(Self::MAX_CHUNK_SIZE).collect();
-        let total_chunks = chunks.len();
+        // Handle empty data: send a single frame with just the final prefix
+        if data.is_empty() {
+            let payload = vec![FRAME_PREFIX_FINAL];
+            let frame = self.writer.encrypt_frame(&payload)?;
+            let len = (frame.len() as u32).to_be_bytes();
+            self.stream.write_all(&len).await?;
+            self.stream.write_all(&frame).await?;
+            return Ok(());
+        }
 
-        for (i, chunk) in chunks.into_iter().enumerate() {
+        // Calculate total chunks without intermediate allocation
+        let total_chunks = (data.len() + Self::MAX_CHUNK_SIZE - 1) / Self::MAX_CHUNK_SIZE;
+
+        for (i, chunk) in data.chunks(Self::MAX_CHUNK_SIZE).enumerate() {
             let is_final = i == total_chunks - 1;
-            let prefix = if is_final { 0x00u8 } else { 0x01u8 };
+            let prefix = if is_final {
+                FRAME_PREFIX_FINAL
+            } else {
+                FRAME_PREFIX_CONTINUATION
+            };
 
             // Prepend continuation byte
             let mut payload = Vec::with_capacity(1 + chunk.len());
@@ -146,22 +171,37 @@ impl SecureConnection {
 
     /// Receive data, reassembling fragmented frames.
     ///
-    /// Reads frames until a final frame (prefix 0x00) is received.
-    /// Returns None on goodbye.
+    /// Reads frames until a final frame (FRAME_PREFIX_FINAL) is received.
+    /// Returns None on graceful connection close or goodbye frame.
+    /// Returns error on protocol violations or size limits exceeded.
     pub async fn recv(&mut self) -> Result<Option<Vec<u8>>> {
         let mut assembled = Vec::new();
 
         loop {
             let mut len_buf = [0u8; 4];
-            if self.stream.read_exact(&mut len_buf).await.is_err() {
-                return Ok(None); // Connection closed
+            match self.stream.read_exact(&mut len_buf).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // Clean connection close
+                    return Ok(None);
+                }
+                Err(e) => {
+                    return Err(EgreError::Io(e));
+                }
             }
+
             let frame_len = u32::from_be_bytes(len_buf) as usize;
-            if frame_len > 65536 {
+            if frame_len == 0 {
                 return Err(EgreError::Peer {
-                    reason: "frame too large".into(),
+                    reason: "zero-length frame".into(),
                 });
             }
+            if frame_len > MAX_FRAME_SIZE {
+                return Err(EgreError::Peer {
+                    reason: format!("frame too large: {} > {}", frame_len, MAX_FRAME_SIZE),
+                });
+            }
+
             let mut frame = vec![0u8; frame_len];
             self.stream.read_exact(&mut frame).await?;
 
@@ -175,8 +215,20 @@ impl SecureConnection {
             let header: [u8; 34] = frame[..34].try_into().unwrap();
             match self.reader.decrypt_header(&header)? {
                 None => return Ok(None), // Goodbye
-                Some((_body_len, body_mac)) => {
+                Some((body_len, body_mac)) => {
                     let body_ct = &frame[34..];
+
+                    // Validate body length matches header
+                    if body_ct.len() != body_len as usize {
+                        return Err(EgreError::Peer {
+                            reason: format!(
+                                "body length mismatch: header={}, actual={}",
+                                body_len,
+                                body_ct.len()
+                            ),
+                        });
+                    }
+
                     let plaintext = self.reader.decrypt_body(body_ct, &body_mac)?;
 
                     // Check continuation prefix
@@ -188,12 +240,23 @@ impl SecureConnection {
 
                     let prefix = plaintext[0];
                     let data = &plaintext[1..];
+
+                    // Check assembled size limit before extending
+                    if assembled.len() + data.len() > MAX_ASSEMBLED_SIZE {
+                        return Err(EgreError::Peer {
+                            reason: format!(
+                                "assembled message too large: {} > {}",
+                                assembled.len() + data.len(),
+                                MAX_ASSEMBLED_SIZE
+                            ),
+                        });
+                    }
+
                     assembled.extend_from_slice(data);
 
-                    if prefix == 0x00 {
-                        // Final frame
+                    if prefix == FRAME_PREFIX_FINAL {
                         return Ok(Some(assembled));
-                    } else if prefix != 0x01 {
+                    } else if prefix != FRAME_PREFIX_CONTINUATION {
                         return Err(EgreError::Peer {
                             reason: format!("invalid continuation prefix: {:#x}", prefix),
                         });

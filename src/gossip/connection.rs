@@ -117,44 +117,89 @@ impl SecureConnection {
         }
     }
 
-    /// Send an encrypted frame.
+    /// Maximum payload per frame (Box Stream limit minus continuation byte)
+    const MAX_CHUNK_SIZE: usize = 4095;
+
+    /// Send data, fragmenting across multiple frames if needed.
+    ///
+    /// Uses a 1-byte prefix: 0x00 = final/only frame, 0x01 = continuation.
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
-        let frame = self.writer.encrypt_frame(data)?;
-        let len = (frame.len() as u32).to_be_bytes();
-        self.stream.write_all(&len).await?;
-        self.stream.write_all(&frame).await?;
+        let chunks: Vec<&[u8]> = data.chunks(Self::MAX_CHUNK_SIZE).collect();
+        let total_chunks = chunks.len();
+
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let is_final = i == total_chunks - 1;
+            let prefix = if is_final { 0x00u8 } else { 0x01u8 };
+
+            // Prepend continuation byte
+            let mut payload = Vec::with_capacity(1 + chunk.len());
+            payload.push(prefix);
+            payload.extend_from_slice(chunk);
+
+            let frame = self.writer.encrypt_frame(&payload)?;
+            let len = (frame.len() as u32).to_be_bytes();
+            self.stream.write_all(&len).await?;
+            self.stream.write_all(&frame).await?;
+        }
         Ok(())
     }
 
-    /// Receive an encrypted frame. Returns None on goodbye.
+    /// Receive data, reassembling fragmented frames.
+    ///
+    /// Reads frames until a final frame (prefix 0x00) is received.
+    /// Returns None on goodbye.
     pub async fn recv(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut len_buf = [0u8; 4];
-        if self.stream.read_exact(&mut len_buf).await.is_err() {
-            return Ok(None); // Connection closed
-        }
-        let frame_len = u32::from_be_bytes(len_buf) as usize;
-        if frame_len > 65536 {
-            return Err(EgreError::Peer {
-                reason: "frame too large".into(),
-            });
-        }
-        let mut frame = vec![0u8; frame_len];
-        self.stream.read_exact(&mut frame).await?;
+        let mut assembled = Vec::new();
 
-        // Minimum frame size: encrypted header (34 bytes)
-        if frame.len() < 34 {
-            return Err(EgreError::Peer {
-                reason: "frame too small".into(),
-            });
-        }
+        loop {
+            let mut len_buf = [0u8; 4];
+            if self.stream.read_exact(&mut len_buf).await.is_err() {
+                return Ok(None); // Connection closed
+            }
+            let frame_len = u32::from_be_bytes(len_buf) as usize;
+            if frame_len > 65536 {
+                return Err(EgreError::Peer {
+                    reason: "frame too large".into(),
+                });
+            }
+            let mut frame = vec![0u8; frame_len];
+            self.stream.read_exact(&mut frame).await?;
 
-        let header: [u8; 34] = frame[..34].try_into().unwrap();
-        match self.reader.decrypt_header(&header)? {
-            None => Ok(None), // Goodbye
-            Some((_body_len, body_mac)) => {
-                let body_ct = &frame[34..];
-                let plaintext = self.reader.decrypt_body(body_ct, &body_mac)?;
-                Ok(Some(plaintext))
+            // Minimum frame size: encrypted header (34 bytes)
+            if frame.len() < 34 {
+                return Err(EgreError::Peer {
+                    reason: "frame too small".into(),
+                });
+            }
+
+            let header: [u8; 34] = frame[..34].try_into().unwrap();
+            match self.reader.decrypt_header(&header)? {
+                None => return Ok(None), // Goodbye
+                Some((_body_len, body_mac)) => {
+                    let body_ct = &frame[34..];
+                    let plaintext = self.reader.decrypt_body(body_ct, &body_mac)?;
+
+                    // Check continuation prefix
+                    if plaintext.is_empty() {
+                        return Err(EgreError::Peer {
+                            reason: "empty frame payload".into(),
+                        });
+                    }
+
+                    let prefix = plaintext[0];
+                    let data = &plaintext[1..];
+                    assembled.extend_from_slice(data);
+
+                    if prefix == 0x00 {
+                        // Final frame
+                        return Ok(Some(assembled));
+                    } else if prefix != 0x01 {
+                        return Err(EgreError::Peer {
+                            reason: format!("invalid continuation prefix: {:#x}", prefix),
+                        });
+                    }
+                    // Continue reading frames
+                }
             }
         }
     }

@@ -35,7 +35,7 @@ const MAX_ASSEMBLED_SIZE: usize = 128 * 1024;
 /// Maximum frame size accepted from peer.
 const MAX_FRAME_SIZE: usize = 65536;
 /// Read timeout per frame (prevents slowloris-style connection exhaustion).
-const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// An authenticated, encrypted connection.
 pub struct SecureConnection {

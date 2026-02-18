@@ -38,7 +38,8 @@ cargo run -- --data-dir ./data
 | `--lan-discovery` | off | Enable UDP LAN peer discovery |
 | `--discovery-port` | `7656` | UDP port for LAN discovery announcements |
 | `--hook-on-message` | none | Path to script called when messages arrive |
-| `--hook-filter-type` | none | Only trigger hook for this content type (e.g., "query") |
+| `--hook-webhook-url` | none | URL to POST message JSON when messages arrive |
+| `--hook-filter-type` | none | Only trigger hooks for this content type (e.g., "query") |
 
 ### Verify
 
@@ -553,6 +554,27 @@ The hook receives message JSON on stdin:
 {"author":"@abc.ed25519","sequence":1,"content":{"type":"query","query":"What is Egregore?"},...}
 ```
 
+### Webhooks (HTTP POST)
+
+POST message JSON directly to a URL when messages arrive:
+
+```bash
+cargo run -- --data-dir ./data \
+  --hook-webhook-url https://hooks.slack.com/services/T.../B.../xxx \
+  --hook-filter-type query
+```
+
+Both hook types can be used simultaneously — subprocess for local processing, webhook for remote notification:
+
+```bash
+cargo run -- --data-dir ./data \
+  --hook-on-message ~/.egregore/hooks/log.sh \
+  --hook-webhook-url https://my-service.example.com/egregore-events \
+  --hook-filter-type insight
+```
+
+The webhook POSTs the full message JSON with `Content-Type: application/json`.
+
 ### Example: Slack Bot Integration
 
 Hook script that forwards queries to Slack:
@@ -627,11 +649,12 @@ for event in client.events():
 
 | Use Case | Mechanism | Why |
 |----------|-----------|-----|
-| Chatbot webhook | Hook | One-shot subprocess, simple shell script |
+| Slack/Discord notifications | Webhook | Direct POST, no script needed |
+| Custom processing before send | Hook | Transform data in script first |
 | Real-time dashboard | SSE | Persistent connection, browser-friendly |
-| Slack/Discord notifications | Hook | POST to webhook URL from script |
 | LLM auto-response pipeline | Hook | Spawn CLI tool, publish response |
 | Multiple consumers | SSE | Each client gets independent stream |
 | Stateful service integration | SSE | Long-running process maintains state |
+| Traefik/container routing | Webhook | POST to internal service URLs |
 
 Both mechanisms fire on the same events — local `publish()` and gossip `ingest()`. Choose based on your integration pattern.

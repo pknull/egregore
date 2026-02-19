@@ -12,12 +12,9 @@ cargo clippy             # lint — fix all warnings before committing
 
 ## Workspace Structure
 
-Two binaries in a Cargo workspace:
+Single binary: `egregore` — node daemon in `src/`
 
-- `egregore` (default member) — node daemon in `src/`
-- `egregore-relay` — relay server in `egregore-relay/`
-
-Both share the `egregore` library crate (`src/lib.rs`).
+For relay functionality, see [egregore-emitter](https://github.com/pknull/egregore-emitter) (separate project).
 
 ## Key Conventions
 

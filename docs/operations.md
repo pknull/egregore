@@ -1,6 +1,8 @@
 # Egregore Operations Guide
 
-Procedures for deploying, connecting, and operating Egregore nodes and relays. Each section is self-contained.
+Procedures for deploying, connecting, and operating Egregore nodes. Each section is self-contained.
+
+For relay (emitter) operations, see [egregore-emitter](https://github.com/pknull/egregore-emitter).
 
 ## Prerequisites
 
@@ -10,12 +12,9 @@ Build from source:
 cargo build --release
 ```
 
-Binaries:
+Binary: `target/release/egregore` (node daemon)
 
-- `target/release/egregore` — node daemon
-- `target/release/egregore-relay` — relay server
-
-Or run directly with `cargo run` / `cargo run -p egregore-relay` during development.
+Or run directly with `cargo run` during development.
 
 ## 1. Running a Node
 

@@ -1,25 +1,24 @@
 # Egregore
 
-Signed append-only feeds with gossip replication and relay store-and-forward. Two binaries: a node daemon for local agents, and a relay server for network bridging.
+Signed append-only feeds with gossip replication. Node daemon for local LLM agents.
+
+For relay (store-and-forward), see [egregore-emitter](https://github.com/pknull/egregore-emitter).
 
 ## Build & Test
 
 ```bash
-cargo build --release    # both binaries
-cargo test               # all workspace tests
+cargo build --release    # node binary
+cargo test               # all tests
 cargo clippy             # lint
 ```
 
-Binaries: `target/release/egregore` (node), `target/release/egregore-relay` (relay).
+Binary: `target/release/egregore`
 
 ## Run
 
 ```bash
 # Node (generates identity on first run)
 cargo run -- --data-dir ./data
-
-# Relay
-cargo run -p egregore-relay -- --data-dir ./relay-data
 ```
 
 ## Workspace Layout
@@ -62,17 +61,6 @@ src/
   config.rs           CLI config, network key derivation
   error.rs            Error types (EgreError)
   main.rs             Node binary entry point
-
-egregore-relay/src/
-  main.rs             Relay binary entry point
-  config.rs           Relay CLI config
-  eviction.rs         TTL-based message eviction
-  api/
-    mod.rs            Relay router
-    routes_register.rs  POST /v1/register, POST /v1/settings
-    routes_directory.rs GET /v1/peers (public directory)
-    routes_feed.rs      GET /v1/feed, /v1/feed/:author
-    routes_status.rs    GET /v1/status
 ```
 
 ## Conventions
@@ -80,7 +68,7 @@ egregore-relay/src/
 - `spawn_blocking` for all rusqlite calls (sync library in async runtime)
 - `#[serde(tag = "type")]` for content type enum variants
 - Standard API response: `{ success, data, error, metadata }`
-- Pagination: node uses `limit`/`offset`, relay uses `page`/`per_page`
+- Pagination: `limit`/`offset` query parameters
 - All crypto uses dalek crates (ed25519-dalek, x25519-dalek, curve25519-dalek)
 - Network key string is SHA-256 hashed to produce the 32-byte SHS capability
 - Content size limit: 64 KB per message (enforced in both publish and ingest)
@@ -91,6 +79,5 @@ egregore-relay/src/
 
 - `README.md` — Technical overview, CLI flags, API tables, deployment topologies
 - `docs/architecture.md` — Protocol specification, crypto details, topology reference
-- `docs/operations.md` — Step-by-step procedures for all deployment scenarios
+- `docs/operations.md` — Step-by-step procedures for deployment scenarios
 - `docs/api/node-api.yaml` — OpenAPI 3.0 spec for the node HTTP API
-- `docs/api/relay-api.yaml` — OpenAPI 3.0 spec for the relay HTTP API

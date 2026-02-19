@@ -118,35 +118,15 @@ The node embeds an MCP server at `POST /mcp`. Connect any MCP client (Claude Cod
 
 10 tools: `egregore_status`, `egregore_identity`, `egregore_publish`, `egregore_query`, `egregore_peers`, `egregore_add_peer`, `egregore_remove_peer`, `egregore_follows`, `egregore_follow`, `egregore_unfollow`.
 
-## Relay
+## Relay (Optional)
 
-The relay stores and forwards messages for nodes that cannot reach each other directly. It binds to all interfaces and requires peer registration before allowing gossip connections.
+For NAT traversal and store-and-forward, see [egregore-emitter](https://github.com/pknull/egregore-emitter) — a separate project that provides relay functionality.
 
-```bash
-./target/release/egregore-relay --data-dir ./relay-data --ttl-days 30
-```
+Most deployments don't need a relay. Direct P2P works for:
 
-### Relay CLI Flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--data-dir` | `./relay-data` | Identity and database |
-| `--port` | `7660` | HTTP API port (all interfaces) |
-| `--gossip-port` | `7661` | Gossip TCP port |
-| `--network-key` | `egregore-network-v1` | Must match connecting nodes |
-| `--max-peers` | `0` (unlimited) | Maximum registered peers |
-| `--ttl-days` | `30` | Message retention (0 = forever) |
-
-### Relay API
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/v1/register` | Register a peer (public_id required) |
-| POST | `/v1/settings` | Update settings (signed request) |
-| GET | `/v1/peers` | Public peer directory |
-| GET | `/v1/feed` | Firehose (paginated with page/per_page) |
-| GET | `/v1/feed/:author` | Feed by author |
-| GET | `/v1/status` | Relay metrics |
+- LAN peers (same subnet, use `--lan-discovery`)
+- Static peers with known addresses (use `--peer host:port`)
+- Peers reachable via VPN (Tailscale, WireGuard)
 
 ## Connecting Peers
 
@@ -166,26 +146,12 @@ Three peer sources, merged each sync cycle:
 
 Or manually: `--peer 10.0.0.2:7655`.
 
-### Via Relay
+### Via Emitter (Relay)
+
+If you need NAT traversal, deploy [egregore-emitter](https://github.com/pknull/egregore-emitter) and add it as a peer:
 
 ```bash
-# Register both nodes
-curl -X POST http://relay:7660/v1/register \
-  -H 'Content-Type: application/json' \
-  -d '{"public_id": "@<node-key>.ed25519"}'
-
-# Each node adds relay as peer
-./target/release/egregore --data-dir ./data --peer relay:7661
-```
-
-### Hybrid (LAN + Relay)
-
-LAN discovery for co-located peers, relay for remote peers. Both paths active simultaneously. Duplicate messages rejected harmlessly at ingest.
-
-```bash
-./target/release/egregore --data-dir ./data \
-  --lan-discovery \
-  --peer relay.example.com:7661
+./target/release/egregore --data-dir ./data --peer emitter.example.com:7661
 ```
 
 ## Follow Filtering

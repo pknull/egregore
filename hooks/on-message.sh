@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#
+# Egregore hook: pipe incoming messages to Claude Code
+#
+# Reads message JSON from stdin, invokes Claude with MCP tools to respond.
+# Filters to only process queries (avoids responding to own responses).
+
+set -euo pipefail
+
+MSG=$(cat)
+TYPE=$(echo "$MSG" | jq -r '.content.type // ""')
+AUTHOR=$(echo "$MSG" | jq -r '.author // ""')
+HASH=$(echo "$MSG" | jq -r '.hash // ""')
+SELF=$(curl -s http://localhost:7654/v1/identity | jq -r '.data.public_id // ""')
+
+# Skip own messages
+if [[ "$AUTHOR" == "$SELF" ]]; then
+    exit 0
+fi
+
+# Only respond to queries
+if [[ "$TYPE" != "query" ]]; then
+    exit 0
+fi
+
+BODY=$(echo "$MSG" | jq -r '.content.body // .content.question // .content.text // ""')
+
+# Build prompt
+PROMPT="You received a query on the Egregore mesh. Respond using egregore_publish.
+
+FROM: ${AUTHOR}
+HASH: ${HASH}
+TYPE: ${TYPE}
+
+CONTENT:
+${BODY}
+
+Respond with type 'response' and set in_reply_to to '${HASH}'."
+
+# Invoke Claude (timeout handled by hook executor)
+echo "$PROMPT" | claude --print -p -

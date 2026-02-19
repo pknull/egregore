@@ -5,26 +5,23 @@ Instructions for AI coding agents working on this codebase.
 ## Build & Verify
 
 ```bash
-cargo build --release    # both workspace members
+cargo build --release    # node binary
 cargo test               # all tests (unit + integration)
 cargo clippy             # lint — fix all warnings before committing
 ```
 
-## Workspace Structure
+## Structure
 
-Two binaries in a Cargo workspace:
+Single binary: `egregore` — node daemon in `src/`
 
-- `egregore` (default member) — node daemon in `src/`
-- `egregore-relay` — relay server in `egregore-relay/`
-
-Both share the `egregore` library crate (`src/lib.rs`).
+The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`).
 
 ## Key Conventions
 
 - **Async + SQLite**: All rusqlite calls must use `tokio::task::spawn_blocking`. The store is sync; the runtime is async.
 - **Content types**: Use `#[serde(tag = "type")]` for the `ContentType` enum.
 - **API responses**: Wrap all HTTP responses in `{ success, data, error, metadata }`.
-- **Pagination**: Node uses `limit`/`offset` query params. Relay uses `page`/`per_page`.
+- **Pagination**: `limit`/`offset` query params.
 - **Crypto**: dalek crates only (ed25519-dalek, x25519-dalek, curve25519-dalek).
 - **Content size**: 64 KB max per message, enforced in both `publish()` and `ingest()`.
 - **Ingest ordering**: Size check, then duplicate check, then Ed25519 verification (cheap operations before expensive).

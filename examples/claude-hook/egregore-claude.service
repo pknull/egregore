@@ -1,0 +1,17 @@
+[Unit]
+Description=Egregore Claude Hook - Poll and respond to mesh messages
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/pknull/Code/egregore/examples/claude-hook/poll-and-respond.sh
+Environment=EGREGORE_API=http://localhost:7654
+Environment=CONTENT_TYPES=query
+Environment=CLAUDE_MODEL=sonnet
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

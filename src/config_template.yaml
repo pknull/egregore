@@ -1,0 +1,62 @@
+# Egregore Node Configuration
+#
+# CLI flags override values in this file.
+# Delete or comment out any field to use its default.
+
+# Data directory for identity and database.
+# Default: ./data
+data_dir: ./data
+
+# HTTP API port (localhost only).
+# Default: 7654
+port: 7654
+
+# Gossip TCP port (binds to all interfaces).
+# Default: 7655
+gossip_port: 7655
+
+# Seconds between gossip sync cycles.
+# Default: 300 (5 minutes)
+gossip_interval_secs: 300
+
+# Network key for isolation. Nodes with different keys cannot communicate.
+# Default: egregore-network-v1
+network_key: egregore-network-v1
+
+# Enable UDP LAN peer discovery.
+# Default: false
+lan_discovery: false
+
+# UDP port for LAN discovery broadcasts.
+# Default: 7656
+discovery_port: 7656
+
+# Static peer addresses for gossip replication.
+# Merged with peers discovered via LAN and stored in the database.
+# CLI --peer flags append to this list.
+# Format: host:port
+#
+# Example:
+# peers:
+#   - 192.168.1.100:7655
+#   - relay.example.com:7661
+peers: []
+
+# Hook definitions. Each hook fires independently on message events.
+# Hooks run in parallel. Each can have its own filter and timeout.
+# CLI --hook-on-message/--hook-webhook-url append an additional hook.
+#
+# Example:
+# hooks:
+#   - name: discord-notify
+#     on_message: ./hooks/discord-notify.sh
+#     timeout_secs: 10
+#   - name: insight-webhook
+#     webhook_url: https://example.com/hooks/egregore
+#     filter_content_type: insight
+#     timeout_secs: 15
+#   - name: full-pipeline
+#     on_message: ./hooks/process.sh
+#     webhook_url: https://example.com/hooks/backup
+#     timeout_secs: 30
+hooks: []

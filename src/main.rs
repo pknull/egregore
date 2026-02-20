@@ -9,12 +9,13 @@
 
 mod api;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use std::path::PathBuf;
 
-use egregore::config::{Config, HookConfig};
+use egregore::config::{Config, HookEntry};
 use egregore::feed::engine::FeedEngine;
 use egregore::feed::store::FeedStore;
 use egregore::gossip;
@@ -24,6 +25,10 @@ use egregore::identity::Identity;
 #[derive(Parser)]
 #[command(name = "egregore", version, about = "SSB-inspired LLM knowledge sharing")]
 struct Cli {
+    /// Path to YAML config file (default: <data_dir>/config.yaml)
+    #[arg(long)]
+    config: Option<PathBuf>,
+
     /// Data directory for identity and database
     #[arg(long, default_value = "./data")]
     data_dir: PathBuf,
@@ -44,7 +49,7 @@ struct Cli {
     #[arg(long, default_value = "egregore-network-v1")]
     network_key: String,
 
-    /// Peer addresses (host:port)
+    /// Peer addresses (host:port). Repeatable. Appends to config file peers.
     #[arg(long)]
     peer: Vec<String>,
 
@@ -56,17 +61,101 @@ struct Cli {
     #[arg(long, default_value_t = 7656)]
     discovery_port: u16,
 
-    /// Path to hook script called when messages arrive
+    /// Gossip sync interval in seconds
+    #[arg(long)]
+    gossip_interval_secs: Option<u64>,
+
+    /// Path to hook script called when messages arrive (use config file for multiple hooks)
     #[arg(long)]
     hook_on_message: Option<PathBuf>,
 
-    /// URL to POST message JSON when messages arrive
+    /// URL to POST message JSON when messages arrive (use config file for multiple hooks)
     #[arg(long)]
     hook_webhook_url: Option<String>,
 
     /// Filter hooks to specific content type (e.g., "query")
     #[arg(long)]
     hook_filter_type: Option<String>,
+
+    /// Hook timeout in seconds
+    #[arg(long)]
+    hook_timeout_secs: Option<u64>,
+
+    /// Generate a default config.yaml in data-dir and exit
+    #[arg(long)]
+    init_config: bool,
+}
+
+/// Build the final Config by merging: defaults -> YAML file -> CLI overrides.
+fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config> {
+    use clap::parser::ValueSource;
+
+    // Phase 1: data_dir always comes from CLI (needed to locate config file)
+    let data_dir = cli.data_dir.clone();
+
+    // Phase 2: Load YAML config if it exists
+    let config_path = cli.config.clone()
+        .unwrap_or_else(|| Config::config_file_path(&data_dir));
+
+    let mut config = match Config::load_from_file(&config_path)? {
+        Some(file_config) => {
+            tracing::info!(path = %config_path.display(), "loaded config file");
+            file_config
+        }
+        None => {
+            tracing::debug!(path = %config_path.display(), "no config file found, using defaults");
+            Config::default()
+        }
+    };
+
+    // Phase 3: CLI overrides — only apply values the user explicitly passed
+    // data_dir: if the user explicitly passed --data-dir, use CLI value.
+    // Otherwise keep the YAML value (which defaults to "./data" if unset).
+    if matches.value_source("data_dir") == Some(ValueSource::CommandLine) {
+        config.data_dir = data_dir;
+    }
+
+    if matches.value_source("port") == Some(ValueSource::CommandLine) {
+        config.port = cli.port;
+    }
+    if matches.value_source("gossip_port") == Some(ValueSource::CommandLine) {
+        config.gossip_port = cli.gossip_port;
+    }
+    if matches.value_source("network_key") == Some(ValueSource::CommandLine) {
+        config.network_key = cli.network_key.clone();
+    }
+    if matches.value_source("discovery_port") == Some(ValueSource::CommandLine) {
+        config.discovery_port = cli.discovery_port;
+    }
+    if matches.value_source("lan_discovery") == Some(ValueSource::CommandLine) {
+        config.lan_discovery = cli.lan_discovery;
+    }
+    if let Some(interval) = cli.gossip_interval_secs {
+        config.gossip_interval_secs = interval;
+    }
+
+    // Peers: CLI --peer appends to config file peers (deduplicated)
+    if !cli.peer.is_empty() {
+        config.peers.extend(cli.peer.iter().cloned());
+        let mut seen = HashSet::new();
+        config.peers.retain(|p| seen.insert(p.clone()));
+    }
+
+    // CLI hook flags create one additional hook entry appended to config file hooks
+    let cli_hook = HookEntry {
+        name: Some("cli".to_string()),
+        on_message: cli.hook_on_message.clone(),
+        webhook_url: cli.hook_webhook_url.clone(),
+        filter_content_type: cli.hook_filter_type.clone(),
+        timeout_secs: cli.hook_timeout_secs,
+    };
+    if cli_hook.is_active() {
+        config.hooks.push(cli_hook);
+    }
+
+    config.validate()?;
+
+    Ok(config)
 }
 
 #[tokio::main]
@@ -78,26 +167,19 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
+    let mut matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches_mut(&mut matches)?;
 
-    let hooks = HookConfig {
-        on_message: cli.hook_on_message,
-        webhook_url: cli.hook_webhook_url,
-        filter_content_type: cli.hook_filter_type,
-        timeout_secs: Some(30),
-    };
+    // Handle --init-config
+    if cli.init_config {
+        std::fs::create_dir_all(&cli.data_dir)?;
+        let config_path = Config::config_file_path(&cli.data_dir);
+        Config::write_default_config(&config_path)?;
+        println!("Config written to {}", config_path.display());
+        return Ok(());
+    }
 
-    let config = Config {
-        data_dir: cli.data_dir,
-        port: cli.port,
-        gossip_port: cli.gossip_port,
-        network_key: cli.network_key,
-        peers: cli.peer,
-        lan_discovery: cli.lan_discovery,
-        discovery_port: cli.discovery_port,
-        hooks,
-        ..Config::default()
-    };
+    let config = build_config(&cli, &matches)?;
 
     // Ensure data directory exists
     std::fs::create_dir_all(&config.data_dir)?;
@@ -130,13 +212,20 @@ async fn main() -> anyhow::Result<()> {
 
     // Start hook executor if configured
     if let Some(executor) = HookExecutor::new(config.hooks.clone()) {
+        let hook_count = config.hooks.iter().filter(|h| h.is_active()).count();
+        tracing::info!(hook_count, "hook executor enabled");
+        for hook in &config.hooks {
+            if hook.is_active() {
+                tracing::info!(
+                    name = ?hook.name,
+                    on_message = ?hook.on_message,
+                    webhook = ?hook.webhook_url,
+                    filter = ?hook.filter_content_type,
+                    "registered hook"
+                );
+            }
+        }
         let mut hook_rx = engine.subscribe();
-        tracing::info!(
-            hook = ?config.hooks.on_message,
-            webhook = ?config.hooks.webhook_url,
-            filter = ?config.hooks.filter_content_type,
-            "hook executor enabled"
-        );
         tokio::spawn(async move {
             while let Ok(msg) = hook_rx.recv().await {
                 executor.execute(&msg).await;

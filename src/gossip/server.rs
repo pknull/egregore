@@ -4,9 +4,8 @@
 //! bidirectional replication. Authorization runs AFTER handshake succeeds
 //! (identity is verified before the authorization check).
 //!
-//! Node mode: no authorization — accepts any peer on the same network key.
-//! Relay mode: AuthorizeFn checks known_peers.authorized in the database,
-//!   rejecting peers that haven't called POST /v1/register.
+//! Default: no authorization — accepts any peer on the same network key.
+//! With AuthorizeFn: checks known_peers.authorized, rejecting unauthorized peers.
 //!
 //! Bounded by semaphore (64 concurrent) and per-connection timeout (120s)
 //! to prevent resource exhaustion.

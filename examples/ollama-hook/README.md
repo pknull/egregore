@@ -1,24 +1,22 @@
-# Claude Hook
+# Ollama Hook
 
-Event-driven hook using [Claude Agent SDK](https://pypi.org/project/claude-agent-sdk/). Uses Claude Code credentials — no API key required for Pro/Max subscribers.
+Event-driven hook using local [Ollama](https://ollama.com/) with native tool calling. No API keys required.
 
 ## Quick Start
 
-1. **Install dependencies**:
+1. **Install Ollama and model**:
+
+   ```bash
+   # Install Ollama (see https://ollama.com/download)
+   ollama pull llama3.1
+   ```
+
+2. **Install Python dependencies**:
 
    ```bash
    cd /path/to/egregore
    source .venv/bin/activate
-   pip install claude-agent-sdk httpx
-   ```
-
-2. **Configure the hook script**:
-
-   ```bash
-   # Find your Claude Code path
-   which claude  # e.g., ~/.asdf/installs/nodejs/24.4.0/bin/claude
-
-   # Edit claude-agent-hook.py and set system_claude to your path
+   pip install ollama httpx
    ```
 
 3. **Configure egregore**:
@@ -28,7 +26,7 @@ Event-driven hook using [Claude Agent SDK](https://pypi.org/project/claude-agent
    # Edit paths to match your system
    ```
 
-4. **Run egregore as a systemd service** (required):
+4. **Run egregore as a systemd service**:
 
    ```bash
    # See examples/systemd/ for service file
@@ -41,18 +39,25 @@ Event-driven hook using [Claude Agent SDK](https://pypi.org/project/claude-agent
 
    ```bash
    systemctl --user status egregore
-   tail -f /tmp/egregore-hook.log
+   journalctl --user -u egregore -f
    ```
-
-> **Important**: The Claude Agent SDK hook must run outside of any Claude Code session.
-> Running egregore via systemd ensures clean process isolation.
 
 ## Environment
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
+| `OLLAMA_MODEL` | `llama3.1` | Model to use |
 | `EGREGORE_API` | `http://localhost:7654` | Egregore API URL |
 | `HOOK_FILTER_TYPES` | `query` | Message types to respond to |
+
+## Recommended Models
+
+| Model | Notes |
+|-------|-------|
+| `llama3.1` (8B) | Best balance of capability and speed |
+| `llama3.1:70b` | Higher quality, slower |
+| `mistral` | Good alternative |
 
 ## Tools Provided
 
@@ -64,15 +69,20 @@ Event-driven hook using [Claude Agent SDK](https://pypi.org/project/claude-agent
 | `egregore_identity` | Get node's public key |
 | `egregore_status` | Get node status |
 
-## Debug
+## Manual Test
 
-Log file: `/tmp/egregore-hook.log`
+```bash
+ollama serve  # ensure Ollama is running
+
+echo '{"content":{"type":"query","body":"Hello"},"author":"@test","hash":"abc"}' | \
+  ./ollama-hook.py
+```
 
 ## Files
 
 ```
-claude-hook/
-├── claude-agent-hook.py  # Hook script
-├── config.yaml.example   # Egregore config
+ollama-hook/
+├── ollama-hook.py      # Hook script
+├── config.yaml.example # Egregore config
 └── README.md
 ```

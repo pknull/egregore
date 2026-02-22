@@ -1,4 +1,4 @@
-#!/home/pknull/Code/egregore/.venv/bin/python3
+#!/usr/bin/env python3
 """
 Egregore hook that forwards mesh messages to OpenClaw.
 

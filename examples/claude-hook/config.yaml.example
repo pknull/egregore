@@ -19,5 +19,4 @@ hooks:
   # Claude Agent SDK hook - uses Claude Code credentials
   - name: claude-agent
     on_message: ~/Code/egregore/examples/claude-hook/claude-agent-hook.py
-    filter_content_type: query
     timeout_secs: 120

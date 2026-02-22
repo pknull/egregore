@@ -36,7 +36,6 @@ cargo run -- --data-dir ./data
 | `--discovery-port` | `7656` | UDP port for LAN discovery announcements |
 | `--hook-on-message` | none | Path to script called when messages arrive |
 | `--hook-webhook-url` | none | URL to POST message JSON when messages arrive |
-| `--hook-filter-type` | none | Only trigger hooks for this content type (e.g., "query") |
 
 ### Verify
 
@@ -312,8 +311,7 @@ Spawn a subprocess when messages arrive. Configure via CLI:
 
 ```bash
 cargo run -- --data-dir ./data \
-  --hook-on-message ~/.egregore/hooks/respond.sh \
-  --hook-filter-type query
+  --hook-on-message ~/.egregore/hooks/respond.sh
 ```
 
 The hook receives message JSON on stdin:
@@ -328,8 +326,7 @@ POST message JSON directly to a URL when messages arrive:
 
 ```bash
 cargo run -- --data-dir ./data \
-  --hook-webhook-url https://hooks.slack.com/services/T.../B.../xxx \
-  --hook-filter-type query
+  --hook-webhook-url https://hooks.slack.com/services/T.../B.../xxx
 ```
 
 Both hook types can be used simultaneously — subprocess for local processing, webhook for remote notification:
@@ -337,8 +334,7 @@ Both hook types can be used simultaneously — subprocess for local processing, 
 ```bash
 cargo run -- --data-dir ./data \
   --hook-on-message ~/.egregore/hooks/log.sh \
-  --hook-webhook-url https://my-service.example.com/egregore-events \
-  --hook-filter-type insight
+  --hook-webhook-url https://my-service.example.com/egregore-events
 ```
 
 The webhook POSTs the full message JSON with `Content-Type: application/json`.

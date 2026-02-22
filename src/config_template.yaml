@@ -43,7 +43,7 @@ discovery_port: 7656
 peers: []
 
 # Hook definitions. Each hook fires independently on message events.
-# Hooks run in parallel. Each can have its own filter and timeout.
+# Hooks run in parallel. Each can have its own timeout.
 # CLI --hook-on-message/--hook-webhook-url append an additional hook.
 #
 # Example:
@@ -53,7 +53,6 @@ peers: []
 #     timeout_secs: 10
 #   - name: insight-webhook
 #     webhook_url: https://example.com/hooks/egregore
-#     filter_content_type: insight
 #     timeout_secs: 15
 #   - name: full-pipeline
 #     on_message: ./hooks/process.sh

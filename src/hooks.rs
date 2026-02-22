@@ -47,26 +47,8 @@ impl HookExecutor {
         futures::future::join_all(futures).await;
     }
 
-    /// Execute a single hook entry (filter check + subprocess + webhook).
+    /// Execute a single hook entry (subprocess + webhook).
     async fn execute_one(&self, hook: &HookEntry, msg: &Message) {
-        // Apply per-hook content_type filter
-        if let Some(ref filter) = hook.filter_content_type {
-            let msg_type = msg
-                .content
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if msg_type != filter {
-                tracing::trace!(
-                    hook_name = ?hook.name,
-                    filter = %filter,
-                    actual = %msg_type,
-                    "hook skipped: content_type mismatch"
-                );
-                return;
-            }
-        }
-
         // Execute subprocess if configured
         if let Some(ref path) = hook.on_message {
             self.execute_subprocess(msg, path.clone(), hook.timeout_secs, &hook.name).await;
@@ -241,18 +223,4 @@ mod tests {
         assert_eq!(executor.hooks.len(), 1);
     }
 
-    #[tokio::test]
-    async fn filter_skips_non_matching_type() {
-        let hooks = vec![HookEntry {
-            on_message: Some(PathBuf::from("/bin/false")), // Would fail if run
-            filter_content_type: Some("query".to_string()),
-            ..Default::default()
-        }];
-        let executor = HookExecutor::new(hooks).unwrap();
-
-        // This should be skipped (type is "insight", filter is "query")
-        let msg = make_test_message("insight");
-        executor.execute(&msg).await;
-        // If we reach here without error, the filter worked
-    }
 }

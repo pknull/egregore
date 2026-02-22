@@ -19,9 +19,6 @@ pub struct HookEntry {
     pub on_message: Option<PathBuf>,
     /// URL to POST message JSON to when a message arrives.
     pub webhook_url: Option<String>,
-    /// Optional content type filter (e.g., "query", "insight").
-    /// If set, hook only fires for messages matching this type.
-    pub filter_content_type: Option<String>,
     /// Timeout in seconds for hook/webhook execution (default: 30).
     pub timeout_secs: Option<u64>,
 }
@@ -212,7 +209,6 @@ mod tests {
                 HookEntry {
                     name: Some("test-hook".to_string()),
                     on_message: Some(PathBuf::from("./hooks/test.sh")),
-                    filter_content_type: Some("insight".to_string()),
                     timeout_secs: Some(10),
                     ..Default::default()
                 },

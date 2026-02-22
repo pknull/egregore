@@ -1,0 +1,17 @@
+services:
+  egregore:
+    build:
+      context: ../..
+      dockerfile: example/docker/Dockerfile
+    container_name: egregore
+    restart: unless-stopped
+    volumes:
+      - egregore-data:/data
+    ports:
+      # Gossip replication — expose to allow external peers
+      - "7665:7655"
+      # HTTP API — localhost only for management
+      - "127.0.0.1:7664:7654"
+
+volumes:
+  egregore-data:

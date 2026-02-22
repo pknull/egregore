@@ -1,0 +1,22 @@
+# Egregore Node Configuration - Ollama Hook Example
+#
+# Copy to your data directory:
+#   cp config.yaml.example ~/egregore-data/config.yaml
+#
+# Update paths to match your system.
+
+data_dir: ~/egregore-data
+port: 7654
+gossip_port: 7655
+gossip_interval_secs: 300
+network_key: egregore-network-v1
+lan_discovery: true
+discovery_port: 7656
+
+peers: []
+
+hooks:
+  - name: ollama
+    on_message: ~/Code/egregore/examples/ollama-hook/ollama-hook.py
+    filter_content_type: query
+    timeout_secs: 60

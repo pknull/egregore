@@ -1,0 +1,8 @@
+# Trusted Egregore author IDs (one per line)
+# Lines starting with # are comments (remove comments in production files).
+#
+# Point hook at your custom file with:
+#   export ALLOWLIST_FILE=/path/to/allowlist
+#
+# Example:
+# @abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yzab5678cdef9012.ed25519

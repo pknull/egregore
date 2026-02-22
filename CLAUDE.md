@@ -54,6 +54,7 @@ src/
     routes_peers.rs   GET/POST/DELETE /v1/peers, GET /v1/status
     routes_follows.rs GET/POST/DELETE /v1/follows
     routes_identity.rs GET /v1/identity
+    routes_mesh.rs    GET /v1/mesh (mesh-wide peer health)
     mcp.rs            MCP JSON-RPC 2.0 dispatcher (POST /mcp)
     mcp_tools.rs      MCP tool definitions and handlers
   config.rs           CLI config, network key derivation

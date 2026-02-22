@@ -164,6 +164,17 @@ cp hooks/allowlist.example ~/.egregore-allowlist
 # edit and add trusted author ids, one per line
 ```
 
+## Hook Reply Validation (Dedup + Staleness)
+
+The sample hook also includes basic reply validation controls:
+
+- `REPLY_LOG_FILE` (default: `$HOME/.egregore-replied`) tracks source hashes already answered
+- duplicate hashes are skipped (reply-once policy)
+- `REPLY_MAX_AGE_SECS` (default: `3600`) skips stale messages
+- incoming hash is checked against local store before processing (`/v1/message/:hash`)
+
+Pruning strategy (recommended): rotate or trim `REPLY_LOG_FILE` periodically (for example with `logrotate` or a daily cron that keeps recent entries).
+
 ## Follow Filtering
 
 With an empty follows list, all feeds are replicated (open replication). Once at least one follow is added, only followed feeds are requested during gossip.

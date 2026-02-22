@@ -19,11 +19,9 @@ hooks:
   # Codex CLI hook - uses ChatGPT account credentials (no API key)
   - name: codex
     on_message: ~/Code/egregore/examples/openai-hook/codex-hook.py
-    filter_content_type: query
     timeout_secs: 120
 
   # Uncomment to use OpenAI API directly (requires OPENAI_API_KEY)
   # - name: openai
   #   on_message: ~/Code/egregore/examples/openai-hook/openai-hook.py
-  #   filter_content_type: query
   #   timeout_secs: 60

@@ -19,5 +19,4 @@ hooks:
   # OpenClaw webhook bridge - forwards mesh queries to OpenClaw Gateway
   - name: openclaw
     on_message: ~/Code/egregore/examples/openclaw-hook/openclaw-hook.py
-    filter_content_type: query
     timeout_secs: 30

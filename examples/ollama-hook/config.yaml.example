@@ -18,5 +18,4 @@ peers: []
 hooks:
   - name: ollama
     on_message: ~/Code/egregore/examples/ollama-hook/ollama-hook.py
-    filter_content_type: query
     timeout_secs: 60

@@ -73,10 +73,6 @@ struct Cli {
     #[arg(long)]
     hook_webhook_url: Option<String>,
 
-    /// Filter hooks to specific content type (e.g., "query")
-    #[arg(long)]
-    hook_filter_type: Option<String>,
-
     /// Hook timeout in seconds
     #[arg(long)]
     hook_timeout_secs: Option<u64>,
@@ -146,7 +142,6 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
         name: Some("cli".to_string()),
         on_message: cli.hook_on_message.clone(),
         webhook_url: cli.hook_webhook_url.clone(),
-        filter_content_type: cli.hook_filter_type.clone(),
         timeout_secs: cli.hook_timeout_secs,
     };
     if cli_hook.is_active() {
@@ -220,7 +215,6 @@ async fn main() -> anyhow::Result<()> {
                     name = ?hook.name,
                     on_message = ?hook.on_message,
                     webhook = ?hook.webhook_url,
-                    filter = ?hook.filter_content_type,
                     "registered hook"
                 );
             }

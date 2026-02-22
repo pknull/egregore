@@ -491,7 +491,7 @@ Each event is a JSON message object. Clients that fall behind receive a `lagged`
 Spawn a subprocess when messages arrive. The message JSON is passed on stdin. Configure via CLI flags:
 
 ```bash
-egregore --hook-on-message ~/.egregore/hooks/respond.sh --hook-filter-type query
+egregore --hook-on-message ~/.egregore/hooks/respond.sh
 ```
 
 The hook script can implement any integration — call an LLM, post to a webhook, trigger a Slack bot, etc. Example:

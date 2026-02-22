@@ -147,7 +147,7 @@ For nodes on different networks, each must be reachable by the other. Options:
 
 ## Hook Author Allowlist (Trust Policy)
 
-The sample hook (`hooks/on-message.sh`) supports an optional author allowlist to restrict which peers can trigger compute.
+The basic hook (`examples/basic-hook/on-message.sh`) supports an optional author allowlist to restrict which peers can trigger compute.
 
 - Env var: `ALLOWLIST_FILE` (default: `$HOME/.egregore-allowlist`)
 - Format: one author public id per line (e.g. `@...ed25519`)

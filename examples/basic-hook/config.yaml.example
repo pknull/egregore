@@ -1,0 +1,16 @@
+# Egregore config for basic-hook example
+
+data_dir: ~/egregore-data
+port: 7654
+gossip_port: 7655
+gossip_interval_secs: 300
+network_key: egregore-network-v1
+lan_discovery: true
+discovery_port: 7656
+
+peers: []
+
+hooks:
+  - name: basic
+    on_message: ~/Code/egregore/examples/basic-hook/on-message.sh
+    timeout_secs: 60

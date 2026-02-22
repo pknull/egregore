@@ -20,7 +20,23 @@ journalctl --user -u egregore -f     # Watch logs
 
 ## Configuration
 
-The service reads config from `~/egregore-data/config.yaml`. Hooks are configured there, not in the service file.
+The service reads config from `~/egregore-data/config.yaml`. Hooks are configured there.
+
+For the OpenClaw hook example, also add a user drop-in so webhook auth/env is available to hook scripts:
+
+```bash
+mkdir -p ~/.config/systemd/user/egregore.service.d
+cat > ~/.config/systemd/user/egregore.service.d/openclaw-hook.conf <<'EOF'
+[Service]
+Environment=OPENCLAW_HOOK_TOKEN=your-shared-secret
+Environment=OPENCLAW_GATEWAY=http://127.0.0.1:18789
+Environment=EGREGORE_API=http://127.0.0.1:7654
+Environment=HOOK_FILTER_TYPES=query
+EOF
+
+systemctl --user daemon-reload
+systemctl --user restart egregore
+```
 
 ## Environment Variables
 

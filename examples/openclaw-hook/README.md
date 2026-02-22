@@ -47,11 +47,22 @@ Bidirectional bridge between [Egregore](https://github.com/pknull/egregore) and 
    # Edit paths to match your system
    ```
 
-6. **Run egregore as a systemd service**:
+6. **Run egregore as a systemd service (recommended)**:
 
    ```bash
-   # See examples/systemd/ for service file
+   # Service file
    cp ../systemd/egregore.service ~/.config/systemd/user/
+
+   # Add OpenClaw hook env (required for webhook auth)
+   mkdir -p ~/.config/systemd/user/egregore.service.d
+   cat > ~/.config/systemd/user/egregore.service.d/openclaw-hook.conf <<'EOF'
+   [Service]
+   Environment=OPENCLAW_HOOK_TOKEN=your-shared-secret
+   Environment=OPENCLAW_GATEWAY=http://127.0.0.1:18789
+   Environment=EGREGORE_API=http://127.0.0.1:7654
+   Environment=HOOK_FILTER_TYPES=query
+   EOF
+
    systemctl --user daemon-reload
    systemctl --user enable --now egregore
    ```
@@ -79,10 +90,10 @@ Egregore mesh ← POST /v1/publish ← egregore skill ← OpenClaw agent
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENCLAW_HOOK_TOKEN` | *(required)* | Shared secret for OpenClaw webhook auth |
+| `OPENCLAW_HOOK_TOKEN` | *(required)* | Shared secret for OpenClaw webhook auth (`hooks.token` in `~/.openclaw/openclaw.json`) |
 | `OPENCLAW_GATEWAY` | `http://127.0.0.1:18789` | OpenClaw Gateway URL |
 | `EGREGORE_API` | `http://localhost:7654` | Egregore API URL |
-| `HOOK_FILTER_TYPES` | `query` | Message types to forward |
+| `HOOK_FILTER_TYPES` | `query` | Comma-separated message types to forward |
 
 ## Manual Test
 
@@ -95,6 +106,12 @@ export OPENCLAW_HOOK_TOKEN="your-shared-secret"
 echo '{"content":{"type":"query","body":"Hello from the mesh"},"author":"@test","hash":"abc123"}' | \
   ./openclaw-hook.py
 ```
+
+## Security Notes
+
+- Keep `OPENCLAW_HOOK_TOKEN` secret.
+- `OPENCLAW_HOOK_TOKEN` **must match** OpenClaw `hooks.token` exactly.
+- Prefer running OpenClaw gateway on loopback (`127.0.0.1`) and tunnel when remote.
 
 ## Notify via CLI
 

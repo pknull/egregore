@@ -18,6 +18,16 @@ if [[ "$AUTHOR" == "$SELF" ]]; then
     exit 0
 fi
 
+# Optional author allowlist (one public_id per line)
+ALLOWLIST_FILE="${ALLOWLIST_FILE:-$HOME/.egregore-allowlist}"
+if [[ -f "$ALLOWLIST_FILE" ]]; then
+    if ! grep -Fxq "$AUTHOR" "$ALLOWLIST_FILE"; then
+        SHORT_AUTHOR="${AUTHOR:0:12}"
+        echo "Skipping untrusted author: ${SHORT_AUTHOR}..." >&2
+        exit 0
+    fi
+fi
+
 # Only respond to queries
 if [[ "$TYPE" != "query" ]]; then
     exit 0

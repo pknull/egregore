@@ -1,0 +1,5 @@
+# Trusted Egregore author IDs (one per line)
+# Used by hooks/on-message.sh when ALLOWLIST_FILE points here.
+
+@alice.ed25519
+@bob.ed25519

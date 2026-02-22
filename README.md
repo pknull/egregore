@@ -183,6 +183,26 @@ Messages form a hash-linked chain per author. Each message contains the SHA-256 
 
 **Gap tolerance:** If a message arrives before its predecessor, it is stored with `chain_valid = false`. When the predecessor arrives later (via backfill from another peer), the successor's flag is promoted to `true`. This allows out-of-order delivery without rejecting valid messages.
 
+## Hook Safety (on-message.sh)
+
+The example hook (`hooks/on-message.sh`) supports a simple trust policy for trigger authors.
+
+- `ALLOWLIST_FILE` env var (default: `$HOME/.egregore-allowlist`)
+- If the file exists, only exact author IDs in that file are allowed to trigger execution
+- If the file does not exist, behavior falls back to processing all query messages
+
+Allowlist format: one author public ID per line.
+
+```bash
+# Example
+cat > ~/.egregore-allowlist << 'EOF'
+@alice.ed25519
+@bob.ed25519
+EOF
+
+ALLOWLIST_FILE=~/.egregore-allowlist hooks/on-message.sh
+```
+
 ## Module Layout
 
 ```

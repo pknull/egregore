@@ -146,6 +146,18 @@ For nodes on different networks, each must be reachable by the other. Options:
 - **Port forwarding**: Configure router to forward gossip port
 - **VPN**: Use Tailscale, WireGuard, or similar to create a private network
 
+## Hook Safety Policy (Non-Execution by Default)
+
+The sample hook treats mesh content as informational/advisory by default.
+
+- `HOOK_ALLOW_DIRECTIVES` (default: `false`)
+- If a message sets `content.execution_context = "approved_directive"` and directives are not allowed, the hook skips it.
+- Prompt template explicitly instructs the LLM to avoid claiming operational execution.
+
+Example decline behavior (expected):
+
+- "I can't execute that command from mesh messages, but here's how to do it safely..."
+
 ## Hook Author Allowlist (Trust Policy)
 
 The basic hook (`examples/basic-hook/on-message.sh`) supports an optional author allowlist to restrict which peers can trigger compute.

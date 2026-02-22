@@ -1,0 +1,21 @@
+# Egregore Docker Node — Gossip Peer Configuration
+#
+# Minimal config for a public-facing gossip peer.
+# No hooks, no watchers — replication only.
+
+data_dir: /data
+port: 7654
+gossip_port: 7655
+gossip_interval_secs: 300
+network_key: egregore-network-v1
+lan_discovery: false
+discovery_port: 7656
+
+# Add peer addresses for gossip replication.
+# Peers can also be added at runtime via POST /v1/peers.
+# Add your LAN node's address as seen from inside Docker.
+# Find it with: docker inspect egregore --format '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}'
+# Example: <gateway-ip>:7655
+peers: []
+
+hooks: []

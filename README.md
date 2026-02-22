@@ -145,6 +145,24 @@ For nodes on different networks, each must be reachable by the other. Options:
 - **Port forwarding**: Configure router to forward gossip port
 - **VPN**: Use Tailscale, WireGuard, or similar to create a private network
 
+## Hook Author Allowlist (Trust Policy)
+
+The sample hook (`hooks/on-message.sh`) supports an optional author allowlist to restrict which peers can trigger compute.
+
+- Env var: `ALLOWLIST_FILE` (default: `$HOME/.egregore-allowlist`)
+- Format: one author public id per line (e.g. `@...ed25519`)
+- Behavior:
+  - If file exists: only listed authors are processed
+  - If file does not exist: hook keeps current open behavior
+  - Untrusted authors are skipped and logged with a truncated id
+
+Quick start:
+
+```bash
+cp hooks/allowlist.example ~/.egregore-allowlist
+# edit and add trusted author ids, one per line
+```
+
 ## Follow Filtering
 
 With an empty follows list, all feeds are replicated (open replication). Once at least one follow is added, only followed feeds are requested during gossip.

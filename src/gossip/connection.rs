@@ -150,7 +150,7 @@ impl SecureConnection {
         }
 
         // Calculate total chunks without intermediate allocation
-        let total_chunks = (data.len() + Self::MAX_CHUNK_SIZE - 1) / Self::MAX_CHUNK_SIZE;
+        let total_chunks = data.len().div_ceil(Self::MAX_CHUNK_SIZE);
 
         for (i, chunk) in data.chunks(Self::MAX_CHUNK_SIZE).enumerate() {
             let is_final = i == total_chunks - 1;

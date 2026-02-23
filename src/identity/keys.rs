@@ -125,7 +125,7 @@ impl PublicId {
             return false;
         }
         let b64_part = &s[1..45];
-        B64.decode(b64_part).map_or(false, |bytes| bytes.len() == 32)
+        B64.decode(b64_part).is_ok_and(|bytes| bytes.len() == 32)
     }
 
     /// Create from a verifying (public) key.

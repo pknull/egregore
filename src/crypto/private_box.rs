@@ -14,7 +14,7 @@
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use rand::RngCore;
-use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
+use x25519_dalek::PublicKey as X25519Public;
 
 use crate::error::{EgreError, Result};
 use crate::identity::Identity;

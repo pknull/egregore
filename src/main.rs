@@ -221,8 +221,14 @@ async fn main() -> anyhow::Result<()> {
         }
         let mut hook_rx = engine.subscribe();
         tokio::spawn(async move {
-            while let Ok(msg) = hook_rx.recv().await {
-                executor.execute(&msg).await;
+            loop {
+                match hook_rx.recv().await {
+                    Ok(msg) => executor.execute(&msg).await,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "hook receiver lagged, some messages were not processed");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
     }

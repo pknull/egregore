@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 /// These are NOT the wire format — the protocol uses serde_json::Value.
 /// Use `to_value()` to convert for publishing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionContext {
+    Informational,
+    Advisory,
+    ApprovedDirective,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Content {
     Insight {
@@ -35,12 +43,16 @@ pub enum Content {
         question: String,
         #[serde(default)]
         tags: Vec<String>,
+        #[serde(default)]
+        execution_context: Option<ExecutionContext>,
     },
     Response {
         query_hash: String,
         answer: String,
         #[serde(default)]
         confidence: Option<f64>,
+        #[serde(default)]
+        execution_context: Option<ExecutionContext>,
     },
     Profile {
         name: String,

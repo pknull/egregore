@@ -42,8 +42,10 @@ pub struct PeerObservation {
 }
 
 /// Clamp an observation timestamp to a valid range.
+///
 /// - Not in the future (clock skew protection)
 /// - Not older than MAX_OBSERVATION_AGE_HOURS (stale data protection)
+///
 /// Returns None if the timestamp is too old to be useful.
 pub fn clamp_observation_timestamp(ts: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let now = Utc::now();

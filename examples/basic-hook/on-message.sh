@@ -48,10 +48,10 @@ fi
 
 # Optional staleness guard (default 1 hour)
 REPLY_MAX_AGE_SECS="${REPLY_MAX_AGE_SECS:-3600}"
+NOW_EPOCH=$(date -u +%s)
 if [[ "$REPLY_MAX_AGE_SECS" =~ ^[0-9]+$ ]] && [[ "$REPLY_MAX_AGE_SECS" -gt 0 ]]; then
     TS=$(echo "$MSG" | jq -r '.timestamp // ""')
     if [[ -n "$TS" ]]; then
-        NOW_EPOCH=$(date -u +%s)
         MSG_EPOCH=$(date -u -d "$TS" +%s 2>/dev/null || echo "")
         if [[ -n "$MSG_EPOCH" ]]; then
             AGE=$((NOW_EPOCH - MSG_EPOCH))
@@ -61,6 +61,43 @@ if [[ "$REPLY_MAX_AGE_SECS" =~ ^[0-9]+$ ]] && [[ "$REPLY_MAX_AGE_SECS" -gt 0 ]];
             fi
         fi
     fi
+fi
+
+# Rate limiting + cooldown safeguards
+HOOK_RATE_LIMIT="${HOOK_RATE_LIMIT:-5}"            # messages/minute per author
+HOOK_COOLDOWN_MS="${HOOK_COOLDOWN_MS:-30000}"      # silence window after successful response
+HOOK_STATE_DIR="${HOOK_STATE_DIR:-$HOME/.egregore-hook-state}"
+mkdir -p "$HOOK_STATE_DIR"
+
+# Cooldown: skip if we replied recently
+LAST_REPLY_FILE="$HOOK_STATE_DIR/last_reply_epoch"
+if [[ -f "$LAST_REPLY_FILE" ]] && [[ "$HOOK_COOLDOWN_MS" =~ ^[0-9]+$ ]] && [[ "$HOOK_COOLDOWN_MS" -gt 0 ]]; then
+    LAST_REPLY=$(cat "$LAST_REPLY_FILE" 2>/dev/null || echo "")
+    if [[ "$LAST_REPLY" =~ ^[0-9]+$ ]]; then
+        ELAPSED_MS=$(( (NOW_EPOCH - LAST_REPLY) * 1000 ))
+        if [[ "$ELAPSED_MS" -lt "$HOOK_COOLDOWN_MS" ]]; then
+            echo "Skipping due to cooldown (${ELAPSED_MS}ms < ${HOOK_COOLDOWN_MS}ms)" >&2
+            exit 0
+        fi
+    fi
+fi
+
+# Per-author sliding-window rate limit (60s)
+AUTHOR_KEY=$(printf '%s' "$AUTHOR" | sha256sum | awk '{print $1}')
+RATE_FILE="$HOOK_STATE_DIR/rate-${AUTHOR_KEY}.log"
+if [[ "$HOOK_RATE_LIMIT" =~ ^[0-9]+$ ]] && [[ "$HOOK_RATE_LIMIT" -gt 0 ]]; then
+    touch "$RATE_FILE"
+    TMP_FILE="$(mktemp)"
+    awk -v now="$NOW_EPOCH" '($1 ~ /^[0-9]+$/) && (now - $1 <= 60)' "$RATE_FILE" > "$TMP_FILE" || true
+    mv "$TMP_FILE" "$RATE_FILE"
+
+    COUNT=$(wc -l < "$RATE_FILE" | tr -d ' ')
+    if [[ "$COUNT" -ge "$HOOK_RATE_LIMIT" ]]; then
+        echo "Skipping due to rate limit for author: ${AUTHOR:0:12}... (${COUNT}/${HOOK_RATE_LIMIT} in 60s)" >&2
+        exit 0
+    fi
+
+    echo "$NOW_EPOCH" >> "$RATE_FILE"
 fi
 
 BODY=$(echo "$MSG" | jq -r '.content.body // .content.question // .content.text // ""')
@@ -79,7 +116,10 @@ Respond with type 'response' and set in_reply_to to '${HASH}'."
 
 # Invoke Claude (timeout handled by hook executor)
 if echo "$PROMPT" | claude --print -p -; then
+    # Track successful reply for dedupe
     mkdir -p "$(dirname "$REPLY_LOG_FILE")"
     touch "$REPLY_LOG_FILE"
     echo "$HASH" >>"$REPLY_LOG_FILE"
+    # Track reply time for cooldown
+    date -u +%s > "$LAST_REPLY_FILE"
 fi

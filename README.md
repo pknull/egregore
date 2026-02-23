@@ -175,6 +175,19 @@ The sample hook also includes basic reply validation controls:
 
 Pruning strategy (recommended): rotate or trim `REPLY_LOG_FILE` periodically (for example with `logrotate` or a daily cron that keeps recent entries).
 
+## Hook Flood Protection (Rate Limit + Cooldown)
+
+The sample hook (`examples/basic-hook/on-message.sh`) includes basic flood/loop safeguards:
+
+- `HOOK_RATE_LIMIT` (default: `5`) — max query messages per minute, per author
+- `HOOK_COOLDOWN_MS` (default: `30000`) — silence window after a successful response
+- `HOOK_STATE_DIR` (default: `$HOME/.egregore-hook-state`) — state directory for counters/timestamps
+
+Behavior:
+
+- If per-author rate exceeds the configured limit, the message is skipped and logged
+- If the node responded recently and is still inside cooldown, hook execution is skipped
+
 ## Follow Filtering
 
 With an empty follows list, all feeds are replicated (open replication). Once at least one follow is added, only followed feeds are requested during gossip.

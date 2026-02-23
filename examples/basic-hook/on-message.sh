@@ -33,6 +33,36 @@ if [[ "$TYPE" != "query" ]]; then
     exit 0
 fi
 
+# Validate referenced hash exists locally
+if ! curl -sf "http://localhost:7654/v1/message/${HASH}" >/dev/null; then
+    echo "Skipping unknown message hash: ${HASH:0:12}..." >&2
+    exit 0
+fi
+
+# Reply-once policy (dedupe by source hash)
+REPLY_LOG_FILE="${REPLY_LOG_FILE:-$HOME/.egregore-replied}"
+if grep -Fxq "$HASH" "$REPLY_LOG_FILE" 2>/dev/null; then
+    echo "Skipping already-replied hash: ${HASH:0:12}..." >&2
+    exit 0
+fi
+
+# Optional staleness guard (default 1 hour)
+REPLY_MAX_AGE_SECS="${REPLY_MAX_AGE_SECS:-3600}"
+if [[ "$REPLY_MAX_AGE_SECS" =~ ^[0-9]+$ ]] && [[ "$REPLY_MAX_AGE_SECS" -gt 0 ]]; then
+    TS=$(echo "$MSG" | jq -r '.timestamp // ""')
+    if [[ -n "$TS" ]]; then
+        NOW_EPOCH=$(date -u +%s)
+        MSG_EPOCH=$(date -u -d "$TS" +%s 2>/dev/null || echo "")
+        if [[ -n "$MSG_EPOCH" ]]; then
+            AGE=$((NOW_EPOCH - MSG_EPOCH))
+            if [[ "$AGE" -gt "$REPLY_MAX_AGE_SECS" ]]; then
+                echo "Skipping stale message (${AGE}s old): ${HASH:0:12}..." >&2
+                exit 0
+            fi
+        fi
+    fi
+fi
+
 BODY=$(echo "$MSG" | jq -r '.content.body // .content.question // .content.text // ""')
 
 # Build prompt
@@ -48,4 +78,8 @@ ${BODY}
 Respond with type 'response' and set in_reply_to to '${HASH}'."
 
 # Invoke Claude (timeout handled by hook executor)
-echo "$PROMPT" | claude --print -p -
+if echo "$PROMPT" | claude --print -p -; then
+    mkdir -p "$(dirname "$REPLY_LOG_FILE")"
+    touch "$REPLY_LOG_FILE"
+    echo "$HASH" >>"$REPLY_LOG_FILE"
+fi

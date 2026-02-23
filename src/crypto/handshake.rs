@@ -139,7 +139,6 @@ impl ClientHandshake {
 
         let state = ClientHandshakeStep3 {
             network_key: self.network_key,
-            identity: self.identity,
             client_eph_pk: self.ephemeral_public,
             server_eph_pk,
             shared_ab,
@@ -153,7 +152,6 @@ impl ClientHandshake {
 /// Client state after step 3, waiting for server's step 4 response.
 pub struct ClientHandshakeStep3 {
     network_key: [u8; 32],
-    identity: Identity,
     client_eph_pk: X25519Public,
     server_eph_pk: X25519Public,
     shared_ab: SharedSecret,

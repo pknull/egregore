@@ -161,24 +161,7 @@ impl HookExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::PublicId;
-    use chrono::Utc;
     use std::path::PathBuf;
-
-    fn make_test_message(content_type: &str) -> Message {
-        Message {
-            author: PublicId("@test.ed25519".to_string()),
-            sequence: 1,
-            previous: None,
-            timestamp: Utc::now(),
-            content: serde_json::json!({
-                "type": content_type,
-                "data": "test"
-            }),
-            hash: "testhash".to_string(),
-            signature: "testsig".to_string(),
-        }
-    }
 
     #[test]
     fn executor_returns_none_without_hooks() {

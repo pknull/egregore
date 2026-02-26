@@ -94,8 +94,16 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "content": {
-                        "type": "object",
-                        "description": "JSON content object to publish"
+                        "description": "JSON content to publish (any valid JSON)"
+                    },
+                    "relates": {
+                        "type": "string",
+                        "description": "Hash of a related message (optional, for threading)"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Categorization tags (optional)"
                     }
                 },
                 "required": ["content"]
@@ -103,7 +111,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "egregore_query",
-            description: "Query feed messages by author, search text, or content type",
+            description: "Query feed messages by author, search text, content type, tag, or related message",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -118,6 +126,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "content_type": {
                         "type": "string",
                         "description": "Content type filter (e.g. insight, profile)"
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "Filter by tag"
+                    },
+                    "relates": {
+                        "type": "string",
+                        "description": "Filter by related message hash (find replies/responses)"
                     },
                     "limit": {
                         "type": "integer",
@@ -247,11 +263,26 @@ async fn tool_publish(args: Value, state: &AppState) -> ToolCallResult {
         Some(c) if !c.is_null() => c.clone(),
         _ => return ToolCallResult::error("Missing required argument: content".into()),
     };
+    let relates = args
+        .get("relates")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let tags: Vec<String> = args
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let identity = state.identity.clone();
     let engine = state.engine.clone();
 
-    let result = tokio::task::spawn_blocking(move || engine.publish(&identity, content)).await;
+    let result =
+        tokio::task::spawn_blocking(move || engine.publish(&identity, content, relates, tags))
+            .await;
     ToolCallResult::from_blocking(result, |msg| {
         ToolCallResult::text(serde_json::to_string_pretty(&msg).unwrap())
     })
@@ -265,6 +296,11 @@ async fn tool_query(args: Value, state: &AppState) -> ToolCallResult {
         .map(|s| PublicId(s.to_string()));
     let content_type = args
         .get("content_type")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let tag = args.get("tag").and_then(|v| v.as_str()).map(String::from);
+    let relates = args
+        .get("relates")
         .and_then(|v| v.as_str())
         .map(String::from);
     let limit = args
@@ -289,6 +325,8 @@ async fn tool_query(args: Value, state: &AppState) -> ToolCallResult {
         let query = FeedQuery {
             author,
             content_type,
+            tag,
+            relates,
             limit,
             offset,
             ..Default::default()

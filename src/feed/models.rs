@@ -26,6 +26,12 @@ pub struct Message {
     pub previous: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub content: serde_json::Value,
+    /// Hash of a related message (optional, for threading).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relates: Option<String>,
+    /// Categorization tags (optional).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     /// SHA-256 hex of canonical JSON (excluding hash + signature).
     pub hash: String,
     /// Ed25519 signature of hash bytes (base64).
@@ -40,6 +46,12 @@ pub struct UnsignedMessage {
     pub previous: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub content: serde_json::Value,
+    /// Hash of a related message (optional, for threading).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relates: Option<String>,
+    /// Categorization tags (optional).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 impl UnsignedMessage {
@@ -70,7 +82,10 @@ pub struct FeedQuery {
     /// Exclude messages from this author (used for "others only" queries).
     pub exclude_author: Option<PublicId>,
     pub content_type: Option<String>,
+    /// Filter by tag (messages must have this tag).
     pub tag: Option<String>,
+    /// Filter by relates hash (messages that reference this hash).
+    pub relates: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
     pub search: Option<String>,
@@ -121,6 +136,8 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             content: from_enum,
+            relates: None,
+            tags: vec![],
         };
         let msg_json = UnsignedMessage {
             author: PublicId("@test.ed25519".to_string()),
@@ -130,6 +147,8 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             content: from_json,
+            relates: None,
+            tags: vec![],
         };
         assert_eq!(msg_enum.compute_hash(), msg_json.compute_hash());
     }
@@ -149,6 +168,8 @@ mod tests {
                 "description": null,
                 "capabilities": [],
             }),
+            relates: None,
+            tags: vec![],
         };
         let h1 = msg.compute_hash();
         let h2 = msg.compute_hash();

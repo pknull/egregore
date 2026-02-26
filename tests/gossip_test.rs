@@ -35,7 +35,7 @@ async fn two_instance_gossip_replication() {
     let engine_a = Arc::new(FeedEngine::new(store_a));
 
     engine_a
-        .publish(&identity_a, test_content("Test insight"))
+        .publish(&identity_a, test_content("Test insight"), None, vec![])
         .unwrap();
 
     // Verify A has 1 message
@@ -128,14 +128,14 @@ async fn bidirectional_replication() {
     // A publishes 2 messages
     for i in 0..2 {
         engine_a
-            .publish(&identity_a, test_content(&format!("A-insight-{i}")))
+            .publish(&identity_a, test_content(&format!("A-insight-{i}")), None, vec![])
             .unwrap();
     }
 
     // B publishes 3 messages
     for i in 0..3 {
         engine_b
-            .publish(&identity_b, test_content(&format!("B-insight-{i}")))
+            .publish(&identity_b, test_content(&format!("B-insight-{i}")), None, vec![])
             .unwrap();
     }
 
@@ -213,10 +213,10 @@ async fn follow_filtered_replication() {
 
     // A has feeds X and Y
     engine_a
-        .publish(&identity_x, test_content("X-insight"))
+        .publish(&identity_x, test_content("X-insight"), None, vec![])
         .unwrap();
     engine_a
-        .publish(&identity_y, test_content("Y-insight"))
+        .publish(&identity_y, test_content("Y-insight"), None, vec![])
         .unwrap();
 
     assert_eq!(engine_a.store().get_all_feeds().unwrap().len(), 2);

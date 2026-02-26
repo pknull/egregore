@@ -8,6 +8,7 @@
 //! the MCP JSON-RPC 2.0 endpoint at POST /mcp, and SSE streaming at GET /v1/events.
 
 pub mod mcp;
+pub mod mcp_registry;
 pub mod mcp_tools;
 pub mod response;
 pub mod routes_events;
@@ -29,12 +30,15 @@ use egregore::config::Config;
 use egregore::feed::engine::FeedEngine;
 use egregore::identity::Identity;
 
+use mcp_registry::SharedRegistry;
+
 #[derive(Clone)]
 pub struct AppState {
     pub identity: Identity,
     pub engine: Arc<FeedEngine>,
     pub config: Arc<Config>,
     pub started_at: Instant,
+    pub mcp_registry: SharedRegistry,
 }
 
 pub fn router(state: AppState) -> Router {

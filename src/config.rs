@@ -83,7 +83,7 @@ impl Default for Config {
             lan_discovery: false,
             discovery_port: 7656,
             hooks: Vec::new(),
-            push_enabled: false,
+            push_enabled: true,
             max_persistent_connections: default_max_persistent_connections(),
             reconnect_initial_secs: default_reconnect_initial_secs(),
             reconnect_max_secs: default_reconnect_max_secs(),

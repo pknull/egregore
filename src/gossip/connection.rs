@@ -9,11 +9,16 @@
 //! their Ed25519 identity. After that, `send`/`recv` handle Box Stream
 //! framing transparently. Connection closes with a goodbye frame.
 //!
+//! For persistent connections, `into_split()` separates the connection into
+//! independent `SecureReader` and `SecureWriter` halves for concurrent I/O.
+//!
 //! Used by gossip/client.rs (outgoing sync) and gossip/server.rs (incoming).
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
 use crate::crypto::box_stream::{BoxStreamReader, BoxStreamWriter};
@@ -289,6 +294,204 @@ impl SecureConnection {
         let _ = self.stream.write_all(&len).await;
         let _ = self.stream.write_all(&frame).await;
         let _ = self.stream.shutdown().await;
+        Ok(())
+    }
+
+    /// Get the peer's socket address.
+    pub fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+        self.stream.peer_addr()
+    }
+
+    /// Split into independent reader and writer halves for concurrent I/O.
+    ///
+    /// After splitting, the original `SecureConnection` is consumed. The halves
+    /// can be used independently in separate tasks for bidirectional persistent
+    /// connections.
+    pub fn into_split(self) -> (SecureReader, SecureWriter) {
+        let (read_half, write_half) = self.stream.into_split();
+        (
+            SecureReader {
+                stream: read_half,
+                reader: self.reader,
+                remote_public_key: self.remote_public_key,
+            },
+            SecureWriter {
+                stream: write_half,
+                writer: self.writer,
+            },
+        )
+    }
+}
+
+/// Read half of a split secure connection.
+///
+/// Handles Box Stream decryption and frame reassembly for incoming data.
+pub struct SecureReader {
+    stream: OwnedReadHalf,
+    reader: BoxStreamReader,
+    pub remote_public_key: ed25519_dalek::VerifyingKey,
+}
+
+impl SecureReader {
+    /// Receive data, reassembling fragmented frames.
+    ///
+    /// Returns None on graceful connection close or goodbye frame.
+    /// Returns error on protocol violations or size limits exceeded.
+    pub async fn recv(&mut self) -> Result<Option<Vec<u8>>> {
+        let mut assembled = Vec::new();
+
+        loop {
+            let mut len_buf = [0u8; 4];
+            match tokio::time::timeout(FRAME_READ_TIMEOUT, self.stream.read_exact(&mut len_buf))
+                .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(None);
+                }
+                Ok(Err(e)) => {
+                    return Err(EgreError::Io(e));
+                }
+                Err(_) => {
+                    return Err(EgreError::Peer {
+                        reason: "read timeout".into(),
+                    });
+                }
+            }
+
+            let frame_len = u32::from_be_bytes(len_buf) as usize;
+            if frame_len == 0 {
+                return Err(EgreError::Peer {
+                    reason: "zero-length frame".into(),
+                });
+            }
+            if frame_len > MAX_FRAME_SIZE {
+                return Err(EgreError::Peer {
+                    reason: format!("frame too large: {} > {}", frame_len, MAX_FRAME_SIZE),
+                });
+            }
+
+            let mut frame = vec![0u8; frame_len];
+            tokio::time::timeout(FRAME_READ_TIMEOUT, self.stream.read_exact(&mut frame))
+                .await
+                .map_err(|_| EgreError::Peer {
+                    reason: "read timeout".into(),
+                })??;
+
+            if frame.len() < 34 {
+                return Err(EgreError::Peer {
+                    reason: "frame too small".into(),
+                });
+            }
+
+            let header: [u8; 34] = frame[..34].try_into().unwrap();
+            match self.reader.decrypt_header(&header)? {
+                None => return Ok(None),
+                Some((body_len, body_mac)) => {
+                    let body_ct = &frame[34..];
+
+                    if body_ct.len() != body_len as usize {
+                        return Err(EgreError::Peer {
+                            reason: format!(
+                                "body length mismatch: header={}, actual={}",
+                                body_len,
+                                body_ct.len()
+                            ),
+                        });
+                    }
+
+                    let plaintext = self.reader.decrypt_body(body_ct, &body_mac)?;
+
+                    if plaintext.is_empty() {
+                        return Err(EgreError::Peer {
+                            reason: "empty frame payload".into(),
+                        });
+                    }
+
+                    let prefix = plaintext[0];
+                    let data = &plaintext[1..];
+
+                    if assembled.len() + data.len() > MAX_ASSEMBLED_SIZE {
+                        return Err(EgreError::Peer {
+                            reason: format!(
+                                "assembled message too large: {} > {}",
+                                assembled.len() + data.len(),
+                                MAX_ASSEMBLED_SIZE
+                            ),
+                        });
+                    }
+
+                    assembled.extend_from_slice(data);
+
+                    if prefix == FRAME_PREFIX_FINAL {
+                        return Ok(Some(assembled));
+                    } else if prefix != FRAME_PREFIX_CONTINUATION {
+                        return Err(EgreError::Peer {
+                            reason: format!("invalid continuation prefix: {:#x}", prefix),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Write half of a split secure connection.
+///
+/// Handles Box Stream encryption and frame fragmentation for outgoing data.
+pub struct SecureWriter {
+    stream: OwnedWriteHalf,
+    writer: BoxStreamWriter,
+}
+
+impl SecureWriter {
+    /// Maximum payload per frame (Box Stream limit minus continuation byte)
+    const MAX_CHUNK_SIZE: usize = 4095;
+
+    /// Send data, fragmenting across multiple frames if needed.
+    pub async fn send(&mut self, data: &[u8]) -> Result<()> {
+        if data.is_empty() {
+            let payload = vec![FRAME_PREFIX_FINAL];
+            let frame = self.writer.encrypt_frame(&payload)?;
+            let len = (frame.len() as u32).to_be_bytes();
+            self.stream.write_all(&len).await?;
+            self.stream.write_all(&frame).await?;
+            return Ok(());
+        }
+
+        let total_chunks = data.len().div_ceil(Self::MAX_CHUNK_SIZE);
+
+        for (i, chunk) in data.chunks(Self::MAX_CHUNK_SIZE).enumerate() {
+            let is_final = i == total_chunks - 1;
+            let prefix = if is_final {
+                FRAME_PREFIX_FINAL
+            } else {
+                FRAME_PREFIX_CONTINUATION
+            };
+
+            let mut payload = Vec::with_capacity(1 + chunk.len());
+            payload.push(prefix);
+            payload.extend_from_slice(chunk);
+
+            let frame = self.writer.encrypt_frame(&payload)?;
+            let len = (frame.len() as u32).to_be_bytes();
+            self.stream.write_all(&len).await?;
+            self.stream.write_all(&frame).await?;
+        }
+        Ok(())
+    }
+
+    /// Send goodbye frame to signal clean stream termination.
+    pub async fn goodbye(&mut self) -> Result<()> {
+        let frame = self.writer.goodbye()?;
+        let len = (frame.len() as u32).to_be_bytes();
+        let _ = self.stream.write_all(&len).await;
+        Ok(())
+    }
+
+    /// Shutdown the write half of the connection.
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.stream.shutdown().await?;
         Ok(())
     }
 }

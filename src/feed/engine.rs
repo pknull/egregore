@@ -46,10 +46,16 @@ impl FeedEngine {
 
     /// Publish a new message to the local identity's feed.
     /// Handles sequencing, hashing, and signing automatically.
+    ///
+    /// - `content`: The message payload (any JSON).
+    /// - `relates`: Optional hash of a related message (for threading).
+    /// - `tags`: Optional categorization tags.
     pub fn publish(
         &self,
         identity: &Identity,
         content: serde_json::Value,
+        relates: Option<String>,
+        tags: Vec<String>,
     ) -> Result<Message> {
         let author = identity.public_id();
 
@@ -93,6 +99,8 @@ impl FeedEngine {
             previous,
             timestamp: Utc::now(),
             content,
+            relates: relates.clone(),
+            tags: tags.clone(),
         };
 
         let hash = unsigned.compute_hash();
@@ -105,6 +113,8 @@ impl FeedEngine {
             previous: unsigned.previous,
             timestamp: unsigned.timestamp,
             content: unsigned.content,
+            relates,
+            tags,
             hash,
             signature,
         };
@@ -181,6 +191,8 @@ impl FeedEngine {
             previous: msg.previous.clone(),
             timestamp: msg.timestamp,
             content: msg.content.clone(),
+            relates: msg.relates.clone(),
+            tags: msg.tags.clone(),
         };
         let computed_hash = unsigned.compute_hash();
         if computed_hash != msg.hash {
@@ -298,7 +310,9 @@ mod tests {
             capabilities: vec!["testing".to_string()],
         };
 
-        let msg = engine.publish(&identity, content.to_value()).unwrap();
+        let msg = engine
+            .publish(&identity, content.to_value(), None, vec![])
+            .unwrap();
         assert_eq!(msg.sequence, 1);
         assert!(msg.previous.is_none());
         assert_eq!(msg.author, identity.public_id());
@@ -321,6 +335,8 @@ mod tests {
                     tags: vec![],
                 }
                 .to_value(),
+                None,
+                vec![],
             )
             .unwrap();
 
@@ -337,6 +353,8 @@ mod tests {
                     tags: vec![],
                 }
                 .to_value(),
+                None,
+                vec![],
             )
             .unwrap();
 
@@ -353,7 +371,7 @@ mod tests {
             "numbers": [1, 2, 3],
         });
 
-        let msg = engine.publish(&identity, content).unwrap();
+        let msg = engine.publish(&identity, content, None, vec![]).unwrap();
         assert_eq!(msg.sequence, 1);
         assert_eq!(msg.content["type"], "custom");
         assert_eq!(msg.content["data"]["key"], "value");
@@ -376,6 +394,8 @@ mod tests {
                     capabilities: vec![],
                 }
                 .to_value(),
+                None,
+                vec![],
             )
             .unwrap();
 
@@ -399,6 +419,8 @@ mod tests {
                     capabilities: vec![],
                 }
                 .to_value(),
+                None,
+                vec![],
             )
             .unwrap();
 
@@ -416,13 +438,13 @@ mod tests {
 
         // Publish 3 messages on remote
         let _m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
             .unwrap();
         let _m2 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 2}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 2}), None, vec![])
             .unwrap();
         let m3 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 3}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 3}), None, vec![])
             .unwrap();
 
         // Ingesting sequence 3 without 1 and 2 — accepted but flagged
@@ -443,13 +465,13 @@ mod tests {
 
         // Publish m1 on remote, ingest it
         let m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
             .unwrap();
         engine.ingest(&m1).unwrap();
 
         // Publish m2 on remote (legitimate)
         let mut m2 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 2}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 2}), None, vec![])
             .unwrap();
 
         // Tamper: change previous to a fake hash (fork attack)
@@ -461,6 +483,8 @@ mod tests {
             previous: m2.previous.clone(),
             timestamp: m2.timestamp,
             content: m2.content.clone(),
+            relates: m2.relates.clone(),
+            tags: m2.tags.clone(),
         };
         m2.hash = unsigned.compute_hash();
         let sig = sign_bytes(&identity, m2.hash.as_bytes());
@@ -486,6 +510,8 @@ mod tests {
             previous: Some("fake_previous_hash".to_string()),
             timestamp: Utc::now(),
             content: serde_json::json!({"type": "test"}),
+            relates: None,
+            tags: vec![],
         };
         let hash = unsigned.compute_hash();
         let sig = sign_bytes(&identity, hash.as_bytes());
@@ -495,6 +521,8 @@ mod tests {
             previous: unsigned.previous,
             timestamp: unsigned.timestamp,
             content: unsigned.content,
+            relates: None,
+            tags: vec![],
             hash,
             signature: B64.encode(sig.to_bytes()),
         };
@@ -516,7 +544,7 @@ mod tests {
 
         // Ingest legitimate message 1
         let m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
             .unwrap();
         engine.ingest(&m1).unwrap();
 
@@ -527,6 +555,8 @@ mod tests {
             previous: None,
             timestamp: Utc::now(),
             content: serde_json::json!({"type": "test", "n": 2}),
+            relates: None,
+            tags: vec![],
         };
         let hash = unsigned.compute_hash();
         let sig = sign_bytes(&identity, hash.as_bytes());
@@ -536,6 +566,8 @@ mod tests {
             previous: unsigned.previous,
             timestamp: unsigned.timestamp,
             content: unsigned.content,
+            relates: None,
+            tags: vec![],
             hash,
             signature: B64.encode(sig.to_bytes()),
         };
@@ -556,13 +588,13 @@ mod tests {
         let remote_engine = FeedEngine::new(remote_store);
 
         let m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
             .unwrap();
         let m2 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 2}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 2}), None, vec![])
             .unwrap();
         let m3 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 3}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 3}), None, vec![])
             .unwrap();
 
         // Late join: receive messages 2 and 3 (gap at 1)
@@ -594,10 +626,10 @@ mod tests {
 
         // Ingest message 2 first (gap at 1)
         let _m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
             .unwrap();
         let m2 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 2}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 2}), None, vec![])
             .unwrap();
         engine.ingest(&m2).unwrap();
 
@@ -608,6 +640,8 @@ mod tests {
             previous: None,
             timestamp: Utc::now(),
             content: serde_json::json!({"type": "fake", "n": 999}),
+            relates: None,
+            tags: vec![],
         };
         let hash = unsigned.compute_hash();
         let sig = sign_bytes(&identity, hash.as_bytes());
@@ -617,6 +651,8 @@ mod tests {
             previous: unsigned.previous,
             timestamp: unsigned.timestamp,
             content: unsigned.content,
+            relates: None,
+            tags: vec![],
             hash,
             signature: B64.encode(sig.to_bytes()),
         };
@@ -638,13 +674,13 @@ mod tests {
         let remote_engine = FeedEngine::new(remote_store);
 
         let m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
             .unwrap();
         let m2 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 2}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 2}), None, vec![])
             .unwrap();
         let m3 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 3}))
+            .publish(&identity, serde_json::json!({"type": "test", "n": 3}), None, vec![])
             .unwrap();
 
         // Ingest in order — should all succeed
@@ -674,6 +710,8 @@ mod tests {
                     tags: vec!["knowledge".to_string()],
                 }
                 .to_value(),
+                None,
+                vec!["knowledge".to_string()],
             )
             .unwrap();
 

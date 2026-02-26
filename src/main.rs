@@ -81,9 +81,9 @@ struct Cli {
     #[arg(long)]
     init_config: bool,
 
-    /// Enable persistent push-based connections for real-time message propagation
+    /// Disable persistent push-based connections (push is enabled by default)
     #[arg(long)]
-    push_enabled: bool,
+    no_push: bool,
 
     /// Maximum number of persistent connections to maintain
     #[arg(long)]
@@ -156,9 +156,9 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
         config.hooks.push(cli_hook);
     }
 
-    // Push configuration
-    if matches.value_source("push_enabled") == Some(ValueSource::CommandLine) {
-        config.push_enabled = cli.push_enabled;
+    // Push configuration (push is enabled by default, --no-push disables)
+    if cli.no_push {
+        config.push_enabled = false;
     }
     if let Some(max_conns) = cli.max_persistent_connections {
         config.max_persistent_connections = max_conns;

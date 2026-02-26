@@ -24,8 +24,8 @@ impl FeedStore {
         let raw_json = serde_json::to_string(msg)?;
 
         conn.execute(
-            "INSERT INTO messages (hash, author, sequence, previous, timestamp, content_type, content_json, signature, raw_json, chain_valid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO messages (hash, author, sequence, previous, timestamp, content_type, content_json, signature, raw_json, chain_valid, relates)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 msg.hash,
                 msg.author.0,
@@ -37,6 +37,7 @@ impl FeedStore {
                 msg.signature,
                 raw_json,
                 chain_valid as i32,
+                msg.relates,
             ],
         )
         .map_err(|e| match e {
@@ -50,6 +51,14 @@ impl FeedStore {
             }
             other => EgreError::Database(other),
         })?;
+
+        // Insert tags
+        for tag in &msg.tags {
+            conn.execute(
+                "INSERT OR IGNORE INTO message_tags (message_hash, tag) VALUES (?1, ?2)",
+                params![msg.hash, tag],
+            )?;
+        }
 
         // Update feed tracking
         conn.execute(
@@ -113,25 +122,42 @@ impl FeedStore {
     /// Get feed messages with pagination.
     pub fn query_messages(&self, query: &FeedQuery) -> Result<Vec<Message>> {
         let conn = self.conn();
-        let mut sql = String::from("SELECT raw_json FROM messages WHERE 1=1");
+        let mut sql = String::from("SELECT DISTINCT m.raw_json FROM messages m");
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
+        // Join with message_tags if filtering by tag
+        if query.tag.is_some() {
+            sql.push_str(" INNER JOIN message_tags t ON m.hash = t.message_hash");
+        }
+
+        sql.push_str(" WHERE 1=1");
+
         if let Some(ref author) = query.author {
-            sql.push_str(&format!(" AND author = ?{}", param_values.len() + 1));
+            sql.push_str(&format!(" AND m.author = ?{}", param_values.len() + 1));
             param_values.push(Box::new(author.0.clone()));
         }
 
         if let Some(ref exclude) = query.exclude_author {
-            sql.push_str(&format!(" AND author != ?{}", param_values.len() + 1));
+            sql.push_str(&format!(" AND m.author != ?{}", param_values.len() + 1));
             param_values.push(Box::new(exclude.0.clone()));
         }
 
         if let Some(ref ct) = query.content_type {
-            sql.push_str(&format!(" AND content_type = ?{}", param_values.len() + 1));
+            sql.push_str(&format!(" AND m.content_type = ?{}", param_values.len() + 1));
             param_values.push(Box::new(ct.clone()));
         }
 
-        sql.push_str(" ORDER BY timestamp DESC");
+        if let Some(ref relates) = query.relates {
+            sql.push_str(&format!(" AND m.relates = ?{}", param_values.len() + 1));
+            param_values.push(Box::new(relates.clone()));
+        }
+
+        if let Some(ref tag) = query.tag {
+            sql.push_str(&format!(" AND t.tag = ?{}", param_values.len() + 1));
+            param_values.push(Box::new(tag.clone()));
+        }
+
+        sql.push_str(" ORDER BY m.timestamp DESC");
 
         let limit = query.limit.unwrap_or(50).min(200);
         let offset = query.offset.unwrap_or(0);

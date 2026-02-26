@@ -149,12 +149,26 @@ impl FeedStore {
 
     fn init_schema(&self) -> Result<()> {
         let conn = self.conn();
+        // Run column-adding migrations FIRST, before SCHEMA_DDL tries to create
+        // indexes on those columns. This handles upgrades from older databases.
+        Self::run_pre_schema_migrations(&conn)?;
         conn.execute_batch(SCHEMA_DDL)?;
-        Self::run_migrations(&conn)?;
+        Self::run_post_schema_migrations(&conn)?;
         Ok(())
     }
 
-    fn run_migrations(conn: &Connection) -> Result<()> {
+    /// Migrations that must run BEFORE SCHEMA_DDL (column additions).
+    /// SCHEMA_DDL creates indexes on these columns, so they must exist first.
+    fn run_pre_schema_migrations(conn: &Connection) -> Result<()> {
+        // Check if messages table exists (fresh database has no tables yet)
+        let has_messages: bool = conn
+            .prepare("SELECT 1 FROM messages LIMIT 0")
+            .is_ok();
+        if !has_messages {
+            // Fresh database - SCHEMA_DDL will create everything
+            return Ok(());
+        }
+
         // Migration: add chain_valid column
         let has_chain_valid: bool = conn
             .prepare("SELECT chain_valid FROM messages LIMIT 0")
@@ -165,6 +179,19 @@ impl FeedStore {
             )?;
         }
 
+        // Migration: add relates column to messages
+        let has_relates: bool = conn
+            .prepare("SELECT relates FROM messages LIMIT 0")
+            .is_ok();
+        if !has_relates {
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN relates TEXT;")?;
+        }
+
+        Ok(())
+    }
+
+    /// Migrations that run AFTER SCHEMA_DDL (new tables, etc.).
+    fn run_post_schema_migrations(conn: &Connection) -> Result<()> {
         // Migration: add peer_health table
         let has_peer_health: bool = conn
             .prepare("SELECT 1 FROM peer_health LIMIT 0")
@@ -195,17 +222,6 @@ impl FeedStore {
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );",
-            )?;
-        }
-
-        // Migration: add relates column to messages
-        let has_relates: bool = conn
-            .prepare("SELECT relates FROM messages LIMIT 0")
-            .is_ok();
-        if !has_relates {
-            conn.execute_batch(
-                "ALTER TABLE messages ADD COLUMN relates TEXT;
-                 CREATE INDEX IF NOT EXISTS idx_messages_relates ON messages(relates);",
             )?;
         }
 

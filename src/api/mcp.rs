@@ -133,7 +133,7 @@ pub async fn mcp_handler(State(state): State<AppState>, body: String) -> Respons
         }
         "ping" => rpc_ok(id, Value::Object(serde_json::Map::new())),
         "tools/list" => {
-            let tools = mcp_tools::tool_definitions();
+            let tools = state.mcp_registry.list();
             rpc_ok(id, serde_json::json!({ "tools": tools }))
         }
         "tools/call" => {
@@ -149,6 +149,12 @@ pub async fn mcp_handler(State(state): State<AppState>, body: String) -> Respons
                     return rpc_err(id, INVALID_PARAMS, "arguments must be an object".into())
                 }
             };
+
+            // Validate arguments against schema before dispatch
+            if let Err(e) = state.mcp_registry.validate(&name, &arguments) {
+                return rpc_err(id, INVALID_PARAMS, e.to_string());
+            }
+
             let result = mcp_tools::dispatch_tool(&name, arguments, &state).await;
             rpc_ok(id, serde_json::to_value(result).unwrap())
         }
@@ -183,6 +189,7 @@ mod tests {
             engine: Arc::new(engine),
             config: Arc::new(Config::default()),
             started_at: Instant::now(),
+            mcp_registry: crate::api::mcp_registry::create_registry(),
         }
     }
 
@@ -536,7 +543,7 @@ mod tests {
     async fn unknown_tool() {
         let state = test_state();
         let app = router(state);
-        let (_, body) = rpc_post(
+        let (status, body) = rpc_post(
             app,
             &serde_json::json!({
                 "jsonrpc": "2.0",
@@ -550,10 +557,69 @@ mod tests {
         )
         .await;
 
+        assert_eq!(status, StatusCode::OK);
         let body = body.unwrap();
-        assert_eq!(body["result"]["isError"], true);
-        let text = body["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("Unknown tool"));
+        // Unknown tool now returns JSON-RPC INVALID_PARAMS error
+        assert_eq!(body["error"]["code"], INVALID_PARAMS);
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn schema_validation_error() {
+        let state = test_state();
+        let app = router(state);
+        let (status, body) = rpc_post(
+            app,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {
+                    "name": "egregore_query",
+                    "arguments": { "limit": "not a number" }
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = body.unwrap();
+        // Schema validation returns JSON-RPC INVALID_PARAMS error
+        assert_eq!(body["error"]["code"], INVALID_PARAMS);
+        // Error should mention the invalid field
+        let msg = body["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("limit"), "Should mention invalid field: {msg}");
+    }
+
+    #[tokio::test]
+    async fn missing_required_field_error() {
+        let state = test_state();
+        let app = router(state);
+        let (status, body) = rpc_post(
+            app,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 16,
+                "method": "tools/call",
+                "params": {
+                    "name": "egregore_publish",
+                    "arguments": {}
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = body.unwrap();
+        assert_eq!(body["error"]["code"], INVALID_PARAMS);
+        let msg = body["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("content"),
+            "Should mention missing required field: {msg}"
+        );
     }
 
     #[tokio::test]

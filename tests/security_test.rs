@@ -45,6 +45,8 @@ fn create_signed_message(identity: &Identity, content: serde_json::Value) -> Mes
         previous: None,
         timestamp: Utc::now(),
         content,
+        relates: None,
+        tags: vec![],
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(identity, hash.as_bytes());
@@ -54,6 +56,8 @@ fn create_signed_message(identity: &Identity, content: serde_json::Value) -> Mes
         previous: unsigned.previous,
         timestamp: unsigned.timestamp,
         content: unsigned.content,
+        relates: None,
+        tags: vec![],
         hash,
         signature: B64.encode(sig.to_bytes()),
     }
@@ -251,7 +255,7 @@ async fn authorized_peer_accepted_unauthorized_rejected() {
 
     let engine = Arc::new(FeedEngine::new(FeedStore::open_memory().unwrap()));
     engine
-        .publish(&server_identity, test_content("server data"))
+        .publish(&server_identity, test_content("server data"), None, vec![])
         .unwrap();
 
     // Build AuthorizeFn matching production pattern (server.rs:54-59)
@@ -362,6 +366,8 @@ async fn forged_signature_rejected_during_replication() {
         previous: None,
         timestamp: Utc::now(),
         content: test_content("forged insight"),
+        relates: None,
+        tags: vec![],
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(&attacker, hash.as_bytes());
@@ -371,6 +377,8 @@ async fn forged_signature_rejected_during_replication() {
         previous: unsigned.previous,
         timestamp: unsigned.timestamp,
         content: unsigned.content,
+        relates: None,
+        tags: vec![],
         hash,
         signature: B64.encode(sig.to_bytes()),
     };
@@ -404,6 +412,8 @@ async fn tampered_content_rejected_during_replication() {
         previous: original.previous.clone(),
         timestamp: original.timestamp,
         content: test_content("tampered payload"),
+        relates: None,
+        tags: vec![],
         hash: original.hash,
         signature: original.signature,
     };
@@ -437,6 +447,8 @@ async fn tampered_hash_rejected_during_replication() {
         previous: None,
         timestamp: original.timestamp,
         content: test_content("tampered payload"),
+        relates: None,
+        tags: vec![],
     };
     let new_hash = tampered_unsigned.compute_hash();
     let tampered = Message {
@@ -445,6 +457,8 @@ async fn tampered_hash_rejected_during_replication() {
         previous: None,
         timestamp: original.timestamp,
         content: test_content("tampered payload"),
+        relates: None,
+        tags: vec![],
         hash: new_hash,
         signature: original.signature, // signed the original hash, not this one
     };
@@ -471,7 +485,7 @@ async fn duplicate_message_rejected_during_replication() {
     let identity_a = Identity::generate();
     let engine_a = Arc::new(FeedEngine::new(FeedStore::open_memory().unwrap()));
     engine_a
-        .publish(&identity_a, test_content("insight"))
+        .publish(&identity_a, test_content("insight"), None, vec![])
         .unwrap();
 
     let engine_b = Arc::new(FeedEngine::new(FeedStore::open_memory().unwrap()));
@@ -520,6 +534,8 @@ async fn sequence_gap_accepted_but_flagged_during_replication() {
         previous: Some("fake_previous_hash".to_string()),
         timestamp: Utc::now(),
         content: test_content("late join message"),
+        relates: None,
+        tags: vec![],
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(&author, hash.as_bytes());
@@ -529,6 +545,8 @@ async fn sequence_gap_accepted_but_flagged_during_replication() {
         previous: unsigned.previous,
         timestamp: unsigned.timestamp,
         content: unsigned.content,
+        relates: None,
+        tags: vec![],
         hash: hash.clone(),
         signature: B64.encode(sig.to_bytes()),
     };
@@ -577,6 +595,8 @@ async fn fork_attack_rejected_during_replication() {
         previous: Some("forked_chain_fake_hash".to_string()),
         timestamp: Utc::now(),
         content: test_content("forked message"),
+        relates: None,
+        tags: vec![],
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(&identity, hash.as_bytes());
@@ -586,6 +606,8 @@ async fn fork_attack_rejected_during_replication() {
         previous: unsigned.previous,
         timestamp: unsigned.timestamp,
         content: unsigned.content,
+        relates: None,
+        tags: vec![],
         hash,
         signature: B64.encode(sig.to_bytes()),
     };
@@ -619,7 +641,7 @@ async fn malformed_gossip_message_handled() {
     let server_identity = Identity::generate();
     let engine = Arc::new(FeedEngine::new(FeedStore::open_memory().unwrap()));
     engine
-        .publish(&server_identity, test_content("server data"))
+        .publish(&server_identity, test_content("server data"), None, vec![])
         .unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

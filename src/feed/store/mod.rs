@@ -71,11 +71,13 @@ const SCHEMA_DDL: &str = "
         signature TEXT NOT NULL,
         raw_json TEXT NOT NULL,
         chain_valid INTEGER NOT NULL DEFAULT 1,
+        relates TEXT,
         UNIQUE(author, sequence)
     );
     CREATE INDEX IF NOT EXISTS idx_messages_author_seq ON messages(author, sequence);
     CREATE INDEX IF NOT EXISTS idx_messages_content_type ON messages(content_type);
     CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_messages_relates ON messages(relates);
     CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
         content_text, content='messages', content_rowid='rowid'
     );
@@ -86,6 +88,13 @@ const SCHEMA_DDL: &str = "
         INSERT INTO messages_fts(messages_fts, rowid, content_text)
         VALUES ('delete', old.rowid, old.content_json);
     END;
+    CREATE TABLE IF NOT EXISTS message_tags (
+        message_hash TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        PRIMARY KEY (message_hash, tag),
+        FOREIGN KEY (message_hash) REFERENCES messages(hash) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_tags_tag ON message_tags(tag);
     CREATE TABLE IF NOT EXISTS peers (
         address TEXT PRIMARY KEY, public_id TEXT, last_connected TEXT, last_synced TEXT
     );
@@ -186,6 +195,33 @@ impl FeedStore {
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );",
+            )?;
+        }
+
+        // Migration: add relates column to messages
+        let has_relates: bool = conn
+            .prepare("SELECT relates FROM messages LIMIT 0")
+            .is_ok();
+        if !has_relates {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN relates TEXT;
+                 CREATE INDEX IF NOT EXISTS idx_messages_relates ON messages(relates);",
+            )?;
+        }
+
+        // Migration: add message_tags table
+        let has_message_tags: bool = conn
+            .prepare("SELECT 1 FROM message_tags LIMIT 0")
+            .is_ok();
+        if !has_message_tags {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS message_tags (
+                    message_hash TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    PRIMARY KEY (message_hash, tag),
+                    FOREIGN KEY (message_hash) REFERENCES messages(hash) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_message_tags_tag ON message_tags(tag);",
             )?;
         }
 
@@ -378,8 +414,9 @@ pub(crate) fn make_test_message(
             "title": format!("Test insight {seq}"),
             "observation": "Test observation",
             "confidence": 0.9,
-            "tags": ["test"],
         }),
+        relates: None,
+        tags: vec![],
         hash: format!("hash_{author}_{seq}"),
         signature: "sig".to_string(),
     }

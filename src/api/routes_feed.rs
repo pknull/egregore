@@ -21,6 +21,10 @@ pub struct FeedParams {
     pub limit: Option<u32>,
     pub offset: Option<u32>,
     pub content_type: Option<String>,
+    /// Filter by tag.
+    pub tag: Option<String>,
+    /// Filter by related message hash (find replies/responses).
+    pub relates: Option<String>,
     /// Include own messages in results (default: false).
     pub include_self: Option<bool>,
 }
@@ -44,6 +48,8 @@ pub async fn get_feed(
             author: None,
             exclude_author: if include_self { None } else { Some(self_id) },
             content_type: params.content_type,
+            tag: params.tag,
+            relates: params.relates,
             limit: params.limit,
             offset: params.offset,
             ..Default::default()

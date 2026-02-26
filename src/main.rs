@@ -239,6 +239,7 @@ async fn main() -> anyhow::Result<()> {
         engine: engine.clone(),
         config: Arc::new(config.clone()),
         started_at: std::time::Instant::now(),
+        mcp_registry: api::mcp_registry::create_registry(),
     };
     let app = api::router(state);
 

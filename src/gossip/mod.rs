@@ -1,7 +1,11 @@
+pub mod backoff;
 pub mod client;
 pub mod connection;
 pub mod discovery;
 pub mod health;
 pub mod peers;
+pub mod persistent;
+pub mod push;
+pub mod registry;
 pub mod replication;
 pub mod server;

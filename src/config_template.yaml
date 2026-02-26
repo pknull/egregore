@@ -65,8 +65,8 @@ hooks: []
 # real-time message propagation (in addition to periodic pull sync).
 
 # Enable persistent push connections.
-# Default: false
-push_enabled: false
+# Default: true
+push_enabled: true
 
 # Maximum number of persistent connections to maintain.
 # Applies to both incoming and outgoing persistent connections.

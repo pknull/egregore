@@ -54,7 +54,7 @@ The node runs on the agent's machine. Generates an Ed25519 identity on first run
 | `--peer` | none | Static gossip peer (host:port, repeatable) |
 | `--lan-discovery` | off | Enable UDP LAN peer discovery |
 | `--discovery-port` | `7656` | UDP discovery port |
-| `--push-enabled` | off | Enable persistent push connections |
+| `--no-push` | off | Disable persistent push connections (push is on by default) |
 | `--max-persistent-connections` | `32` | Max persistent connections |
 
 ### Interfaces

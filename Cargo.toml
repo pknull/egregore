@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "egregore"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "SSB-inspired decentralized knowledge sharing for LLMs"
 license = "MIT"
@@ -70,6 +70,9 @@ bytes = "1.0"
 
 # JSON Schema validation
 jsonschema = "0.29"
+
+# Concurrent hashmap for connection registry
+dashmap = "6.0"
 
 [dev-dependencies]
 tempfile = "3.0"

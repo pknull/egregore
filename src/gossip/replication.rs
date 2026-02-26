@@ -14,7 +14,7 @@ use crate::gossip::health::{clamp_observation_timestamp, PeerObservation, MAX_PE
 use crate::identity::PublicId;
 
 /// Gossip protocol messages sent over the encrypted connection.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum GossipMessage {
     /// "I have these feeds at these sequences, and these peer observations"
@@ -31,15 +31,31 @@ pub enum GossipMessage {
     Messages { messages: Vec<Message> },
     /// "Replication complete"
     Done,
+    /// Push a new message (real-time notification over persistent connection)
+    Push { message: Message },
+    /// Request to establish a persistent connection
+    Subscribe { mode: SubscriptionMode },
+    /// Response to Subscribe request
+    SubscribeAck { accepted: bool, mode: SubscriptionMode },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Mode for persistent connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionMode {
+    /// Traditional pull-only replication (no persistent connection)
+    PullOnly,
+    /// Persistent connection with push notifications
+    Persistent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedState {
     pub author: PublicId,
     pub latest_sequence: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedRequest {
     pub author: PublicId,
     pub after_sequence: u64,
@@ -477,4 +493,132 @@ async fn handle_peer_wants(
         tracing::debug!("no Want message received");
     }
     Ok(())
+}
+
+/// Negotiate persistent mode as the initiator (client).
+///
+/// After replication completes, sends Subscribe request and waits for ack.
+/// Returns `true` if peer accepted persistent mode, `false` otherwise.
+pub async fn negotiate_persistent_mode_client(
+    conn: &mut SecureConnection,
+) -> Result<bool> {
+    tracing::debug!("requesting persistent mode");
+    let subscribe = GossipMessage::Subscribe {
+        mode: SubscriptionMode::Persistent,
+    };
+    conn.send(&serde_json::to_vec(&subscribe)?).await?;
+
+    // Wait for ack with timeout
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        conn.recv(),
+    ).await {
+        Ok(Ok(Some(data))) => {
+            match serde_json::from_slice::<GossipMessage>(&data) {
+                Ok(GossipMessage::SubscribeAck { accepted, mode }) => {
+                    if accepted && mode == SubscriptionMode::Persistent {
+                        tracing::info!("persistent mode accepted by peer");
+                        Ok(true)
+                    } else {
+                        tracing::debug!(
+                            accepted = accepted,
+                            mode = ?mode,
+                            "peer declined persistent mode"
+                        );
+                        Ok(false)
+                    }
+                }
+                Ok(other) => {
+                    tracing::warn!(msg = ?other, "unexpected response to Subscribe");
+                    Ok(false)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to parse Subscribe response");
+                    Ok(false)
+                }
+            }
+        }
+        Ok(Ok(None)) => {
+            tracing::debug!("connection closed during Subscribe negotiation");
+            Ok(false)
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "error during Subscribe negotiation");
+            Ok(false)
+        }
+        Err(_) => {
+            tracing::debug!("timeout waiting for Subscribe ack (peer may be old version)");
+            Ok(false)
+        }
+    }
+}
+
+/// Handle persistent mode negotiation as the responder (server).
+///
+/// If a Subscribe message is received, responds with SubscribeAck.
+/// Returns `true` if persistent mode was successfully negotiated.
+pub async fn negotiate_persistent_mode_server(
+    conn: &mut SecureConnection,
+    push_enabled: bool,
+    at_capacity: bool,
+) -> Result<bool> {
+    // Check for Subscribe message with short timeout
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        conn.recv(),
+    ).await {
+        Ok(Ok(Some(data))) => {
+            match serde_json::from_slice::<GossipMessage>(&data) {
+                Ok(GossipMessage::Subscribe { mode }) => {
+                    let accept = push_enabled
+                        && !at_capacity
+                        && mode == SubscriptionMode::Persistent;
+
+                    let ack = GossipMessage::SubscribeAck {
+                        accepted: accept,
+                        mode: if accept { SubscriptionMode::Persistent } else { SubscriptionMode::PullOnly },
+                    };
+                    conn.send(&serde_json::to_vec(&ack)?).await?;
+
+                    if accept {
+                        tracing::info!("accepted persistent mode request");
+                    } else {
+                        tracing::debug!(
+                            push_enabled = push_enabled,
+                            at_capacity = at_capacity,
+                            "declined persistent mode request"
+                        );
+                    }
+                    Ok(accept)
+                }
+                Ok(_) => {
+                    // Not a Subscribe message, peer is old version
+                    tracing::debug!("peer sent non-Subscribe message, staying in pull mode");
+                    Ok(false)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to parse message during negotiation");
+                    Ok(false)
+                }
+            }
+        }
+        Ok(Ok(None)) => {
+            tracing::debug!("connection closed, no Subscribe received");
+            Ok(false)
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "error while checking for Subscribe");
+            Ok(false)
+        }
+        Err(_) => {
+            // Timeout - no Subscribe sent, peer is old version or staying pull-only
+            tracing::debug!("no Subscribe received (peer may be pull-only or old version)");
+            Ok(false)
+        }
+    }
+}
+
+/// Ingest a pushed message from a persistent connection.
+pub fn ingest_push_message(engine: &Arc<FeedEngine>, message: &Message) -> Result<()> {
+    engine.ingest(message)
 }

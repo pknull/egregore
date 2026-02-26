@@ -43,6 +43,32 @@ pub struct Config {
     /// Multiple hook configurations for event-driven handlers.
     #[serde(default)]
     pub hooks: Vec<HookEntry>,
+    /// Enable persistent push-based connections.
+    /// When enabled, after initial replication, connections attempt to
+    /// negotiate persistent mode for real-time message propagation.
+    #[serde(default)]
+    pub push_enabled: bool,
+    /// Maximum number of persistent connections to maintain.
+    #[serde(default = "default_max_persistent_connections")]
+    pub max_persistent_connections: usize,
+    /// Initial delay for reconnection attempts (in seconds).
+    #[serde(default = "default_reconnect_initial_secs")]
+    pub reconnect_initial_secs: u64,
+    /// Maximum delay for reconnection attempts (in seconds).
+    #[serde(default = "default_reconnect_max_secs")]
+    pub reconnect_max_secs: u64,
+}
+
+fn default_max_persistent_connections() -> usize {
+    32
+}
+
+fn default_reconnect_initial_secs() -> u64 {
+    5
+}
+
+fn default_reconnect_max_secs() -> u64 {
+    300
 }
 
 impl Default for Config {
@@ -57,6 +83,10 @@ impl Default for Config {
             lan_discovery: false,
             discovery_port: 7656,
             hooks: Vec::new(),
+            push_enabled: false,
+            max_persistent_connections: default_max_persistent_connections(),
+            reconnect_initial_secs: default_reconnect_initial_secs(),
+            reconnect_max_secs: default_reconnect_max_secs(),
         }
     }
 }

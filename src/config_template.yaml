@@ -59,3 +59,25 @@ peers: []
 #     webhook_url: https://example.com/hooks/backup
 #     timeout_secs: 30
 hooks: []
+
+# Push-based replication settings.
+# When enabled, connections attempt to negotiate persistent mode for
+# real-time message propagation (in addition to periodic pull sync).
+
+# Enable persistent push connections.
+# Default: false
+push_enabled: false
+
+# Maximum number of persistent connections to maintain.
+# Applies to both incoming and outgoing persistent connections.
+# Default: 32
+max_persistent_connections: 32
+
+# Initial delay for reconnection attempts (in seconds).
+# Uses exponential backoff with jitter.
+# Default: 5
+reconnect_initial_secs: 5
+
+# Maximum delay for reconnection attempts (in seconds).
+# Default: 300 (5 minutes)
+reconnect_max_secs: 300

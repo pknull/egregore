@@ -80,6 +80,14 @@ struct Cli {
     /// Generate a default config.yaml in data-dir and exit
     #[arg(long)]
     init_config: bool,
+
+    /// Enable persistent push-based connections for real-time message propagation
+    #[arg(long)]
+    push_enabled: bool,
+
+    /// Maximum number of persistent connections to maintain
+    #[arg(long)]
+    max_persistent_connections: Option<usize>,
 }
 
 /// Build the final Config by merging: defaults -> YAML file -> CLI overrides.
@@ -146,6 +154,14 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
     };
     if cli_hook.is_active() {
         config.hooks.push(cli_hook);
+    }
+
+    // Push configuration
+    if matches.value_source("push_enabled") == Some(ValueSource::CommandLine) {
+        config.push_enabled = cli.push_enabled;
+    }
+    if let Some(max_conns) = cli.max_persistent_connections {
+        config.max_persistent_connections = max_conns;
     }
 
     config.validate()?;
@@ -248,35 +264,70 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(addr = %addr, "HTTP API listening");
 
+    // Create connection registry for push-based replication
+    let registry = if config.push_enabled {
+        let reg = Arc::new(gossip::registry::ConnectionRegistry::new(
+            config.max_persistent_connections,
+        ));
+        tracing::info!(
+            max_connections = config.max_persistent_connections,
+            "push-based replication enabled"
+        );
+
+        // Start push manager to broadcast messages to persistent connections
+        let push_manager = gossip::push::PushManager::new(reg.clone(), engine.clone());
+        tokio::spawn(async move {
+            push_manager.run().await;
+        });
+
+        Some(reg)
+    } else {
+        None
+    };
+
     // Start gossip server
     let gossip_bind = format!("0.0.0.0:{}", config.gossip_port);
     let gossip_net_key = config.network_key_bytes();
     let gossip_identity = identity.clone();
     let gossip_engine = engine.clone();
+    let server_registry = registry.clone();
+    let server_push_enabled = config.push_enabled;
+    let server_max_conns = config.max_persistent_connections;
     tokio::spawn(async move {
-        if let Err(e) =
-            gossip::server::run_server(gossip_bind, gossip_net_key, gossip_identity, gossip_engine)
-                .await
+        let server_config = gossip::server::ServerConfig {
+            bind_addr: gossip_bind,
+            network_key: gossip_net_key,
+            identity: gossip_identity,
+            push_enabled: server_push_enabled,
+            max_persistent_connections: server_max_conns,
+        };
+        if let Err(e) = gossip::server::run_server_with_push(
+            server_config,
+            gossip_engine,
+            server_registry,
+            None,
+        )
+        .await
         {
             tracing::error!(error = %e, "gossip server failed");
         }
     });
 
     // Start gossip sync loop (dynamic: reads DB peers each cycle)
-    let sync_peers = config.peers.clone();
-    let sync_net_key = config.network_key_bytes();
-    let sync_identity = identity.clone();
+    let mut sync_config = gossip::client::SyncConfig::new(
+        config.peers.clone(),
+        config.network_key_bytes(),
+        identity.clone(),
+        std::time::Duration::from_secs(config.gossip_interval_secs),
+        config.push_enabled,
+    );
+    sync_config.backoff_initial = std::time::Duration::from_secs(config.reconnect_initial_secs);
+    sync_config.backoff_max = std::time::Duration::from_secs(config.reconnect_max_secs);
+
     let sync_engine = engine.clone();
-    let sync_interval = std::time::Duration::from_secs(config.gossip_interval_secs);
+    let sync_registry = registry.clone();
     tokio::spawn(async move {
-        gossip::client::run_sync_loop(
-            sync_peers,
-            sync_net_key,
-            sync_identity,
-            sync_engine,
-            sync_interval,
-        )
-        .await;
+        gossip::client::run_sync_loop_with_push(sync_config, sync_engine, sync_registry).await;
     });
 
     // Start LAN discovery if enabled
@@ -293,10 +344,18 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Clone registry for shutdown handler
+    let shutdown_registry = registry.clone();
+
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             tokio::signal::ctrl_c().await.ok();
             tracing::info!("shutting down");
+
+            // Gracefully close all persistent connections
+            if let Some(ref reg) = shutdown_registry {
+                reg.close_all().await;
+            }
         })
         .await?;
 

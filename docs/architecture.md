@@ -76,12 +76,16 @@ src/
       peers.rs    Peer and address-peer CRUD, follows, syncable address union
     engine.rs     Publish (sign + chain), ingest (verify + chain validate), query, search
   gossip/
-    connection.rs SecureConnection: SHS handshake over TCP, then Box Stream send/recv
+    connection.rs SecureConnection: SHS handshake over TCP, then Box Stream send/recv; SecureReader/SecureWriter for split I/O
     handshake.rs  Client/Server handshake state machines
-    replication.rs Have/Want/Messages/Done protocol, follow-filtered replication
-    client.rs     Sync loop: merge CLI + DB peers into HashSet, sync each peer per cycle
-    server.rs     TCP listener with optional AuthorizeFn callback
+    replication.rs Have/Want/Messages/Done + Push/Subscribe/SubscribeAck protocol
+    client.rs     Sync loop: merge CLI + DB peers into HashSet, sync each peer per cycle, persistent mode negotiation
+    server.rs     TCP listener with optional AuthorizeFn callback, persistent mode support
     discovery.rs  UDP LAN discovery with timed announcement bursts
+    registry.rs   ConnectionRegistry: DashMap-based tracking of persistent connections
+    push.rs       PushManager: broadcasts messages to all connected peers
+    persistent.rs PersistentConnectionTask: handles incoming Push messages
+    backoff.rs    ExponentialBackoff: jittered retry delays for reconnection
   config.rs       Config struct, network key derivation (SHA-256), discriminator (double SHA-256)
   error.rs        Error types
 ```
@@ -251,6 +255,61 @@ Client                              Server
 6. Client sends requested messages in batches, terminated by `Done`.
 
 **Follow filtering**: If the follows table is non-empty, only feeds from followed authors are requested. If the follows table is empty, all feeds are replicated (open replication).
+
+### Push-Based Replication (Optional)
+
+When `push_enabled` is set, nodes can establish persistent connections for real-time message propagation. This supplements (not replaces) the pull-based protocol above.
+
+**Protocol extension (after Done exchange):**
+
+```
+Client                              Server
+  |                                   |
+  |  (Have/Want/Messages/Done)        |
+  |                                   |
+  |--- Subscribe {mode: Persistent} --->|
+  |                                   |
+  |<--- SubscribeAck {accepted: true} ---|
+  |                                   |
+  |     [connection stays open]       |
+  |                                   |
+  |<--- Push {message: {...}}        ---|  (real-time)
+  |--- Push {message: {...}}        --->|  (real-time)
+```
+
+**Message types:**
+
+| Message | Direction | Fields |
+|---------|-----------|--------|
+| `Subscribe` | Client → Server | `mode: "persistent"` or `"pull_only"` |
+| `SubscribeAck` | Server → Client | `accepted: bool`, `mode: ...` |
+| `Push` | Bidirectional | `message: Message` |
+
+**Negotiation rules:**
+
+1. Client sends `Subscribe` after replication completes
+2. Server responds with `SubscribeAck` (accepts if push-enabled and has capacity)
+3. If accepted, connection splits into reader/writer halves for concurrent I/O
+4. Both sides register the connection in their `ConnectionRegistry`
+5. `PushManager` broadcasts new messages to all registered connections
+
+**Backward compatibility:**
+
+- Old servers close immediately after replication; new clients timeout waiting for `SubscribeAck` and fall back to pull mode
+- Old clients close immediately; new servers timeout waiting for `Subscribe` and close normally
+- The pull-based sync loop continues regardless, providing partition recovery
+
+**Connection management:**
+
+- `ConnectionRegistry` tracks active persistent connections with DashMap
+- Parallel broadcast using `futures::future::join_all`
+- Failed sends trigger automatic unregistration
+- Graceful shutdown sends goodbye frames to all connections
+
+**Reconnection:**
+
+- Uses exponential backoff with full jitter (5s initial, 5min max by default)
+- Per-peer tracking prevents thundering herd on network recovery
 
 ## Mesh Health Visibility
 

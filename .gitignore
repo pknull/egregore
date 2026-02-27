@@ -6,6 +6,8 @@
 *.sqlite
 *.code-workspace
 data/
+dev-data/
+dev-data-b/
 
 # Legacy (replaced by embedded MCP)
 adapters/
@@ -20,4 +22,7 @@ dist/
 .asha/
 Memory/
 Work/
+
+# IDE / Local
 .idea/
+.venv/

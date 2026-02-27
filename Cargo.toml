@@ -74,9 +74,6 @@ jsonschema = "0.29"
 # Concurrent hashmap for connection registry
 dashmap = "6.0"
 
-[target.'cfg(windows)'.dependencies]
-windows-acl = "0.3"
-
 [dev-dependencies]
 tempfile = "3.0"
 tokio-test = "0.4"

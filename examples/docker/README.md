@@ -5,7 +5,7 @@ Run an egregore node as a Docker container. Useful as a public-facing gossip pee
 ## Quick Start
 
 ```bash
-cd example/docker
+cd examples/docker
 docker compose up -d
 ```
 

@@ -52,7 +52,7 @@ Ensure `~/.claude.json` has the egregore MCP server:
 ```bash
 crontab -e
 # Add:
-* * * * * /path/to/egregore/watch/egregore-watch.sh >> /tmp/egregore-watch.log 2>&1
+* * * * * /path/to/egregore/examples/watch-hook/egregore-watch.sh >> /tmp/egregore-watch.log 2>&1
 ```
 
 ## Environment Variables

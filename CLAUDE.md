@@ -23,6 +23,11 @@ cargo run -- --data-dir ./data
 
 ```
 src/
+  lib.rs              Library crate exports
+  config.rs           CLI config, network key derivation
+  error.rs            Error types (EgreError)
+  hooks.rs            Message hook infrastructure (subprocess/webhook)
+  main.rs             Node binary entry point
   identity/
     keys.rs           Ed25519 keypair, Ed25519-to-X25519 conversion
     signing.rs        Sign/verify operations
@@ -39,13 +44,19 @@ src/
       mod.rs          SQLite schema, initialization, FTS5 setup
       messages.rs     Message CRUD, chain validation, search
       peers.rs        Peer storage, follows
+      health.rs       Peer health tracking
   gossip/
     connection.rs     SHS handshake over TCP, then Box Stream
-    replication.rs    Have/Want/Messages/Done sync protocol
+    replication.rs    Have/Want/Messages/Done + Push/Subscribe/SubscribeAck protocol
     client.rs         Sync loop (merge CLI+DB+discovered peers, sync each)
     server.rs         TCP listener with semaphore + optional auth callback
     discovery.rs      UDP LAN peer discovery with burst announcements
     peers.rs          Peer address type
+    health.rs         Gossip-level health metrics
+    registry.rs       ConnectionRegistry for persistent connections (DashMap)
+    push.rs           PushManager for broadcasting to connected peers
+    persistent.rs     PersistentConnectionTask for handling push connections
+    backoff.rs        Exponential backoff with jitter for reconnection
   api/
     mod.rs            Axum router setup
     response.rs       Standard API response envelope
@@ -55,11 +66,10 @@ src/
     routes_follows.rs GET/POST/DELETE /v1/follows
     routes_identity.rs GET /v1/identity
     routes_mesh.rs    GET /v1/mesh (mesh-wide peer health)
+    routes_events.rs  GET /v1/events (SSE streaming)
     mcp.rs            MCP JSON-RPC 2.0 dispatcher (POST /mcp)
     mcp_tools.rs      MCP tool definitions and handlers
-  config.rs           CLI config, network key derivation
-  error.rs            Error types (EgreError)
-  main.rs             Node binary entry point
+    mcp_registry.rs   MCP tool registry
 ```
 
 ## Mesh Safety Model for LLM Operators

@@ -43,38 +43,24 @@ fn secure_private_key_impl(path: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn secure_private_key_impl(path: &Path) -> std::io::Result<()> {
-    use windows_acl::acl::ACL;
-    use windows_acl::helper;
-
-    // Get current user SID
-    let current_user = helper::current_user()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-
-    // Get SYSTEM SID
-    let system_sid = helper::string_to_sid("S-1-5-18")
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-
-    // Create new ACL with only owner and SYSTEM having full control
+    // Use icacls to restrict permissions to owner only
+    // icacls <path> /inheritance:r /grant:r "%USERNAME%:F"
     let path_str = path.to_string_lossy();
-    let mut acl = ACL::from_file_path(&path_str, false)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let output = std::process::Command::new("icacls")
+        .args([
+            path_str.as_ref(),
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-3-4:F", // Owner Rights SID with Full Control
+        ])
+        .output()?;
 
-    // Remove all existing entries
-    let entries = acl.all().map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-    })?;
-    for entry in entries {
-        let _ = acl.remove(&entry.sid, Some(entry.entry_type), None);
+    if !output.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
     }
-
-    // Add owner with full control
-    acl.add_entry(&current_user, windows_acl::acl::AceType::AccessAllow, 0x1F01FF)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-
-    // Add SYSTEM with full control
-    acl.add_entry(&system_sid, windows_acl::acl::AceType::AccessAllow, 0x1F01FF)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-
     Ok(())
 }
 

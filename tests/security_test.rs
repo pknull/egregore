@@ -19,7 +19,6 @@ use egregore::feed::models::{Message, UnsignedMessage};
 use egregore::feed::store::FeedStore;
 use egregore::gossip::connection::SecureConnection;
 use egregore::gossip::replication::{FeedState, GossipMessage, ReplicationConfig};
-use egregore::gossip::server::AuthorizeFn;
 use egregore::identity::{sign_bytes, Identity, PublicId};
 
 const NETWORK_KEY: [u8; 32] = [42u8; 32];
@@ -240,114 +239,7 @@ async fn wrong_network_key_rejects_gossip_connection() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: Authorization — only registered peers can replicate
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn authorized_peer_accepted_unauthorized_rejected() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("egregore=debug")
-        .try_init();
-
-    let server_identity = Identity::generate();
-    let authorized_client = Identity::generate();
-    let unauthorized_client = Identity::generate();
-
-    let engine = Arc::new(FeedEngine::new(FeedStore::open_memory().unwrap()));
-    engine
-        .publish(&server_identity, test_content("server data"), None, vec![])
-        .unwrap();
-
-    // Build AuthorizeFn matching production pattern (server.rs:54-59)
-    let authorized_vk = authorized_client.verifying_key();
-    let authorize: AuthorizeFn = Arc::new(move |vk: &ed25519_dalek::VerifyingKey| {
-        *vk == authorized_vk
-    });
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    let server_id = server_identity.clone();
-    let server_eng = engine.clone();
-    let server_handle = tokio::spawn(async move {
-        // Accept two connections, applying AuthorizeFn to each
-        // (mirrors server.rs accept loop + authorization check)
-        for _ in 0..2 {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut conn = SecureConnection::accept(stream, NETWORK_KEY, server_id.clone())
-                .await
-                .unwrap();
-
-            if !authorize(&conn.remote_public_key) {
-                let _ = conn.close().await;
-                continue;
-            }
-
-            let config = ReplicationConfig::default();
-            egregore::gossip::replication::replicate_as_server(&mut conn, &server_eng, &config)
-                .await
-                .unwrap();
-            let _ = conn.close().await;
-        }
-    });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Authorized client replicates successfully
-    let auth_engine = Arc::new(FeedEngine::new(FeedStore::open_memory().unwrap()));
-    {
-        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let mut conn =
-            SecureConnection::connect(stream, NETWORK_KEY, authorized_client)
-                .await
-                .unwrap();
-        egregore::gossip::replication::replicate_as_client(
-            &mut conn,
-            &auth_engine,
-            &ReplicationConfig::default(),
-        )
-        .await
-        .unwrap();
-        let _ = conn.close().await;
-    }
-    assert_eq!(
-        auth_engine.store().get_all_feeds().unwrap().len(),
-        1,
-        "authorized client should receive server's feed"
-    );
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Unauthorized client gets nothing
-    let unauth_engine = Arc::new(FeedEngine::new(FeedStore::open_memory().unwrap()));
-    {
-        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let mut conn =
-            SecureConnection::connect(stream, NETWORK_KEY, unauthorized_client)
-                .await
-                .unwrap();
-        // May error or return Ok — either way, no data should transfer
-        let _ = egregore::gossip::replication::replicate_as_client(
-            &mut conn,
-            &unauth_engine,
-            &ReplicationConfig::default(),
-        )
-        .await;
-        let _ = conn.close().await;
-    }
-    assert!(
-        unauth_engine.store().get_all_feeds().unwrap().is_empty(),
-        "unauthorized client must receive nothing"
-    );
-
-    tokio::time::timeout(Duration::from_secs(5), server_handle)
-        .await
-        .expect("server timed out")
-        .expect("server panicked");
-}
-
-// ---------------------------------------------------------------------------
-// Test 3: Forged signature — can't impersonate without private key
+// Test 2: Forged signature — can't impersonate without private key
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

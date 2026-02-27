@@ -486,6 +486,7 @@ impl SecureWriter {
         let frame = self.writer.goodbye()?;
         let len = (frame.len() as u32).to_be_bytes();
         let _ = self.stream.write_all(&len).await;
+        let _ = self.stream.write_all(&frame).await;
         Ok(())
     }
 

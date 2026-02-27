@@ -80,7 +80,7 @@ src/
     handshake.rs  Client/Server handshake state machines
     replication.rs Have/Want/Messages/Done + Push/Subscribe/SubscribeAck protocol
     client.rs     Sync loop: merge CLI + DB peers into HashSet, sync each peer per cycle, persistent mode negotiation
-    server.rs     TCP listener with optional AuthorizeFn callback, persistent mode support
+    server.rs     TCP listener with persistent mode support (network key is the trust boundary)
     discovery.rs  UDP LAN discovery with timed announcement bursts
     registry.rs   ConnectionRegistry: DashMap-based tracking of persistent connections
     push.rs       PushManager: broadcasts messages to all connected peers

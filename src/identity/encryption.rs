@@ -74,6 +74,8 @@ pub fn save_encrypted(encrypted: &EncryptedKey, path: &std::path::Path) -> Resul
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, json)?;
+    // Set restrictive file permissions (0600 on Unix, ACL on Windows)
+    super::permissions::secure_private_key(path)?;
     Ok(())
 }
 

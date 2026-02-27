@@ -4,7 +4,7 @@
 //! was verified at ingest time. False means the predecessor was missing (gap).
 //! Backfill promotes the flag when the missing predecessor arrives.
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 use crate::error::{EgreError, Result};
 use crate::feed::models::{FeedQuery, Message};
@@ -14,6 +14,110 @@ use super::{content_type_name, FeedStore};
 
 impl FeedStore {
     // ---- Message operations ----
+
+    /// Atomically allocate a sequence number, build, and insert a message.
+    ///
+    /// Uses `TransactionBehavior::Immediate` to acquire a write lock before
+    /// reading the current sequence, preventing race conditions where two
+    /// concurrent publish calls could read the same sequence number.
+    ///
+    /// The `builder` closure receives the allocated sequence number and
+    /// previous hash, and must return the fully constructed (hashed + signed)
+    /// message.
+    pub fn publish_message_atomic<F>(&self, author: &PublicId, builder: F) -> Result<Message>
+    where
+        F: FnOnce(u64, Option<String>) -> Result<Message>,
+    {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Get latest sequence within transaction (locked)
+        let latest_seq: u64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) FROM messages WHERE author = ?1",
+                params![author.0],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        let new_seq = latest_seq.checked_add(1).ok_or_else(|| EgreError::FeedIntegrity {
+            reason: "sequence number overflow".into(),
+        })?;
+
+        // Get previous hash if needed
+        let previous: Option<String> = if new_seq > 1 {
+            tx.query_row(
+                "SELECT hash FROM messages WHERE author = ?1 AND sequence = ?2",
+                params![author.0, latest_seq],
+                |row| row.get(0),
+            )
+            .optional()?
+        } else {
+            None
+        };
+
+        // Build the message (computes hash, signs)
+        let message = builder(new_seq, previous)?;
+
+        // Insert within same transaction
+        let content_type = content_type_name(&message.content);
+        let content_json = serde_json::to_string(&message.content)?;
+        let raw_json = serde_json::to_string(&message)?;
+
+        tx.execute(
+            "INSERT INTO messages (hash, author, sequence, previous, timestamp, content_type, content_json, signature, raw_json, chain_valid, relates)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                message.hash,
+                message.author.0,
+                message.sequence,
+                message.previous,
+                message.timestamp.to_rfc3339(),
+                content_type,
+                content_json,
+                message.signature,
+                raw_json,
+                1i32, // chain_valid = true for locally published messages
+                message.relates,
+            ],
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(err, _)
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                EgreError::DuplicateMessage {
+                    author: message.author.0.clone(),
+                    sequence: message.sequence,
+                }
+            }
+            other => EgreError::Database(other),
+        })?;
+
+        // Insert tags
+        for tag in &message.tags {
+            tx.execute(
+                "INSERT OR IGNORE INTO message_tags (message_hash, tag) VALUES (?1, ?2)",
+                params![message.hash, tag],
+            )?;
+        }
+
+        // Update feed tracking
+        tx.execute(
+            "INSERT INTO feeds (author, latest_sequence, last_seen)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(author) DO UPDATE SET
+                latest_sequence = MAX(feeds.latest_sequence, excluded.latest_sequence),
+                last_seen = excluded.last_seen",
+            params![
+                message.author.0,
+                message.sequence,
+                message.timestamp.to_rfc3339(),
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(message)
+    }
 
     /// Insert a message. `chain_valid` indicates whether the hash chain
     /// linkage to the predecessor has been verified.

@@ -48,7 +48,6 @@ pub struct PeerRecord {
     pub address: Option<String>,
     pub nickname: Option<String>,
     pub private: bool,
-    pub authorized: bool,
     pub first_seen: DateTime<Utc>,
     pub last_connected: Option<DateTime<Utc>>,
     pub last_synced: Option<DateTime<Utc>>,
@@ -100,7 +99,7 @@ const SCHEMA_DDL: &str = "
     );
     CREATE TABLE IF NOT EXISTS known_peers (
         public_id TEXT PRIMARY KEY, address TEXT, nickname TEXT,
-        private INTEGER NOT NULL DEFAULT 0, authorized INTEGER NOT NULL DEFAULT 1,
+        private INTEGER NOT NULL DEFAULT 0,
         first_seen TEXT NOT NULL, last_connected TEXT, last_synced TEXT
     );
     CREATE TABLE IF NOT EXISTS follows (author TEXT PRIMARY KEY);
@@ -309,7 +308,7 @@ impl FeedStore {
             "SELECT COUNT(*) FROM (
                 SELECT address FROM peers WHERE address IS NOT NULL
                 UNION
-                SELECT address FROM known_peers WHERE authorized = 1 AND address IS NOT NULL
+                SELECT address FROM known_peers WHERE address IS NOT NULL
             )",
             [],
             |row| row.get(0),
@@ -388,10 +387,9 @@ fn parse_peer_row(row: &rusqlite::Row) -> Result<PeerRecord> {
     let address: Option<String> = row.get(1).map_err(EgreError::Database)?;
     let nickname: Option<String> = row.get(2).map_err(EgreError::Database)?;
     let private: i32 = row.get(3).map_err(EgreError::Database)?;
-    let authorized: i32 = row.get(4).map_err(EgreError::Database)?;
-    let first_seen_str: String = row.get(5).map_err(EgreError::Database)?;
-    let last_connected_str: Option<String> = row.get(6).map_err(EgreError::Database)?;
-    let last_synced_str: Option<String> = row.get(7).map_err(EgreError::Database)?;
+    let first_seen_str: String = row.get(4).map_err(EgreError::Database)?;
+    let last_connected_str: Option<String> = row.get(5).map_err(EgreError::Database)?;
+    let last_synced_str: Option<String> = row.get(6).map_err(EgreError::Database)?;
 
     let first_seen = parse_rfc3339(&first_seen_str).ok_or_else(|| EgreError::Config {
         reason: format!("invalid first_seen timestamp '{}'", first_seen_str),
@@ -406,7 +404,6 @@ fn parse_peer_row(row: &rusqlite::Row) -> Result<PeerRecord> {
         address,
         nickname,
         private: private != 0,
-        authorized: authorized != 0,
         first_seen,
         last_connected,
         last_synced,

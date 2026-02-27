@@ -3,11 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::net::UdpSocket;
+use tokio::net::{TcpStream, UdpSocket};
 
 use crate::config::Config;
 use crate::error::Result;
 use crate::feed::engine::FeedEngine;
+use crate::gossip::connection::SecureConnection;
 use crate::identity::Identity;
 
 const MAGIC: &[u8; 4] = b"EGRE";
@@ -33,6 +34,9 @@ const ANNOUNCE_BURST: BurstConfig = BurstConfig {
 };
 
 const QUIET_PERIOD: Duration = Duration::from_secs(300); // 5 minutes between bursts
+
+/// Timeout for verification handshake to discovered peers.
+const HANDSHAKE_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Run LAN discovery: broadcast announcements and listen for peers.
 pub async fn run_discovery(
@@ -67,12 +71,16 @@ pub async fn run_discovery(
     let listen_discriminator = discriminator;
     let listen_public_id = our_public_id.clone();
     let listen_engine = engine.clone();
+    let listen_network_key = config.network_key_bytes();
+    let listen_identity = identity.clone();
     tokio::spawn(async move {
         listen_loop(
             listen_socket,
             listen_discriminator,
             listen_public_id,
             listen_engine,
+            listen_network_key,
+            listen_identity,
         )
         .await;
     });
@@ -149,6 +157,8 @@ async fn listen_loop(
     our_discriminator: [u8; 8],
     our_public_id: String,
     engine: Arc<FeedEngine>,
+    network_key: [u8; 32],
+    identity: Identity,
 ) {
     use std::collections::HashMap;
     use tokio::time::Instant;
@@ -195,21 +205,77 @@ async fn listen_loop(
         }
         recent_peers.insert(peer_addr.clone(), now);
 
-        tracing::info!(
+        tracing::debug!(
             peer = %peer_addr,
             public_id = %announcement.public_id,
-            "discovered LAN peer"
+            "discovered LAN peer, verifying handshake"
         );
 
-        let addr = peer_addr.clone();
-        let eng = engine.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Err(e) = eng.store().insert_address_peer(&addr) {
-                tracing::warn!(error = %e, "failed to persist discovered peer");
+        // Verify peer with SHS handshake before persisting
+        let parsed_addr: SocketAddr = match peer_addr.parse() {
+            Ok(addr) => addr,
+            Err(e) => {
+                tracing::debug!(
+                    peer = %peer_addr,
+                    error = %e,
+                    "failed to parse discovered peer address"
+                );
+                continue;
             }
-        })
+        };
+
+        let handshake_result = tokio::time::timeout(
+            HANDSHAKE_VERIFY_TIMEOUT,
+            verify_peer_handshake(parsed_addr, network_key, identity.clone()),
+        )
         .await;
+
+        match handshake_result {
+            Ok(Ok(())) => {
+                tracing::info!(
+                    peer = %peer_addr,
+                    public_id = %announcement.public_id,
+                    "verified LAN peer"
+                );
+
+                let addr = peer_addr.clone();
+                let eng = engine.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = eng.store().insert_address_peer(&addr) {
+                        tracing::warn!(error = %e, "failed to persist discovered peer");
+                    }
+                })
+                .await;
+            }
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    peer = %peer_addr,
+                    error = %e,
+                    "handshake verification failed for discovered peer"
+                );
+            }
+            Err(_) => {
+                tracing::debug!(
+                    peer = %peer_addr,
+                    "handshake verification timed out for discovered peer"
+                );
+            }
+        }
     }
+}
+
+/// Attempt an SHS handshake to verify a discovered peer.
+/// Returns Ok(()) if the handshake succeeds, Err otherwise.
+async fn verify_peer_handshake(
+    addr: SocketAddr,
+    network_key: [u8; 32],
+    identity: Identity,
+) -> crate::error::Result<()> {
+    let stream = TcpStream::connect(addr).await?;
+    let conn = SecureConnection::connect(stream, network_key, identity).await?;
+    // Handshake succeeded, close the connection cleanly
+    conn.close().await?;
+    Ok(())
 }
 
 #[cfg(test)]

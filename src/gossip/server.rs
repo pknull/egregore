@@ -1,11 +1,8 @@
-//! Gossip server — incoming connection listener with optional authorization.
+//! Gossip server — incoming connection listener.
 //!
 //! Accepts TCP connections, performs server-side SHS handshake, then runs
-//! bidirectional replication. Authorization runs AFTER handshake succeeds
-//! (identity is verified before the authorization check).
-//!
-//! Default: no authorization — accepts any peer on the same network key.
-//! With AuthorizeFn: checks known_peers.authorized, rejecting unauthorized peers.
+//! bidirectional replication. The network key serves as the trust boundary —
+//! any peer with the matching key can connect.
 //!
 //! With push_enabled: After replication, responds to Subscribe requests and
 //! establishes persistent connections for push-based message broadcasting.
@@ -31,9 +28,6 @@ use crate::identity::{Identity, PublicId};
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 
-/// Authorization callback: given a remote peer's VerifyingKey, return whether to allow.
-pub type AuthorizeFn = Arc<dyn Fn(&ed25519_dalek::VerifyingKey) -> bool + Send + Sync>;
-
 /// Configuration for the gossip server.
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -49,23 +43,12 @@ pub struct ServerConfig {
     pub max_persistent_connections: usize,
 }
 
-/// Start the gossip server listener (no authorization — accepts all peers).
+/// Start the gossip server listener.
 pub async fn run_server(
     bind_addr: String,
     network_key: [u8; 32],
     identity: Identity,
     engine: Arc<FeedEngine>,
-) -> Result<()> {
-    run_server_with_auth(bind_addr, network_key, identity, engine, None).await
-}
-
-/// Start the gossip server with optional authorization callback.
-pub async fn run_server_with_auth(
-    bind_addr: String,
-    network_key: [u8; 32],
-    identity: Identity,
-    engine: Arc<FeedEngine>,
-    authorize: Option<AuthorizeFn>,
 ) -> Result<()> {
     let config = ServerConfig {
         bind_addr,
@@ -74,7 +57,7 @@ pub async fn run_server_with_auth(
         push_enabled: false,
         max_persistent_connections: 32,
     };
-    run_server_with_push(config, engine, None, authorize).await
+    run_server_with_push(config, engine, None).await
 }
 
 /// Start the gossip server with push support.
@@ -82,7 +65,6 @@ pub async fn run_server_with_push(
     config: ServerConfig,
     engine: Arc<FeedEngine>,
     registry: Option<Arc<ConnectionRegistry>>,
-    authorize: Option<AuthorizeFn>,
 ) -> Result<()> {
     let listener = TcpListener::bind(&config.bind_addr).await?;
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
@@ -114,7 +96,6 @@ pub async fn run_server_with_push(
         let net_key = config.network_key;
         let id = config.identity.clone();
         let eng = engine.clone();
-        let auth = authorize.clone();
         let push_enabled = config.push_enabled;
         let reg = registry.clone();
 
@@ -124,15 +105,6 @@ pub async fn run_server_with_push(
             let result = tokio::time::timeout(CONNECTION_TIMEOUT, async {
                 let mut conn = SecureConnection::accept(stream, net_key, id).await?;
                 let remote_pub_id = PublicId::from_verifying_key(&conn.remote_public_key);
-
-                // Check authorization if callback provided
-                if let Some(ref auth_fn) = auth {
-                    if !auth_fn(&conn.remote_public_key) {
-                        tracing::warn!(peer = %peer_addr, "unauthorized peer rejected");
-                        let _ = conn.close().await;
-                        return Ok(());
-                    }
-                }
 
                 let repl_config = build_replication_config(&eng).await;
                 if let Err(e) =

@@ -32,8 +32,8 @@ impl FeedStore {
     pub fn insert_peer(&self, record: &PeerRecord) -> Result<()> {
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO known_peers (public_id, address, nickname, private, authorized, first_seen, last_connected, last_synced)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO known_peers (public_id, address, nickname, private, first_seen, last_connected, last_synced)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(public_id) DO UPDATE SET
                 address = COALESCE(excluded.address, known_peers.address),
                 nickname = COALESCE(excluded.nickname, known_peers.nickname)",
@@ -42,7 +42,6 @@ impl FeedStore {
                 record.address,
                 record.nickname,
                 record.private as i32,
-                record.authorized as i32,
                 record.first_seen.to_rfc3339(),
                 record.last_connected.map(|dt| dt.to_rfc3339()),
                 record.last_synced.map(|dt| dt.to_rfc3339()),
@@ -54,7 +53,7 @@ impl FeedStore {
     pub fn get_peer(&self, public_id: &PublicId) -> Result<Option<PeerRecord>> {
         let conn = self.conn();
         conn.query_row(
-            "SELECT public_id, address, nickname, private, authorized, first_seen, last_connected, last_synced
+            "SELECT public_id, address, nickname, private, first_seen, last_connected, last_synced
              FROM known_peers WHERE public_id = ?1",
             params![public_id.0],
             |row| Ok(parse_peer_row(row)),
@@ -67,11 +66,11 @@ impl FeedStore {
     pub fn list_peers(&self, include_private: bool) -> Result<Vec<PeerRecord>> {
         let conn = self.conn();
         let sql = if include_private {
-            "SELECT public_id, address, nickname, private, authorized, first_seen, last_connected, last_synced
-             FROM known_peers WHERE authorized = 1"
+            "SELECT public_id, address, nickname, private, first_seen, last_connected, last_synced
+             FROM known_peers"
         } else {
-            "SELECT public_id, address, nickname, private, authorized, first_seen, last_connected, last_synced
-             FROM known_peers WHERE authorized = 1 AND private = 0"
+            "SELECT public_id, address, nickname, private, first_seen, last_connected, last_synced
+             FROM known_peers WHERE private = 0"
         };
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt
@@ -114,21 +113,6 @@ impl FeedStore {
             params![private as i32, public_id.0],
         )?;
         Ok(())
-    }
-
-    pub fn is_peer_authorized(&self, public_id: &PublicId) -> Result<bool> {
-        let conn = self.conn();
-        conn.query_row(
-            "SELECT authorized FROM known_peers WHERE public_id = ?1",
-            params![public_id.0],
-            |row| {
-                let auth: i32 = row.get(0)?;
-                Ok(auth != 0)
-            },
-        )
-        .optional()
-        .map(|opt| opt.unwrap_or(false))
-        .map_err(EgreError::from)
     }
 
     // ---- Address peer operations (peers table) ----
@@ -185,7 +169,7 @@ impl FeedStore {
         let mut stmt = conn.prepare(
             "SELECT address FROM peers WHERE address IS NOT NULL
              UNION
-             SELECT address FROM known_peers WHERE authorized = 1 AND address IS NOT NULL",
+             SELECT address FROM known_peers WHERE address IS NOT NULL",
         )?;
         let rows = stmt
             .query_map([], |row| {
@@ -211,7 +195,6 @@ mod tests {
             address: Some("127.0.0.1:7655".to_string()),
             nickname: Some("test-node".to_string()),
             private: false,
-            authorized: true,
             first_seen: Utc::now(),
             last_connected: None,
             last_synced: None,
@@ -223,7 +206,6 @@ mod tests {
         assert_eq!(retrieved.public_id, pub_id);
         assert_eq!(retrieved.nickname.as_deref(), Some("test-node"));
         assert!(!retrieved.private);
-        assert!(retrieved.authorized);
 
         store.remove_peer(&pub_id).unwrap();
         assert!(store.get_peer(&pub_id).unwrap().is_none());
@@ -238,7 +220,6 @@ mod tests {
             address: None,
             nickname: None,
             private: false,
-            authorized: true,
             first_seen: Utc::now(),
             last_connected: None,
             last_synced: None,
@@ -248,7 +229,6 @@ mod tests {
             address: None,
             nickname: None,
             private: true,
-            authorized: true,
             first_seen: Utc::now(),
             last_connected: None,
             last_synced: None,
@@ -266,29 +246,6 @@ mod tests {
     }
 
     #[test]
-    fn peer_authorization() {
-        let store = FeedStore::open_memory().unwrap();
-        let pub_id = PublicId("@auth.ed25519".to_string());
-
-        assert!(!store.is_peer_authorized(&pub_id).unwrap());
-
-        store
-            .insert_peer(&PeerRecord {
-                public_id: pub_id.clone(),
-                address: None,
-                nickname: None,
-                private: false,
-                authorized: true,
-                first_seen: Utc::now(),
-                last_connected: None,
-                last_synced: None,
-            })
-            .unwrap();
-
-        assert!(store.is_peer_authorized(&pub_id).unwrap());
-    }
-
-    #[test]
     fn peer_update_timestamps() {
         let store = FeedStore::open_memory().unwrap();
         let pub_id = PublicId("@ts.ed25519".to_string());
@@ -299,7 +256,6 @@ mod tests {
                 address: None,
                 nickname: None,
                 private: false,
-                authorized: true,
                 first_seen: Utc::now(),
                 last_connected: None,
                 last_synced: None,
@@ -369,7 +325,6 @@ mod tests {
                 address: Some(addr.to_string()),
                 nickname: None,
                 private: false,
-                authorized: true,
                 first_seen: Utc::now(),
                 last_connected: None,
                 last_synced: None,
@@ -391,7 +346,6 @@ mod tests {
                 address: Some("10.0.0.2:7655".to_string()),
                 nickname: None,
                 private: false,
-                authorized: true,
                 first_seen: Utc::now(),
                 last_connected: None,
                 last_synced: None,

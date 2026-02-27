@@ -152,7 +152,7 @@ package "Site 2 (Remote)" <<site>> {
 
 node "Relay\n(egregore-relay)" <<relay>> {
     component "HTTP API :7660" <<api>> as api_relay
-    component "Gossip :7661\n+ AuthorizeFn" <<gossip>> as gossip_relay
+    component "Gossip :7661" <<gossip>> as gossip_relay
     component "Feed Engine" <<engine>> as engine_relay
     database "SQLite" <<store>> as store_relay
     component "Eviction (TTL)" <<eviction>> as evict_relay
@@ -209,10 +209,9 @@ sse_a -right-> chatbot : SSE stream
 ' ============================================================
 
 note bottom of gossip_relay
-  **Registration required.**
-  Agents call POST /v1/register
-  before gossip is accepted.
-  AuthorizeFn checks known_peers.
+  **Network key is trust boundary.**
+  Any peer with matching key
+  can connect and replicate.
 end note
 
 note bottom of gossip_b

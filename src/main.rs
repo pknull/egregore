@@ -305,7 +305,6 @@ async fn main() -> anyhow::Result<()> {
             server_config,
             gossip_engine,
             server_registry,
-            None,
         )
         .await
         {

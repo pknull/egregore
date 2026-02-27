@@ -47,6 +47,9 @@ impl FeedEngine {
     /// Publish a new message to the local identity's feed.
     /// Handles sequencing, hashing, and signing automatically.
     ///
+    /// Uses atomic sequence allocation to prevent race conditions where
+    /// concurrent publish calls could read the same sequence number.
+    ///
     /// - `content`: The message payload (any JSON).
     /// - `relates`: Optional hash of a related message (for threading).
     /// - `tags`: Optional categorization tags.
@@ -72,54 +75,38 @@ impl FeedEngine {
             });
         }
 
-        let latest_seq = self.store.get_latest_sequence(&author)?;
-        let new_seq = latest_seq.checked_add(1).ok_or_else(|| EgreError::FeedIntegrity {
-            reason: "sequence number overflow".into(),
+        // Clone values needed in closure
+        let relates_clone = relates.clone();
+        let tags_clone = tags.clone();
+
+        let message = self.store.publish_message_atomic(&author, |new_seq, previous| {
+            let unsigned = UnsignedMessage {
+                author: author.clone(),
+                sequence: new_seq,
+                previous,
+                timestamp: Utc::now(),
+                content: content.clone(),
+                relates: relates_clone.clone(),
+                tags: tags_clone.clone(),
+            };
+
+            let hash = unsigned.compute_hash();
+            let sig = sign_bytes(identity, hash.as_bytes());
+            let signature = B64.encode(sig.to_bytes());
+
+            Ok(Message {
+                author: unsigned.author,
+                sequence: unsigned.sequence,
+                previous: unsigned.previous,
+                timestamp: unsigned.timestamp,
+                content: unsigned.content,
+                relates: relates.clone(),
+                tags: tags.clone(),
+                hash,
+                signature,
+            })
         })?;
 
-        // Get previous message hash
-        let previous = if new_seq > 1 {
-            let prev_msgs = self.store.get_messages_after(&author, latest_seq - 1, 1)?;
-            Some(
-                prev_msgs
-                    .first()
-                    .ok_or_else(|| EgreError::FeedIntegrity {
-                        reason: format!("missing message at sequence {latest_seq}"),
-                    })?
-                    .hash
-                    .clone(),
-            )
-        } else {
-            None
-        };
-
-        let unsigned = UnsignedMessage {
-            author: author.clone(),
-            sequence: new_seq,
-            previous,
-            timestamp: Utc::now(),
-            content,
-            relates: relates.clone(),
-            tags: tags.clone(),
-        };
-
-        let hash = unsigned.compute_hash();
-        let sig = sign_bytes(identity, hash.as_bytes());
-        let signature = B64.encode(sig.to_bytes());
-
-        let message = Message {
-            author: unsigned.author,
-            sequence: unsigned.sequence,
-            previous: unsigned.previous,
-            timestamp: unsigned.timestamp,
-            content: unsigned.content,
-            relates,
-            tags,
-            hash,
-            signature,
-        };
-
-        self.store.insert_message(&message, true)?;
         self.emit(&message);
         Ok(message)
     }
@@ -717,5 +704,96 @@ mod tests {
 
         let results = engine.search("episodic", 10).unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn concurrent_publish_no_sequence_conflict() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Use a file-based database to enable true concurrent access
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let store = FeedStore::open(&db_path).unwrap();
+        let engine = Arc::new(FeedEngine::new(store));
+        let identity = Arc::new(Identity::generate());
+
+        const NUM_THREADS: usize = 10;
+        const PUBLISHES_PER_THREAD: usize = 5;
+
+        let mut handles = Vec::with_capacity(NUM_THREADS);
+
+        for thread_id in 0..NUM_THREADS {
+            let engine = Arc::clone(&engine);
+            let identity = Arc::clone(&identity);
+
+            handles.push(thread::spawn(move || {
+                let mut results = Vec::new();
+                for i in 0..PUBLISHES_PER_THREAD {
+                    let content = serde_json::json!({
+                        "type": "test",
+                        "thread": thread_id,
+                        "index": i,
+                    });
+                    match engine.publish(&identity, content, None, vec![]) {
+                        Ok(msg) => results.push(msg.sequence),
+                        Err(e) => panic!("Thread {thread_id} publish {i} failed: {e}"),
+                    }
+                }
+                results
+            }));
+        }
+
+        // Collect all sequence numbers from all threads
+        let mut all_sequences: Vec<u64> = Vec::new();
+        for handle in handles {
+            let sequences = handle.join().expect("thread panicked");
+            all_sequences.extend(sequences);
+        }
+
+        // Verify all sequences are unique
+        all_sequences.sort();
+        let expected_count = NUM_THREADS * PUBLISHES_PER_THREAD;
+        assert_eq!(
+            all_sequences.len(),
+            expected_count,
+            "should have {} messages",
+            expected_count
+        );
+
+        // Check no duplicates: each sequence from 1 to N should appear exactly once
+        for (i, &seq) in all_sequences.iter().enumerate() {
+            assert_eq!(
+                seq,
+                (i + 1) as u64,
+                "sequence {} missing or duplicate; got {:?}",
+                i + 1,
+                all_sequences
+            );
+        }
+
+        // Verify final sequence in store
+        let final_seq = engine
+            .store()
+            .get_latest_sequence(&identity.public_id())
+            .unwrap();
+        assert_eq!(final_seq, expected_count as u64);
+
+        // Verify hash chain integrity
+        let mut prev_hash: Option<String> = None;
+        for seq in 1..=expected_count {
+            let msg = engine
+                .store()
+                .get_message_at_sequence(&identity.public_id(), seq as u64)
+                .unwrap()
+                .unwrap_or_else(|| panic!("message {} should exist", seq));
+
+            assert_eq!(
+                msg.previous, prev_hash,
+                "chain broken at sequence {}",
+                seq
+            );
+            prev_hash = Some(msg.hash.clone());
+        }
     }
 }

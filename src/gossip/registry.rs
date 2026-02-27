@@ -325,14 +325,9 @@ pub struct ConnectionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
 
     fn mock_peer_id(n: u8) -> PublicId {
         PublicId(format!("@test-peer-{}.ed25519", n))
-    }
-
-    fn mock_addr(port: u16) -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
     }
 
     #[test]

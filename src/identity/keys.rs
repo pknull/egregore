@@ -57,6 +57,8 @@ impl Identity {
         })?;
         std::fs::create_dir_all(dir)?;
         std::fs::write(path, self.signing_key.to_bytes())?;
+        // Set restrictive file permissions (0600 on Unix, ACL on Windows)
+        super::permissions::secure_private_key(path)?;
         Ok(())
     }
 

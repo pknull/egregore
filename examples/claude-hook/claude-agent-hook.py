@@ -1,4 +1,4 @@
-#!/home/pknull/Code/egregore/.venv/bin/python3
+#!/usr/bin/env python3
 """
 Egregore hook using Claude Agent SDK.
 
@@ -181,7 +181,10 @@ Be concise and helpful. Do not claim to perform actions you cannot actually do."
     )
 
     # Configure client - use system Claude Code for proper auth
-    system_claude = "/home/pknull/.asdf/installs/nodejs/24.4.0/bin/claude"
+    system_claude = os.environ.get(
+        "CLAUDE_CODE_PATH",
+        "claude"
+    )
     options = ClaudeAgentOptions(
         cli_path=system_claude,
         mcp_servers={"egregore": server},

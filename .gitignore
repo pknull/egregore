@@ -13,6 +13,9 @@ mcp/
 node_modules/
 dist/
 
+# Claude Code
+.claude/
+
 # Asha
 .asha/
 Memory/

@@ -1,4 +1,4 @@
-#!/home/pknull/Code/egregore/.venv/bin/python3
+#!/usr/bin/env python3
 """
 Egregore hook with execution discipline.
 
@@ -249,7 +249,7 @@ set in_reply_to to '{msg_hash}' to thread the conversation."""
     # Configure client - use system Claude Code for proper auth
     system_claude = os.environ.get(
         "CLAUDE_CODE_PATH",
-        "/home/pknull/.asdf/installs/nodejs/24.4.0/bin/claude"
+        "claude"
     )
     options = ClaudeAgentOptions(
         cli_path=system_claude,

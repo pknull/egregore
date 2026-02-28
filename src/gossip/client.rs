@@ -26,6 +26,7 @@ use crate::gossip::connection::SecureConnection;
 use crate::gossip::health::HEALTH_EVICTION_HOURS;
 use crate::gossip::persistent::PersistentConnectionTask;
 use crate::gossip::registry::{ConnectionHandle, ConnectionRegistry};
+use crate::gossip::bloom::BloomConfig;
 use crate::gossip::replication::{self, ReplicationConfig};
 use crate::identity::{Identity, PublicId};
 
@@ -238,18 +239,50 @@ enum SyncResult {
 
 pub(crate) async fn build_replication_config(engine: &Arc<FeedEngine>) -> ReplicationConfig {
     let eng = engine.clone();
-    let result = tokio::task::spawn_blocking(move || eng.store().get_follows()).await;
+    let result = tokio::task::spawn_blocking(move || {
+        let store = eng.store();
+        let follows = store.get_follows();
+        let topics = store.get_topic_subscriptions();
+        (follows, topics)
+    })
+    .await;
+
     match result {
-        Ok(Ok(follows)) if !follows.is_empty() => ReplicationConfig {
-            follows: Some(follows.into_iter().collect()),
-        },
-        Ok(Ok(_)) => ReplicationConfig::default(), // no follows = replicate all
-        Ok(Err(e)) => {
+        Ok((Ok(follows), Ok(topics))) => {
+            let follows_set = if follows.is_empty() {
+                None
+            } else {
+                Some(follows.into_iter().collect())
+            };
+            let topics_set = if topics.is_empty() {
+                None
+            } else {
+                Some(topics.into_iter().collect())
+            };
+            ReplicationConfig {
+                follows: follows_set,
+                topics: topics_set,
+                bloom_config: BloomConfig::default(),
+            }
+        }
+        Ok((Ok(follows), Err(e))) => {
+            tracing::warn!(error = %e, "failed to read topics, using follows only");
+            ReplicationConfig {
+                follows: if follows.is_empty() {
+                    None
+                } else {
+                    Some(follows.into_iter().collect())
+                },
+                topics: None,
+                bloom_config: BloomConfig::default(),
+            }
+        }
+        Ok((Err(e), _)) => {
             tracing::warn!(error = %e, "failed to read follows, replicating all feeds");
             ReplicationConfig::default()
         }
         Err(e) => {
-            tracing::warn!(error = %e, "follows task failed, replicating all feeds");
+            tracing::warn!(error = %e, "config task failed, replicating all feeds");
             ReplicationConfig::default()
         }
     }

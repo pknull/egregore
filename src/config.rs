@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 /// Default network key (SHA-256 of "egregore-network-v1").
 /// Different keys create isolated networks.
-const DEFAULT_NETWORK_KEY: &str = "egregore-network-v1";
+///
+/// WARNING: This key is public and shared across all default deployments.
+/// For production use, set a unique network_key in your config.
+pub const DEFAULT_NETWORK_KEY: &str = "egregore-network-v1";
 
 /// A single hook definition. Each hook can be a subprocess, a webhook, or both.
 /// Each hook has its own filter and timeout.
@@ -21,12 +24,41 @@ pub struct HookEntry {
     pub webhook_url: Option<String>,
     /// Timeout in seconds for hook/webhook execution (default: 30).
     pub timeout_secs: Option<u64>,
+    /// Maximum number of retry attempts for failed/timed-out hooks (default: 0 = no retries).
+    #[serde(default)]
+    pub max_retries: u32,
+    /// Delay in seconds between retry attempts (default: 5).
+    #[serde(default = "default_retry_delay_secs")]
+    pub retry_delay_secs: u64,
+    /// Enable idempotency tracking to prevent duplicate hook execution (default: false).
+    /// When enabled, completed hooks are tracked and skipped on replay/restart.
+    #[serde(default)]
+    pub idempotent: bool,
+}
+
+fn default_retry_delay_secs() -> u64 {
+    5
 }
 
 impl HookEntry {
     /// Returns true if this entry has at least one actionable handler.
     pub fn is_active(&self) -> bool {
         self.on_message.is_some() || self.webhook_url.is_some()
+    }
+
+    /// Returns a unique identifier for this hook based on name or path/URL.
+    /// Used as part of the idempotency key.
+    pub fn unique_id(&self) -> String {
+        if let Some(ref name) = self.name {
+            return name.clone();
+        }
+        if let Some(ref path) = self.on_message {
+            return format!("subprocess:{}", path.display());
+        }
+        if let Some(ref url) = self.webhook_url {
+            return format!("webhook:{}", url);
+        }
+        "unknown".to_string()
     }
 }
 
@@ -57,6 +89,43 @@ pub struct Config {
     /// Maximum delay for reconnection attempts (in seconds).
     #[serde(default = "default_reconnect_max_secs")]
     pub reconnect_max_secs: u64,
+    /// Enable credit-based flow control for push connections.
+    /// When enabled, peers exchange credit grants to manage backpressure.
+    #[serde(default = "default_flow_control_enabled")]
+    pub flow_control_enabled: bool,
+    /// Initial credits granted to each peer connection.
+    #[serde(default = "default_flow_initial_credits")]
+    pub flow_initial_credits: u32,
+    /// Maximum messages per second per peer (0 = unlimited).
+    #[serde(default = "default_flow_rate_limit")]
+    pub flow_rate_limit_per_second: u32,
+    /// Enable mDNS/Bonjour peer discovery (works across tailnets).
+    #[serde(default)]
+    pub mdns_discovery: bool,
+    /// mDNS service type for peer discovery.
+    #[serde(default = "default_mdns_service")]
+    pub mdns_service: String,
+    /// Enable automatic retention cleanup.
+    #[serde(default)]
+    pub retention_enabled: bool,
+    /// Interval in seconds between retention cleanup runs (default: 3600 = 1 hour).
+    #[serde(default = "default_retention_interval_secs")]
+    pub retention_interval_secs: u64,
+    /// How long to keep tombstones in seconds (default: 604800 = 7 days).
+    #[serde(default = "default_tombstone_max_age_secs")]
+    pub tombstone_max_age_secs: u64,
+}
+
+fn default_retention_interval_secs() -> u64 {
+    3600 // 1 hour
+}
+
+fn default_tombstone_max_age_secs() -> u64 {
+    604800 // 7 days
+}
+
+fn default_mdns_service() -> String {
+    "_egregore._tcp.local.".to_string()
 }
 
 fn default_max_persistent_connections() -> usize {
@@ -69,6 +138,18 @@ fn default_reconnect_initial_secs() -> u64 {
 
 fn default_reconnect_max_secs() -> u64 {
     300
+}
+
+fn default_flow_control_enabled() -> bool {
+    true
+}
+
+fn default_flow_initial_credits() -> u32 {
+    100
+}
+
+fn default_flow_rate_limit() -> u32 {
+    100 // 100 messages per second per peer
 }
 
 impl Default for Config {
@@ -87,6 +168,14 @@ impl Default for Config {
             max_persistent_connections: default_max_persistent_connections(),
             reconnect_initial_secs: default_reconnect_initial_secs(),
             reconnect_max_secs: default_reconnect_max_secs(),
+            flow_control_enabled: default_flow_control_enabled(),
+            flow_initial_credits: default_flow_initial_credits(),
+            flow_rate_limit_per_second: default_flow_rate_limit(),
+            mdns_discovery: false,
+            mdns_service: default_mdns_service(),
+            retention_enabled: false,
+            retention_interval_secs: default_retention_interval_secs(),
+            tombstone_max_age_secs: default_tombstone_max_age_secs(),
         }
     }
 }
@@ -98,6 +187,16 @@ impl Config {
 
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("egregore.db")
+    }
+
+    /// Build a FlowControlConfig from these settings.
+    pub fn flow_control_config(&self) -> crate::gossip::flow_control::FlowControlConfig {
+        crate::gossip::flow_control::FlowControlConfig {
+            initial_credits: self.flow_initial_credits,
+            rate_limit_per_second: self.flow_rate_limit_per_second,
+            credits_enabled: self.flow_control_enabled,
+            ..Default::default()
+        }
     }
 
     /// Returns the default config file path for a given data directory.
@@ -167,6 +266,14 @@ impl Config {
         let mut hasher = Sha256::new();
         hasher.update(self.network_key.as_bytes());
         hasher.finalize().into()
+    }
+
+    /// Check if using the default (public) network key.
+    ///
+    /// Returns true if the network key matches DEFAULT_NETWORK_KEY.
+    /// Production deployments should use a unique key.
+    pub fn is_default_network_key(&self) -> bool {
+        self.network_key == DEFAULT_NETWORK_KEY
     }
 
     /// 8-byte discriminator derived from the network key.
@@ -299,5 +406,17 @@ mod tests {
             ..Config::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn is_default_network_key_detection() {
+        let default_config = Config::default();
+        assert!(default_config.is_default_network_key());
+
+        let custom_config = Config {
+            network_key: "my-private-network-2024".to_string(),
+            ..Config::default()
+        };
+        assert!(!custom_config.is_default_network_key());
     }
 }

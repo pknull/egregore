@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 
 use crate::error::{EgreError, Result};
 use crate::feed::models::{FeedQuery, Message, UnsignedMessage};
+use crate::feed::schema::SchemaRegistry;
 use crate::feed::store::FeedStore;
 use crate::identity::{sign_bytes, verify_signature, Identity};
 
@@ -20,16 +21,38 @@ const MAX_CONTENT_SIZE: usize = 64 * 1024;
 pub struct FeedEngine {
     store: FeedStore,
     event_tx: broadcast::Sender<Arc<Message>>,
+    schema_registry: SchemaRegistry,
 }
 
 impl FeedEngine {
+    /// Create a new feed engine with default (non-strict) schema validation.
     pub fn new(store: FeedStore) -> Self {
+        Self::with_schema_registry(store, SchemaRegistry::new(false))
+    }
+
+    /// Create a new feed engine with a custom schema registry.
+    pub fn with_schema_registry(store: FeedStore, schema_registry: SchemaRegistry) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
-        Self { store, event_tx }
+        Self {
+            store,
+            event_tx,
+            schema_registry,
+        }
+    }
+
+    /// Create a new feed engine with strict schema validation.
+    /// In strict mode, messages without valid schemas are rejected.
+    pub fn new_strict(store: FeedStore) -> Self {
+        Self::with_schema_registry(store, SchemaRegistry::new(true))
     }
 
     pub fn store(&self) -> &FeedStore {
         &self.store
+    }
+
+    /// Get a reference to the schema registry.
+    pub fn schema_registry(&self) -> &SchemaRegistry {
+        &self.schema_registry
     }
 
     /// Subscribe to message events. Returns a receiver that will receive
@@ -75,6 +98,41 @@ impl FeedEngine {
         trace_id: Option<String>,
         span_id: Option<String>,
     ) -> Result<Message> {
+        self.publish_full(identity, content, None, relates, tags, trace_id, span_id)
+    }
+
+    /// Publish a new message with explicit schema_id.
+    ///
+    /// If `schema_id` is None, the schema is inferred from the content's "type" field.
+    /// The content is validated against the schema before publishing.
+    pub fn publish_with_schema(
+        &self,
+        identity: &Identity,
+        content: serde_json::Value,
+        schema_id: Option<String>,
+        relates: Option<String>,
+        tags: Vec<String>,
+    ) -> Result<Message> {
+        self.publish_full(identity, content, schema_id, relates, tags, None, None)
+    }
+
+    /// Full publish method with all optional parameters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_full(
+        &self,
+        identity: &Identity,
+        content: serde_json::Value,
+        schema_id: Option<String>,
+        relates: Option<String>,
+        tags: Vec<String>,
+        trace_id: Option<String>,
+        span_id: Option<String>,
+    ) -> Result<Message> {
+        // Determine effective schema_id
+        let effective_schema_id = schema_id.or_else(|| self.schema_registry.infer_schema_id(&content));
+
+        // Validate content against schema
+        self.schema_registry.validate(&content, effective_schema_id.as_deref())?;
         let author = identity.public_id();
 
         // Enforce same size limit as ingest — oversized messages won't replicate
@@ -95,6 +153,7 @@ impl FeedEngine {
         let tags_clone = tags.clone();
         let trace_id_clone = trace_id.clone();
         let span_id_clone = span_id.clone();
+        let schema_id_clone = effective_schema_id.clone();
 
         let message = self.store.publish_message_atomic(&author, |new_seq, previous| {
             let unsigned = UnsignedMessage {
@@ -103,6 +162,7 @@ impl FeedEngine {
                 previous,
                 timestamp: Utc::now(),
                 content: content.clone(),
+                schema_id: schema_id_clone.clone(),
                 relates: relates_clone.clone(),
                 tags: tags_clone.clone(),
                 trace_id: trace_id_clone.clone(),
@@ -119,6 +179,7 @@ impl FeedEngine {
                 previous: unsigned.previous,
                 timestamp: unsigned.timestamp,
                 content: unsigned.content,
+                schema_id: effective_schema_id.clone(),
                 relates: relates.clone(),
                 tags: tags.clone(),
                 trace_id: trace_id.clone(),
@@ -172,6 +233,9 @@ impl FeedEngine {
             });
         }
 
+        // Validate content against schema (before expensive signature check)
+        self.schema_registry.validate(&msg.content, msg.schema_id.as_deref())?;
+
         Self::verify_signature_and_hash(msg)?;
         Self::validate_previous_field(msg)?;
 
@@ -199,6 +263,7 @@ impl FeedEngine {
             previous: msg.previous.clone(),
             timestamp: msg.timestamp,
             content: msg.content.clone(),
+            schema_id: msg.schema_id.clone(),
             relates: msg.relates.clone(),
             tags: msg.tags.clone(),
             trace_id: msg.trace_id.clone(),
@@ -493,6 +558,7 @@ mod tests {
             previous: m2.previous.clone(),
             timestamp: m2.timestamp,
             content: m2.content.clone(),
+            schema_id: m2.schema_id.clone(),
             relates: m2.relates.clone(),
             tags: m2.tags.clone(),
             trace_id: m2.trace_id.clone(),
@@ -522,6 +588,7 @@ mod tests {
             previous: Some("fake_previous_hash".to_string()),
             timestamp: Utc::now(),
             content: serde_json::json!({"type": "test"}),
+            schema_id: None,
             relates: None,
             tags: vec![],
             trace_id: None,
@@ -535,6 +602,7 @@ mod tests {
             previous: unsigned.previous,
             timestamp: unsigned.timestamp,
             content: unsigned.content,
+            schema_id: None,
             relates: None,
             tags: vec![],
             trace_id: None,
@@ -571,6 +639,7 @@ mod tests {
             previous: None,
             timestamp: Utc::now(),
             content: serde_json::json!({"type": "test", "n": 2}),
+            schema_id: None,
             relates: None,
             tags: vec![],
             trace_id: None,
@@ -584,6 +653,7 @@ mod tests {
             previous: unsigned.previous,
             timestamp: unsigned.timestamp,
             content: unsigned.content,
+            schema_id: None,
             relates: None,
             tags: vec![],
             trace_id: None,
@@ -660,6 +730,7 @@ mod tests {
             previous: None,
             timestamp: Utc::now(),
             content: serde_json::json!({"type": "fake", "n": 999}),
+            schema_id: None,
             relates: None,
             tags: vec![],
             trace_id: None,
@@ -673,6 +744,7 @@ mod tests {
             previous: unsigned.previous,
             timestamp: unsigned.timestamp,
             content: unsigned.content,
+            schema_id: None,
             relates: None,
             tags: vec![],
             trace_id: None,
@@ -891,5 +963,196 @@ mod tests {
             .expect("message should exist");
         assert_eq!(retrieved.trace_id, Some("ingest-trace".to_string()));
         assert_eq!(retrieved.span_id, Some("ingest-span".to_string()));
+    }
+
+    #[test]
+    fn publish_with_schema_id() {
+        let (engine, identity) = setup();
+
+        let msg = engine
+            .publish_with_schema(
+                &identity,
+                Content::Insight {
+                    title: "Schema Test".to_string(),
+                    context: None,
+                    observation: "Testing explicit schema_id".to_string(),
+                    evidence: None,
+                    guidance: None,
+                    confidence: Some(0.9),
+                    tags: vec![],
+                }
+                .to_value(),
+                Some("insight/v1".to_string()),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        assert_eq!(msg.schema_id, Some("insight/v1".to_string()));
+    }
+
+    #[test]
+    fn publish_infers_schema_id() {
+        let (engine, identity) = setup();
+
+        let msg = engine
+            .publish(
+                &identity,
+                Content::Profile {
+                    name: "Inferred Schema".to_string(),
+                    description: None,
+                    capabilities: vec![],
+                }
+                .to_value(),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        // Should infer profile/v1 from the content type
+        assert_eq!(msg.schema_id, Some("profile/v1".to_string()));
+    }
+
+    #[test]
+    fn publish_custom_type_no_schema() {
+        let (engine, identity) = setup();
+
+        // Custom types without registered schema should still work (non-strict mode)
+        let msg = engine
+            .publish(
+                &identity,
+                serde_json::json!({
+                    "type": "custom_extension",
+                    "data": "test"
+                }),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        // No schema inferred for unknown types
+        assert!(msg.schema_id.is_none());
+    }
+
+    #[test]
+    fn strict_mode_rejects_invalid_content() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new_strict(store);
+        let identity = Identity::generate();
+
+        // Invalid insight (missing required "observation" field)
+        let result = engine.publish(
+            &identity,
+            serde_json::json!({
+                "type": "insight",
+                "title": "Invalid"
+                // missing "observation"
+            }),
+            None,
+            vec![],
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("schema") || err.contains("observation"));
+    }
+
+    #[test]
+    fn strict_mode_rejects_unknown_content_type() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new_strict(store);
+        let identity = Identity::generate();
+
+        let result = engine.publish(
+            &identity,
+            serde_json::json!({
+                "type": "unknown_type",
+                "data": "test"
+            }),
+            None,
+            vec![],
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown"));
+    }
+
+    #[test]
+    fn ingest_validates_schema() {
+        let store = FeedStore::open_memory().unwrap();
+        let strict_engine = FeedEngine::new_strict(store);
+
+        let remote_store = FeedStore::open_memory().unwrap();
+        let remote_engine = FeedEngine::new(remote_store);
+        let identity = Identity::generate();
+
+        // Publish a valid message on remote (non-strict)
+        let valid_msg = remote_engine
+            .publish(
+                &identity,
+                Content::Insight {
+                    title: "Valid".to_string(),
+                    context: None,
+                    observation: "Valid observation".to_string(),
+                    evidence: None,
+                    guidance: None,
+                    confidence: Some(0.9),
+                    tags: vec![],
+                }
+                .to_value(),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        // Should ingest successfully on strict engine
+        strict_engine.ingest(&valid_msg).unwrap();
+    }
+
+    #[test]
+    fn schema_id_included_in_message_hash() {
+        let (engine, identity) = setup();
+
+        // Publish same content with different schema_ids
+        let msg1 = engine
+            .publish_with_schema(
+                &identity,
+                Content::Profile {
+                    name: "Test".to_string(),
+                    description: None,
+                    capabilities: vec![],
+                }
+                .to_value(),
+                Some("profile/v1".to_string()),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        // Create a second engine to avoid sequence collision
+        let store2 = FeedStore::open_memory().unwrap();
+        let engine2 = FeedEngine::new(store2);
+
+        let msg2 = engine2
+            .publish_with_schema(
+                &identity,
+                Content::Profile {
+                    name: "Test".to_string(),
+                    description: None,
+                    capabilities: vec![],
+                }
+                .to_value(),
+                Some("profile/v2".to_string()),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        // Same content but different schema_id should produce different hash
+        // (timestamps also differ, but schema_id is part of the signed data)
+        assert_ne!(msg1.hash, msg2.hash);
+        assert_eq!(msg1.schema_id, Some("profile/v1".to_string()));
+        assert_eq!(msg2.schema_id, Some("profile/v2".to_string()));
     }
 }

@@ -224,6 +224,7 @@ async fn follow_filtered_replication() {
     // B follows only X
     let follow_config = ReplicationConfig {
         follows: Some([identity_x.public_id()].into_iter().collect()),
+        ..Default::default()
     };
 
     // Start A as server
@@ -283,4 +284,139 @@ async fn follow_filtered_replication() {
         .get_messages_after(&identity_y.public_id(), 0, 10)
         .unwrap();
     assert_eq!(b_y_msgs.len(), 0, "B should not have Y's messages");
+}
+
+/// Test topic-based selective replication.
+/// A has messages with different tags, B subscribes to specific topics,
+/// only messages with matching tags should be replicated.
+#[tokio::test]
+async fn topic_based_selective_replication() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("egregore=debug")
+        .try_init();
+
+    // --- Setup instance A (server) with messages having different tags ---
+    let identity_a = Identity::generate();
+    let store_a = FeedStore::open_memory().unwrap();
+    let engine_a = Arc::new(FeedEngine::new(store_a));
+
+    // Publish messages with different tags
+    engine_a
+        .publish(
+            &identity_a,
+            test_content("Rust message"),
+            None,
+            vec!["rust".to_string()],
+        )
+        .unwrap();
+
+    engine_a
+        .publish(
+            &identity_a,
+            test_content("Python message"),
+            None,
+            vec!["python".to_string()],
+        )
+        .unwrap();
+
+    engine_a
+        .publish(
+            &identity_a,
+            test_content("Rust and LLM message"),
+            None,
+            vec!["rust".to_string(), "llm".to_string()],
+        )
+        .unwrap();
+
+    engine_a
+        .publish(
+            &identity_a,
+            test_content("Untagged message"),
+            None,
+            vec![],
+        )
+        .unwrap();
+
+    // Verify A has 4 messages
+    let a_feed = engine_a.store().get_all_feeds().unwrap();
+    assert_eq!(a_feed.len(), 1);
+    assert_eq!(a_feed[0].1, 4);
+
+    // --- Setup instance B (client) with topic subscription ---
+    let identity_b = Identity::generate();
+    let store_b = FeedStore::open_memory().unwrap();
+    let engine_b = Arc::new(FeedEngine::new(store_b));
+
+    // B subscribes to "rust" topic
+    engine_b.store().add_topic_subscription("rust").unwrap();
+
+    // Build replication config with topic filter
+    let topic_config = ReplicationConfig {
+        follows: None, // follow all authors
+        topics: Some(["rust".to_string()].into_iter().collect()),
+        ..Default::default()
+    };
+
+    // Start A as server with default config (no filtering)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+
+    let server_id = identity_a.clone();
+    let server_eng = engine_a.clone();
+    let server_handle = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut conn =
+            egregore::gossip::connection::SecureConnection::accept(stream, NETWORK_KEY, server_id)
+                .await
+                .unwrap();
+        egregore::gossip::replication::replicate_as_server(
+            &mut conn,
+            &server_eng,
+            &ReplicationConfig::default(),
+        )
+        .await
+        .unwrap();
+        conn.close().await.unwrap();
+    });
+
+    // B connects as client with topic filter
+    let stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+    let mut conn = egregore::gossip::connection::SecureConnection::connect(
+        stream,
+        NETWORK_KEY,
+        identity_b,
+    )
+    .await
+    .unwrap();
+
+    egregore::gossip::replication::replicate_as_client(&mut conn, &engine_b, &topic_config)
+        .await
+        .unwrap();
+    let _ = conn.close().await;
+
+    tokio::time::timeout(Duration::from_secs(5), server_handle)
+        .await
+        .expect("server timed out")
+        .expect("server panicked");
+
+    // B should have only messages with "rust" tag (seq 1 and 3)
+    let b_msgs = engine_b
+        .store()
+        .get_messages_after(&identity_a.public_id(), 0, 10)
+        .unwrap();
+
+    // Should have 2 messages (rust and rust+llm)
+    assert_eq!(
+        b_msgs.len(),
+        2,
+        "B should have 2 rust-tagged messages, got {}",
+        b_msgs.len()
+    );
+
+    // Verify the tags
+    let tags: Vec<_> = b_msgs.iter().map(|m| &m.tags).collect();
+    assert!(
+        tags.iter().all(|t| t.contains(&"rust".to_string())),
+        "all messages should have rust tag"
+    );
 }

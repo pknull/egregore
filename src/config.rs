@@ -57,6 +57,16 @@ pub struct Config {
     /// Maximum delay for reconnection attempts (in seconds).
     #[serde(default = "default_reconnect_max_secs")]
     pub reconnect_max_secs: u64,
+    /// Enable credit-based flow control for push connections.
+    /// When enabled, peers exchange credit grants to manage backpressure.
+    #[serde(default = "default_flow_control_enabled")]
+    pub flow_control_enabled: bool,
+    /// Initial credits granted to each peer connection.
+    #[serde(default = "default_flow_initial_credits")]
+    pub flow_initial_credits: u32,
+    /// Maximum messages per second per peer (0 = unlimited).
+    #[serde(default = "default_flow_rate_limit")]
+    pub flow_rate_limit_per_second: u32,
 }
 
 fn default_max_persistent_connections() -> usize {
@@ -69,6 +79,18 @@ fn default_reconnect_initial_secs() -> u64 {
 
 fn default_reconnect_max_secs() -> u64 {
     300
+}
+
+fn default_flow_control_enabled() -> bool {
+    true
+}
+
+fn default_flow_initial_credits() -> u32 {
+    100
+}
+
+fn default_flow_rate_limit() -> u32 {
+    100 // 100 messages per second per peer
 }
 
 impl Default for Config {
@@ -87,6 +109,9 @@ impl Default for Config {
             max_persistent_connections: default_max_persistent_connections(),
             reconnect_initial_secs: default_reconnect_initial_secs(),
             reconnect_max_secs: default_reconnect_max_secs(),
+            flow_control_enabled: default_flow_control_enabled(),
+            flow_initial_credits: default_flow_initial_credits(),
+            flow_rate_limit_per_second: default_flow_rate_limit(),
         }
     }
 }
@@ -98,6 +123,16 @@ impl Config {
 
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("egregore.db")
+    }
+
+    /// Build a FlowControlConfig from these settings.
+    pub fn flow_control_config(&self) -> crate::gossip::flow_control::FlowControlConfig {
+        crate::gossip::flow_control::FlowControlConfig {
+            initial_credits: self.flow_initial_credits,
+            rate_limit_per_second: self.flow_rate_limit_per_second,
+            credits_enabled: self.flow_control_enabled,
+            ..Default::default()
+        }
     }
 
     /// Returns the default config file path for a given data directory.

@@ -26,6 +26,10 @@ pub struct Message {
     pub previous: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub content: serde_json::Value,
+    /// Schema identifier for content validation (e.g., "insight/v1").
+    /// If None, schema validation uses the content's "type" field to infer schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_id: Option<String>,
     /// Hash of a related message (optional, for threading).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relates: Option<String>,
@@ -52,6 +56,9 @@ pub struct UnsignedMessage {
     pub previous: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub content: serde_json::Value,
+    /// Schema identifier for content validation (e.g., "insight/v1").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_id: Option<String>,
     /// Hash of a related message (optional, for threading).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relates: Option<String>,
@@ -148,6 +155,7 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             content: from_enum,
+            schema_id: None,
             relates: None,
             tags: vec![],
             trace_id: None,
@@ -161,6 +169,7 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             content: from_json,
+            schema_id: None,
             relates: None,
             tags: vec![],
             trace_id: None,
@@ -184,6 +193,7 @@ mod tests {
                 "description": null,
                 "capabilities": [],
             }),
+            schema_id: None,
             relates: None,
             tags: vec![],
             trace_id: None,
@@ -193,5 +203,35 @@ mod tests {
         let h2 = msg.compute_hash();
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64); // SHA-256 hex
+    }
+
+    #[test]
+    fn schema_id_included_in_hash() {
+        let base = UnsignedMessage {
+            author: PublicId("@test.ed25519".to_string()),
+            sequence: 1,
+            previous: None,
+            timestamp: DateTime::parse_from_rfc3339("2026-02-12T18:30:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            content: serde_json::json!({
+                "type": "insight",
+                "title": "Test",
+                "observation": "Test observation",
+            }),
+            schema_id: None,
+            relates: None,
+            tags: vec![],
+            trace_id: None,
+            span_id: None,
+        };
+
+        let with_schema = UnsignedMessage {
+            schema_id: Some("insight/v1".to_string()),
+            ..base.clone()
+        };
+
+        // Different schema_id should produce different hash
+        assert_ne!(base.compute_hash(), with_schema.compute_hash());
     }
 }

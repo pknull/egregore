@@ -104,6 +104,23 @@ reconnect_initial_secs: 5
 # Default: 300 (5 minutes)
 reconnect_max_secs: 300
 
+# Flow control settings.
+# Credit-based backpressure prevents fast publishers from overwhelming slow consumers.
+
+# Enable credit-based flow control for push connections.
+# Default: true
+flow_control_enabled: true
+
+# Initial credits granted to each peer connection.
+# Each message consumes one credit; peers request more when low.
+# Default: 100
+flow_initial_credits: 100
+
+# Maximum messages per second per peer (0 = unlimited).
+# Rate limiting prevents bursts from overwhelming the receiver.
+# Default: 100
+flow_rate_limit_per_second: 100
+
 # Retention and expiration settings.
 # Messages can expire via per-message TTL (expires_at field) or retention policies.
 
@@ -122,10 +139,22 @@ retention_interval_secs: 3600
 # Default: 604800 (7 days)
 tombstone_max_age_secs: 604800
 
-# Retention policies are configured via the API:
-#   POST /v1/retention/policies
+# Retention policies are configured via the HTTP API:
 #
-# Example policies:
-#   - Global max age: delete all messages older than 30 days
-#   - Topic-specific: keep only 1000 messages per topic
-#   - Compaction: keep only latest message per key (Kafka-style)
+#   GET    /v1/retention/policies       - List all policies
+#   POST   /v1/retention/policies       - Create a policy
+#   DELETE /v1/retention/policies/:id   - Delete a policy
+#
+# Policy options:
+#   scope:        "global" | {"topic": "name"} | {"author": "@id"} | {"content_type": "type"}
+#   max_age_secs: Delete messages older than N seconds
+#   max_count:    Keep only the N most recent messages (per scope)
+#   max_bytes:    Keep only messages within N bytes total (per scope)
+#   compact_key:  JSON path (e.g., "$.key") - keep only latest per unique value
+#
+# Examples:
+#   curl -X POST http://localhost:7654/v1/retention/policies \
+#     -d '{"scope":"global","max_age_secs":2592000}'
+#
+#   curl -X POST http://localhost:7654/v1/retention/policies \
+#     -d '{"scope":{"topic":"logs"},"max_count":1000}'

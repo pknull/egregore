@@ -20,6 +20,7 @@ pub mod routes_identity;
 pub mod routes_mesh;
 pub mod routes_peers;
 pub mod routes_publish;
+pub mod routes_retention;
 pub mod routes_schema;
 pub mod routes_topics;
 
@@ -97,6 +98,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/schemas/validate", post(routes_schema::validate_content))
         .route("/v1/schemas/*schema_id", get(routes_schema::get_schema))
+        .route(
+            "/v1/retention/policies",
+            get(routes_retention::list_policies).post(routes_retention::create_policy),
+        )
+        .route(
+            "/v1/retention/policies/:id",
+            delete(routes_retention::delete_policy),
+        )
         .route(
             "/mcp",
             post(mcp::mcp_handler)

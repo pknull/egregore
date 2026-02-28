@@ -46,6 +46,8 @@ fn create_signed_message(identity: &Identity, content: serde_json::Value) -> Mes
         content,
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(identity, hash.as_bytes());
@@ -57,6 +59,8 @@ fn create_signed_message(identity: &Identity, content: serde_json::Value) -> Mes
         content: unsigned.content,
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
         hash,
         signature: B64.encode(sig.to_bytes()),
     }
@@ -260,6 +264,8 @@ async fn forged_signature_rejected_during_replication() {
         content: test_content("forged insight"),
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(&attacker, hash.as_bytes());
@@ -271,6 +277,8 @@ async fn forged_signature_rejected_during_replication() {
         content: unsigned.content,
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
         hash,
         signature: B64.encode(sig.to_bytes()),
     };
@@ -306,6 +314,8 @@ async fn tampered_content_rejected_during_replication() {
         content: test_content("tampered payload"),
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
         hash: original.hash,
         signature: original.signature,
     };
@@ -341,6 +351,8 @@ async fn tampered_hash_rejected_during_replication() {
         content: test_content("tampered payload"),
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
     };
     let new_hash = tampered_unsigned.compute_hash();
     let tampered = Message {
@@ -351,6 +363,8 @@ async fn tampered_hash_rejected_during_replication() {
         content: test_content("tampered payload"),
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
         hash: new_hash,
         signature: original.signature, // signed the original hash, not this one
     };
@@ -428,6 +442,8 @@ async fn sequence_gap_accepted_but_flagged_during_replication() {
         content: test_content("late join message"),
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(&author, hash.as_bytes());
@@ -439,6 +455,8 @@ async fn sequence_gap_accepted_but_flagged_during_replication() {
         content: unsigned.content,
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
         hash: hash.clone(),
         signature: B64.encode(sig.to_bytes()),
     };
@@ -489,6 +507,8 @@ async fn fork_attack_rejected_during_replication() {
         content: test_content("forked message"),
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(&identity, hash.as_bytes());
@@ -500,6 +520,8 @@ async fn fork_attack_rejected_during_replication() {
         content: unsigned.content,
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
         hash,
         signature: B64.encode(sig.to_bytes()),
     };

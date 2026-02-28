@@ -176,7 +176,11 @@ Messages form a hash-linked chain per author.
 | `previous` | `Option<String>` | SHA-256 hash of previous message (None for sequence 1) |
 | `timestamp` | `DateTime<Utc>` | RFC 3339 |
 | `content` | `serde_json::Value` | Arbitrary JSON with a `type` field |
-| `hash` | `String` | SHA-256 hex of the canonical JSON of (author, sequence, previous, timestamp, content) |
+| `relates` | `Option<String>` | Hash of a related message (for threading/replies) |
+| `tags` | `Vec<String>` | Categorization tags |
+| `trace_id` | `Option<String>` | Distributed tracing identifier (for observability) |
+| `span_id` | `Option<String>` | Distributed tracing span identifier |
+| `hash` | `String` | SHA-256 hex of the canonical JSON of unsigned fields |
 | `signature` | `String` | Base64-encoded Ed25519 signature of the hash bytes |
 
 **Signing process:**

@@ -430,6 +430,8 @@ pub(crate) fn make_test_message(
         }),
         relates: None,
         tags: vec![],
+        trace_id: None,
+        span_id: None,
         hash: format!("hash_{author}_{seq}"),
         signature: "sig".to_string(),
     }

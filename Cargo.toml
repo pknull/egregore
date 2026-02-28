@@ -49,6 +49,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 thiserror = "2.0"
 
+# URL parsing
+url = "2.5"
+
 # Encoding
 base64 = "0.22"
 

@@ -32,6 +32,12 @@ const PEER_VERIFY_COOLDOWN: Duration = Duration::from_secs(60);
 /// Max tracked peers in the rate limiter.
 const MAX_RECENT_PEERS: usize = 1_000;
 
+/// Truncation length for public IDs in mDNS TXT records.
+/// Using 20 chars provides ~120 bits of entropy (6 bits per base64 char),
+/// which is sufficient to prevent accidental collisions while fitting
+/// comfortably in DNS TXT record limits.
+const ID_TRUNCATE_LEN: usize = 20;
+
 /// Run mDNS peer discovery: advertise our service and browse for peers.
 pub async fn run_mdns_discovery(
     config: Config,
@@ -46,7 +52,7 @@ pub async fn run_mdns_discovery(
     let discriminator = config.network_key_discriminator();
     let discriminator_hex = hex::encode(discriminator);
     let our_public_id = identity.public_id().0.clone();
-    let our_public_id_short = truncate_id(&our_public_id, 12);
+    let our_public_id_short = truncate_id(&our_public_id, ID_TRUNCATE_LEN);
 
     // Create service info for advertising
     let instance_name = format!("egregore-{}", &our_public_id_short);
@@ -197,7 +203,7 @@ fn parse_peer_info<'a>(
     }
 
     // Filter self
-    let our_id_short = truncate_id(our_public_id, 12);
+    let our_id_short = truncate_id(our_public_id, ID_TRUNCATE_LEN);
     if peer_id == our_id_short {
         tracing::trace!(service = %info.get_fullname(), "ignoring self");
         return None;

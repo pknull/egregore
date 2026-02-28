@@ -198,6 +198,51 @@ impl Default for Config {
     }
 }
 
+/// Check if a URL points to an internal/private address (SSRF risk).
+///
+/// Returns true for localhost, loopback, private IP ranges, and link-local addresses.
+fn is_internal_url(url: &str) -> bool {
+    use std::net::IpAddr;
+
+    // Parse URL to extract host
+    let host = match url::Url::parse(url) {
+        Ok(parsed) => match parsed.host_str() {
+            Some(h) => h.to_lowercase(),
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+
+    // Check for localhost variants
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+
+    // Check for internal hostnames
+    if host.ends_with(".local") || host.ends_with(".internal") {
+        return true;
+    }
+
+    // Try to parse as IP address
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback()           // 127.0.0.0/8
+                    || v4.is_private()     // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                    || v4.is_link_local()  // 169.254.0.0/16
+                    || v4.is_unspecified() // 0.0.0.0
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback()       // ::1
+                    || v6.is_unspecified() // ::
+                    // Note: is_unique_local() and is_unicast_link_local() are unstable
+            }
+        };
+    }
+
+    false
+}
+
 impl Config {
     pub fn identity_dir(&self) -> PathBuf {
         self.data_dir.join("identity")
@@ -273,6 +318,14 @@ impl Config {
             if let Some(ref url) = hook.webhook_url {
                 if !url.starts_with("http://") && !url.starts_with("https://") {
                     anyhow::bail!("webhook_url must start with http:// or https://: {}", url);
+                }
+                // SSRF protection: warn about internal/private URLs
+                if is_internal_url(url) {
+                    tracing::warn!(
+                        hook_name = ?hook.name,
+                        url = %url,
+                        "webhook URL points to internal/private address - potential SSRF risk"
+                    );
                 }
             }
         }

@@ -342,6 +342,15 @@ impl<'a> RetentionOps<'a> {
     }
 
     /// Generate WHERE clause fragment for a scope.
+    ///
+    /// # Safety
+    ///
+    /// Uses manual single-quote escaping (`'` → `''`) rather than parameterized queries
+    /// because the scope filter is embedded at variable positions in complex SQL statements.
+    /// This escaping prevents SQL injection via quote termination.
+    ///
+    /// The scope values come from the retention_policies table (operator-configured),
+    /// not from untrusted network input, which limits the attack surface.
     fn scope_where_clause(&self, scope: &RetentionScope) -> String {
         match scope {
             RetentionScope::Global => String::new(),
@@ -361,6 +370,10 @@ impl<'a> RetentionOps<'a> {
     }
 
     /// Keep only the most recent max_count messages per scope.
+    ///
+    /// Note: The tombstone-then-delete pattern is intentionally not extracted to a helper
+    /// because the SQL structures differ between retention methods (different subqueries,
+    /// parameter positions, and join conditions). Keeping them explicit aids debugging.
     fn apply_count_retention(
         &self,
         scope: &RetentionScope,

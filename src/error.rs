@@ -39,6 +39,9 @@ pub enum EgreError {
 
     #[error("config error: {reason}")]
     Config { reason: String },
+
+    #[error("schema error: {reason}")]
+    Schema { reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, EgreError>;

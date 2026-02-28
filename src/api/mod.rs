@@ -4,8 +4,9 @@
 //! processes can access the API — there is no authentication on the HTTP layer.
 //! The security boundary is the loopback interface itself.
 //!
-//! Routes: feed queries, publish, peer management, follows, identity, status,
-//! the MCP JSON-RPC 2.0 endpoint at POST /mcp, and SSE streaming at GET /v1/events.
+//! Routes: feed queries, publish, peer management, follows, consumer groups,
+//! identity, status, the MCP JSON-RPC 2.0 endpoint at POST /mcp, and SSE
+//! streaming at GET /v1/events.
 
 pub mod mcp;
 pub mod mcp_registry;
@@ -14,10 +15,13 @@ pub mod response;
 pub mod routes_events;
 pub mod routes_feed;
 pub mod routes_follows;
+pub mod routes_groups;
 pub mod routes_identity;
 pub mod routes_mesh;
 pub mod routes_peers;
 pub mod routes_publish;
+pub mod routes_schema;
+pub mod routes_topics;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -65,7 +69,34 @@ pub fn router(state: AppState) -> Router {
             post(routes_follows::add_follow).delete(routes_follows::remove_follow),
         )
         .route("/v1/follows", get(routes_follows::get_follows))
+        .route(
+            "/v1/topics/:topic",
+            post(routes_topics::add_topic_subscription).delete(routes_topics::remove_topic_subscription),
+        )
+        .route("/v1/topics", get(routes_topics::get_topic_subscriptions))
+        .route("/v1/topics/known", get(routes_topics::get_known_topics))
+        .route(
+            "/v1/groups",
+            get(routes_groups::list_groups).post(routes_groups::create_group),
+        )
+        .route(
+            "/v1/groups/:id",
+            get(routes_groups::get_group).delete(routes_groups::delete_group),
+        )
+        .route("/v1/groups/:id/members", get(routes_groups::get_group_members))
+        .route("/v1/groups/:id/join", post(routes_groups::join_group))
+        .route("/v1/groups/:id/leave", post(routes_groups::leave_group))
+        .route(
+            "/v1/groups/:id/offsets",
+            get(routes_groups::get_group_offsets).post(routes_groups::commit_offset),
+        )
         .route("/v1/events", get(routes_events::subscribe))
+        .route(
+            "/v1/schemas",
+            get(routes_schema::list_schemas).post(routes_schema::register_schema),
+        )
+        .route("/v1/schemas/validate", post(routes_schema::validate_content))
+        .route("/v1/schemas/*schema_id", get(routes_schema::get_schema))
         .route(
             "/mcp",
             post(mcp::mcp_handler)

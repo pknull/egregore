@@ -425,6 +425,119 @@ impl FeedStore {
             .map(|json| serde_json::from_str(&json).map_err(EgreError::from))
             .collect()
     }
+
+    /// Get all message hashes for a feed (for bloom filter construction).
+    pub fn get_message_hashes(&self, author: &PublicId) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT hash FROM messages WHERE author = ?1")?;
+        let rows = stmt
+            .query_map(params![author.0], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Get messages for a feed starting after a given sequence, filtered by topics.
+    /// Only returns messages that have at least one tag matching the provided topics.
+    /// If topics is empty, returns all messages (no filtering).
+    pub fn get_messages_after_with_topics(
+        &self,
+        author: &PublicId,
+        after_seq: u64,
+        limit: u32,
+        topics: &[String],
+    ) -> Result<Vec<Message>> {
+        if topics.is_empty() {
+            return self.get_messages_after(author, after_seq, limit);
+        }
+
+        let conn = self.conn();
+        // Build a query that joins with message_tags and filters by topic
+        let placeholders: Vec<String> = topics
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 4))
+            .collect();
+        let topics_in = placeholders.join(", ");
+
+        let sql = format!(
+            "SELECT DISTINCT m.raw_json FROM messages m
+             INNER JOIN message_tags t ON m.hash = t.message_hash
+             WHERE m.author = ?1 AND m.sequence > ?2 AND t.tag IN ({})
+             ORDER BY m.sequence ASC
+             LIMIT ?3",
+            topics_in
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+
+        // Build params: author, after_seq, limit, then topics...
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        param_values.push(Box::new(author.0.clone()));
+        param_values.push(Box::new(after_seq));
+        param_values.push(Box::new(limit));
+        for topic in topics {
+            param_values.push(Box::new(topic.clone()));
+        }
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        let rows = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let json: String = row.get(0)?;
+                Ok(json)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        rows.into_iter()
+            .map(|json| serde_json::from_str(&json).map_err(EgreError::from))
+            .collect()
+    }
+
+    /// Get all feed states where the feed has messages with at least one of the given topics.
+    /// Returns (author, latest_sequence) pairs for feeds with matching topics.
+    pub fn get_feeds_with_topics(&self, topics: &[String]) -> Result<Vec<(PublicId, u64)>> {
+        if topics.is_empty() {
+            return self.get_all_feeds();
+        }
+
+        let conn = self.conn();
+        let placeholders: Vec<String> = topics
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let topics_in = placeholders.join(", ");
+
+        let sql = format!(
+            "SELECT DISTINCT m.author, MAX(m.sequence)
+             FROM messages m
+             INNER JOIN message_tags t ON m.hash = t.message_hash
+             WHERE t.tag IN ({})
+             GROUP BY m.author",
+            topics_in
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        for topic in topics {
+            param_values.push(Box::new(topic.clone()));
+        }
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        let rows = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let author: String = row.get(0)?;
+                let seq: u64 = row.get(1)?;
+                Ok((PublicId(author), seq))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
@@ -525,5 +638,151 @@ mod tests {
 
         let results = store.search_messages("decentralized", 10).unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn get_messages_after_with_topics_filters_correctly() {
+        let store = FeedStore::open_memory().unwrap();
+
+        // Create messages with different tags
+        let mut msg1 = make_test_message("@alice.ed25519", 1, None);
+        msg1.tags = vec!["rust".to_string()];
+        store.insert_message(&msg1, true).unwrap();
+
+        let mut msg2 = make_test_message("@alice.ed25519", 2, Some("hash_@alice.ed25519_1"));
+        msg2.tags = vec!["python".to_string()];
+        store.insert_message(&msg2, true).unwrap();
+
+        let mut msg3 = make_test_message("@alice.ed25519", 3, Some("hash_@alice.ed25519_2"));
+        msg3.tags = vec!["rust".to_string(), "llm".to_string()];
+        store.insert_message(&msg3, true).unwrap();
+
+        // Filter by "rust" topic should return messages 1 and 3
+        let topics = vec!["rust".to_string()];
+        let results = store
+            .get_messages_after_with_topics(
+                &PublicId("@alice.ed25519".to_string()),
+                0,
+                10,
+                &topics,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].sequence, 1);
+        assert_eq!(results[1].sequence, 3);
+
+        // Filter by "python" topic should return only message 2
+        let topics = vec!["python".to_string()];
+        let results = store
+            .get_messages_after_with_topics(
+                &PublicId("@alice.ed25519".to_string()),
+                0,
+                10,
+                &topics,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].sequence, 2);
+    }
+
+    #[test]
+    fn get_messages_after_with_empty_topics_returns_all() {
+        let store = FeedStore::open_memory().unwrap();
+
+        let mut msg1 = make_test_message("@alice.ed25519", 1, None);
+        msg1.tags = vec!["rust".to_string()];
+        store.insert_message(&msg1, true).unwrap();
+
+        let mut msg2 = make_test_message("@alice.ed25519", 2, Some("hash_@alice.ed25519_1"));
+        msg2.tags = vec!["python".to_string()];
+        store.insert_message(&msg2, true).unwrap();
+
+        // Empty topics should return all messages
+        let topics: Vec<String> = vec![];
+        let results = store
+            .get_messages_after_with_topics(
+                &PublicId("@alice.ed25519".to_string()),
+                0,
+                10,
+                &topics,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn get_feeds_with_topics_filters_correctly() {
+        let store = FeedStore::open_memory().unwrap();
+
+        // Alice's messages with "rust" tag
+        let mut msg1 = make_test_message("@alice.ed25519", 1, None);
+        msg1.tags = vec!["rust".to_string()];
+        store.insert_message(&msg1, true).unwrap();
+
+        // Bob's messages with "python" tag
+        let mut msg2 = make_test_message("@bob.ed25519", 1, None);
+        msg2.tags = vec!["python".to_string()];
+        store.insert_message(&msg2, true).unwrap();
+
+        // Charlie's messages with "rust" tag
+        let mut msg3 = make_test_message("@charlie.ed25519", 1, None);
+        msg3.tags = vec!["rust".to_string()];
+        store.insert_message(&msg3, true).unwrap();
+
+        // Filter by "rust" should return Alice and Charlie
+        let topics = vec!["rust".to_string()];
+        let results = store.get_feeds_with_topics(&topics).unwrap();
+        assert_eq!(results.len(), 2);
+
+        let authors: Vec<&str> = results.iter().map(|(a, _)| a.0.as_str()).collect();
+        assert!(authors.contains(&"@alice.ed25519"));
+        assert!(authors.contains(&"@charlie.ed25519"));
+    }
+
+    #[test]
+    fn get_message_hashes_returns_all_hashes() {
+        let store = FeedStore::open_memory().unwrap();
+
+        // Insert multiple messages for Alice
+        for i in 1..=5 {
+            let prev = if i == 1 {
+                None
+            } else {
+                Some(format!("hash_@alice.ed25519_{}", i - 1))
+            };
+            store
+                .insert_message(
+                    &make_test_message("@alice.ed25519", i, prev.as_deref()),
+                    true,
+                )
+                .unwrap();
+        }
+
+        // Insert one message for Bob
+        store
+            .insert_message(&make_test_message("@bob.ed25519", 1, None), true)
+            .unwrap();
+
+        // Get Alice's hashes
+        let alice_hashes = store
+            .get_message_hashes(&PublicId("@alice.ed25519".to_string()))
+            .unwrap();
+        assert_eq!(alice_hashes.len(), 5);
+        for i in 1..=5 {
+            assert!(alice_hashes.contains(&format!("hash_@alice.ed25519_{}", i)));
+        }
+
+        // Get Bob's hashes
+        let bob_hashes = store
+            .get_message_hashes(&PublicId("@bob.ed25519".to_string()))
+            .unwrap();
+        assert_eq!(bob_hashes.len(), 1);
+        assert_eq!(bob_hashes[0], "hash_@bob.ed25519_1");
+
+        // Get hashes for non-existent author
+        let unknown_hashes = store
+            .get_message_hashes(&PublicId("@unknown.ed25519".to_string()))
+            .unwrap();
+        assert!(unknown_hashes.is_empty());
     }
 }

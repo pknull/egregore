@@ -10,6 +10,24 @@ use serde::{Deserialize, Serialize};
 /// For production use, set a unique network_key in your config.
 pub const DEFAULT_NETWORK_KEY: &str = "egregore-network-v1";
 
+// Default port assignments (arbitrary, not IANA registered)
+const DEFAULT_HTTP_PORT: u16 = 7654;
+const DEFAULT_GOSSIP_PORT: u16 = 7655;
+const DEFAULT_DISCOVERY_PORT: u16 = 7656;
+
+// Timing defaults
+const DEFAULT_GOSSIP_INTERVAL_SECS: u64 = 300; // 5 minutes
+const DEFAULT_HOOK_RETRY_DELAY_SECS: u64 = 5;
+const DEFAULT_RECONNECT_INITIAL_SECS: u64 = 5;
+const DEFAULT_RECONNECT_MAX_SECS: u64 = 300; // 5 minutes
+const DEFAULT_RETENTION_INTERVAL_SECS: u64 = 3600; // 1 hour
+const DEFAULT_TOMBSTONE_MAX_AGE_SECS: u64 = 604_800; // 7 days
+
+// Connection/flow defaults
+const DEFAULT_MAX_PERSISTENT_CONNECTIONS: usize = 32;
+const DEFAULT_FLOW_INITIAL_CREDITS: u32 = 100;
+const DEFAULT_FLOW_RATE_LIMIT: u32 = 100; // messages per second per peer
+
 /// A single hook definition. Each hook can be a subprocess, a webhook, or both.
 /// Each hook has its own filter and timeout.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -37,7 +55,7 @@ pub struct HookEntry {
 }
 
 fn default_retry_delay_secs() -> u64 {
-    5
+    DEFAULT_HOOK_RETRY_DELAY_SECS
 }
 
 impl HookEntry {
@@ -117,11 +135,11 @@ pub struct Config {
 }
 
 fn default_retention_interval_secs() -> u64 {
-    3600 // 1 hour
+    DEFAULT_RETENTION_INTERVAL_SECS
 }
 
 fn default_tombstone_max_age_secs() -> u64 {
-    604800 // 7 days
+    DEFAULT_TOMBSTONE_MAX_AGE_SECS
 }
 
 fn default_mdns_service() -> String {
@@ -129,15 +147,15 @@ fn default_mdns_service() -> String {
 }
 
 fn default_max_persistent_connections() -> usize {
-    32
+    DEFAULT_MAX_PERSISTENT_CONNECTIONS
 }
 
 fn default_reconnect_initial_secs() -> u64 {
-    5
+    DEFAULT_RECONNECT_INITIAL_SECS
 }
 
 fn default_reconnect_max_secs() -> u64 {
-    300
+    DEFAULT_RECONNECT_MAX_SECS
 }
 
 fn default_flow_control_enabled() -> bool {
@@ -145,37 +163,37 @@ fn default_flow_control_enabled() -> bool {
 }
 
 fn default_flow_initial_credits() -> u32 {
-    100
+    DEFAULT_FLOW_INITIAL_CREDITS
 }
 
 fn default_flow_rate_limit() -> u32 {
-    100 // 100 messages per second per peer
+    DEFAULT_FLOW_RATE_LIMIT
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::from("./data"),
-            port: 7654,
-            gossip_port: 7655,
-            gossip_interval_secs: 300,
+            port: DEFAULT_HTTP_PORT,
+            gossip_port: DEFAULT_GOSSIP_PORT,
+            gossip_interval_secs: DEFAULT_GOSSIP_INTERVAL_SECS,
             network_key: DEFAULT_NETWORK_KEY.to_string(),
             peers: Vec::new(),
             lan_discovery: false,
-            discovery_port: 7656,
+            discovery_port: DEFAULT_DISCOVERY_PORT,
             hooks: Vec::new(),
             push_enabled: true,
-            max_persistent_connections: default_max_persistent_connections(),
-            reconnect_initial_secs: default_reconnect_initial_secs(),
-            reconnect_max_secs: default_reconnect_max_secs(),
-            flow_control_enabled: default_flow_control_enabled(),
-            flow_initial_credits: default_flow_initial_credits(),
-            flow_rate_limit_per_second: default_flow_rate_limit(),
+            max_persistent_connections: DEFAULT_MAX_PERSISTENT_CONNECTIONS,
+            reconnect_initial_secs: DEFAULT_RECONNECT_INITIAL_SECS,
+            reconnect_max_secs: DEFAULT_RECONNECT_MAX_SECS,
+            flow_control_enabled: true,
+            flow_initial_credits: DEFAULT_FLOW_INITIAL_CREDITS,
+            flow_rate_limit_per_second: DEFAULT_FLOW_RATE_LIMIT,
             mdns_discovery: false,
             mdns_service: default_mdns_service(),
             retention_enabled: false,
-            retention_interval_secs: default_retention_interval_secs(),
-            tombstone_max_age_secs: default_tombstone_max_age_secs(),
+            retention_interval_secs: DEFAULT_RETENTION_INTERVAL_SECS,
+            tombstone_max_age_secs: DEFAULT_TOMBSTONE_MAX_AGE_SECS,
         }
     }
 }

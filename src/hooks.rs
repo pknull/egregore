@@ -35,6 +35,12 @@ use tokio::time::timeout;
 use crate::config::HookEntry;
 use crate::feed::models::Message;
 
+/// Default timeout for hook/webhook execution in seconds.
+const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
+
+/// Minimum duration for cleanup() to protect processing entries.
+const MIN_CLEANUP_DURATION: Duration = Duration::from_secs(1);
+
 /// State of a hook execution for idempotency tracking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookState {
@@ -117,7 +123,7 @@ impl IdempotencyTracker {
                     }
                     HookState::Processing { started_at, attempt } => {
                         // Check for stale processing state (hook might have crashed)
-                        let timeout_secs = hook.timeout_secs.unwrap_or(30);
+                        let timeout_secs = hook.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
                         let stale_threshold = Duration::from_secs(timeout_secs * 2);
                         if started_at.elapsed() > stale_threshold {
                             // Stale processing state, allow retry
@@ -202,19 +208,29 @@ impl IdempotencyTracker {
 
     /// Clear old completed entries to prevent unbounded memory growth.
     /// Keeps entries newer than max_age.
+    ///
+    /// Note: max_age of zero or very small values are clamped to a minimum
+    /// of 1 second to avoid accidentally removing processing entries.
     pub fn cleanup(&self, max_age: Duration) {
+        // Clamp to minimum duration to protect processing entries
+        let effective_max_age = if max_age < MIN_CLEANUP_DURATION {
+            MIN_CLEANUP_DURATION
+        } else {
+            max_age
+        };
+
         let now = Instant::now();
         self.state.retain(|_, state| {
             match state {
                 HookState::Completed { completed_at } => {
-                    now.duration_since(*completed_at) < max_age
+                    now.duration_since(*completed_at) < effective_max_age
                 }
                 HookState::Failed { failed_at, .. } => {
-                    now.duration_since(*failed_at) < max_age
+                    now.duration_since(*failed_at) < effective_max_age
                 }
                 HookState::Processing { started_at, .. } => {
                     // Keep processing entries for longer (might still be running)
-                    now.duration_since(*started_at) < max_age * 2
+                    now.duration_since(*started_at) < effective_max_age.saturating_mul(2)
                 }
             }
         });
@@ -371,7 +387,7 @@ impl HookExecutor {
             }
         };
 
-        let timeout_secs = timeout_secs.unwrap_or(30);
+        let timeout_secs = timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
         let hook_timeout = Duration::from_secs(timeout_secs);
         let hook_path = path.clone();
 
@@ -446,7 +462,7 @@ impl HookExecutor {
         timeout_secs: Option<u64>,
         name: &Option<String>,
     ) -> HookResult {
-        let timeout_secs = timeout_secs.unwrap_or(30);
+        let timeout_secs = timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
         let hook_timeout = Duration::from_secs(timeout_secs);
 
         let result = timeout(hook_timeout, async {
@@ -632,9 +648,14 @@ mod tests {
         tracker.mark_completed("hash123", "test");
         assert_eq!(tracker.len(), 1);
 
-        // Cleanup with zero max_age should remove it
-        tracker.cleanup(Duration::from_secs(0));
-        assert_eq!(tracker.len(), 0);
+        // Cleanup with 1 second max_age - entry is brand new, should be kept
+        tracker.cleanup(Duration::from_secs(1));
+        assert_eq!(tracker.len(), 1);
+
+        // Cleanup with very short duration is clamped to 1 second minimum
+        // to protect processing entries, so brand new entries survive
+        tracker.cleanup(Duration::from_millis(1));
+        assert_eq!(tracker.len(), 1);
     }
 
     #[test]

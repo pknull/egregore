@@ -293,34 +293,44 @@ impl<'a> RetentionOps<'a> {
         let mut retention_deleted = 0;
         let mut compacted_deleted = 0;
 
-        // Time-based retention
+        // Time-based retention (0 = disabled)
         if let Some(max_age_secs) = policy.max_age_secs {
-            let cutoff = *now - chrono::Duration::seconds(max_age_secs as i64);
-            let cutoff_str = cutoff.to_rfc3339();
+            if max_age_secs == 0 {
+                // Treat 0 as "disabled" to prevent accidental deletion of all messages
+                tracing::debug!("skipping time-based retention: max_age_secs=0 (disabled)");
+            } else {
+                let cutoff = *now - chrono::Duration::seconds(max_age_secs as i64);
+                let cutoff_str = cutoff.to_rfc3339();
 
-            let where_clause = self.scope_where_clause(&policy.scope);
-            let delete_sql = format!(
-                "DELETE FROM messages WHERE timestamp < ?1 {}",
-                where_clause
-            );
+                let where_clause = self.scope_where_clause(&policy.scope);
+                let delete_sql = format!(
+                    "DELETE FROM messages WHERE timestamp < ?1 {}",
+                    where_clause
+                );
 
-            // Record tombstones first
-            let tombstone_sql = format!(
-                "INSERT INTO tombstones (hash, author, sequence, deleted_at, reason)
-                 SELECT hash, author, sequence, ?1, 'retention'
-                 FROM messages
-                 WHERE timestamp < ?2 {}",
-                where_clause
-            );
-            self.conn.execute(&tombstone_sql, params![now.to_rfc3339(), cutoff_str])?;
+                // Record tombstones first
+                let tombstone_sql = format!(
+                    "INSERT INTO tombstones (hash, author, sequence, deleted_at, reason)
+                     SELECT hash, author, sequence, ?1, 'retention'
+                     FROM messages
+                     WHERE timestamp < ?2 {}",
+                    where_clause
+                );
+                self.conn.execute(&tombstone_sql, params![now.to_rfc3339(), cutoff_str])?;
 
-            retention_deleted += self.conn.execute(&delete_sql, params![cutoff_str])?;
+                retention_deleted += self.conn.execute(&delete_sql, params![cutoff_str])?;
+            }
         }
 
-        // Count-based retention
+        // Count-based retention (0 = disabled)
         if let Some(max_count) = policy.max_count {
-            let deleted = self.apply_count_retention(&policy.scope, max_count as usize, now)?;
-            retention_deleted += deleted;
+            if max_count == 0 {
+                // Treat 0 as "disabled" to prevent accidental deletion of all messages
+                tracing::debug!("skipping count-based retention: max_count=0 (disabled)");
+            } else {
+                let deleted = self.apply_count_retention(&policy.scope, max_count as usize, now)?;
+                retention_deleted += deleted;
+            }
         }
 
         // Compaction
@@ -383,7 +393,10 @@ impl<'a> RetentionOps<'a> {
         Ok(deleted)
     }
 
-    /// Compaction: keep only the latest message per compact_key value.
+    /// Compaction: keep only the latest message per (author, compact_key value).
+    ///
+    /// Partitions by author to ensure compaction doesn't delete messages across
+    /// different authors that happen to share the same compact key value.
     fn apply_compaction(
         &self,
         scope: &RetentionScope,
@@ -393,7 +406,7 @@ impl<'a> RetentionOps<'a> {
         let where_clause = self.scope_where_clause(scope);
 
         // Extract key value from JSON content using json_extract
-        // For each unique key value, keep only the message with the highest sequence
+        // For each unique (author, key_val) pair, keep only the most recent message
         let tombstone_sql = format!(
             "INSERT INTO tombstones (hash, author, sequence, deleted_at, reason)
              SELECT m.hash, m.author, m.sequence, ?1, 'compacted'
@@ -403,8 +416,8 @@ impl<'a> RetentionOps<'a> {
                  FROM messages m2
                  WHERE m2.hash IN (
                      SELECT hash FROM (
-                         SELECT hash, json_extract(content_json, ?2) as key_val,
-                                ROW_NUMBER() OVER (PARTITION BY json_extract(content_json, ?2) ORDER BY sequence DESC) as rn
+                         SELECT hash, author, json_extract(content_json, ?2) as key_val,
+                                ROW_NUMBER() OVER (PARTITION BY author, json_extract(content_json, ?2) ORDER BY timestamp DESC) as rn
                          FROM messages
                          WHERE json_extract(content_json, ?2) IS NOT NULL {}
                      ) WHERE rn = 1
@@ -419,8 +432,8 @@ impl<'a> RetentionOps<'a> {
             "DELETE FROM messages
              WHERE hash NOT IN (
                  SELECT hash FROM (
-                     SELECT hash, json_extract(content_json, ?1) as key_val,
-                            ROW_NUMBER() OVER (PARTITION BY json_extract(content_json, ?1) ORDER BY sequence DESC) as rn
+                     SELECT hash, author, json_extract(content_json, ?1) as key_val,
+                            ROW_NUMBER() OVER (PARTITION BY author, json_extract(content_json, ?1) ORDER BY timestamp DESC) as rn
                      FROM messages
                      WHERE json_extract(content_json, ?1) IS NOT NULL {}
                  ) WHERE rn = 1

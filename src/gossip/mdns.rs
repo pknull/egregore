@@ -164,17 +164,21 @@ async fn process_mdns_events(
     }
 }
 
-/// Handle a resolved mDNS service (potential peer).
-async fn handle_resolved_service(
-    info: &ServiceInfo,
+/// Parsed peer information from mDNS TXT records.
+struct PeerInfo<'a> {
+    peer_id: &'a str,
+    port: u16,
+    addresses: std::collections::HashSet<std::net::IpAddr>,
+}
+
+/// Parse and validate peer info from mDNS service TXT records.
+///
+/// Returns None if the peer should be filtered (wrong network, self, invalid data).
+fn parse_peer_info<'a>(
+    info: &'a ServiceInfo,
     our_discriminator_hex: &str,
     our_public_id: &str,
-    engine: &Arc<FeedEngine>,
-    network_key: &[u8; 32],
-    identity: &Identity,
-    recent_peers: &mut HashMap<String, Instant>,
-) {
-    // Extract TXT record properties
+) -> Option<PeerInfo<'a>> {
     let properties = info.get_properties();
 
     let peer_net = properties.get_property_val_str("net").unwrap_or("");
@@ -189,63 +193,108 @@ async fn handle_resolved_service(
             our_net = %our_discriminator_hex,
             "ignoring mDNS peer from different network"
         );
-        return;
+        return None;
     }
 
     // Filter self
     let our_id_short = truncate_id(our_public_id, 12);
     if peer_id == our_id_short {
-        return;
+        tracing::trace!(service = %info.get_fullname(), "ignoring self");
+        return None;
     }
 
-    // Parse port
-    let peer_port: u16 = match peer_port_str.parse() {
-        Ok(p) if p >= 1024 => p,
-        _ => {
-            tracing::trace!(
-                service = %info.get_fullname(),
-                port = %peer_port_str,
-                "invalid port in mDNS peer"
-            );
-            return;
+    // Parse port (0 is invalid, 1-1023 accepted with warning)
+    let port: u16 = match peer_port_str.parse() {
+        Ok(0) => {
+            tracing::trace!(service = %info.get_fullname(), "mDNS peer has port 0 (invalid)");
+            return None;
+        }
+        Ok(p) if p < 1024 => {
+            tracing::debug!(service = %info.get_fullname(), port = p, "mDNS peer using privileged port");
+            p
+        }
+        Ok(p) => p,
+        Err(_) => {
+            tracing::trace!(service = %info.get_fullname(), port = %peer_port_str, "invalid port (parse error)");
+            return None;
         }
     };
 
-    // Get peer addresses
+    // Get addresses
     let addresses = info.get_addresses();
     if addresses.is_empty() {
         tracing::trace!(service = %info.get_fullname(), "mDNS peer has no addresses");
-        return;
+        return None;
     }
 
-    // Try each address
-    for addr in addresses {
-        let peer_addr = format!("{}:{}", addr, peer_port);
+    Some(PeerInfo { peer_id, port, addresses: addresses.clone() })
+}
 
-        // Rate limit
-        let now = Instant::now();
-        if let Some(last_seen) = recent_peers.get(&peer_addr) {
-            if now.duration_since(*last_seen) < PEER_VERIFY_COOLDOWN {
-                continue;
-            }
+/// Check if we should verify this peer address (rate limiting).
+///
+/// Returns true if verification should proceed, false to skip.
+fn should_verify_peer(
+    peer_addr: &str,
+    recent_peers: &mut HashMap<String, Instant>,
+) -> bool {
+    let now = Instant::now();
+
+    // Check cooldown
+    if let Some(last_seen) = recent_peers.get(peer_addr) {
+        if now.duration_since(*last_seen) < PEER_VERIFY_COOLDOWN {
+            return false;
         }
+    }
 
-        // Evict stale entries
+    // Evict stale entries if at capacity
+    if recent_peers.len() >= MAX_RECENT_PEERS {
+        recent_peers.retain(|_, ts| now.duration_since(*ts) < PEER_VERIFY_COOLDOWN);
         if recent_peers.len() >= MAX_RECENT_PEERS {
-            recent_peers.retain(|_, ts| now.duration_since(*ts) < PEER_VERIFY_COOLDOWN);
-            if recent_peers.len() >= MAX_RECENT_PEERS {
-                continue;
-            }
+            tracing::warn!(
+                peer = %peer_addr,
+                limit = MAX_RECENT_PEERS,
+                "mDNS peer rate limit reached, skipping peer"
+            );
+            return false;
         }
-        recent_peers.insert(peer_addr.clone(), now);
+    }
+
+    recent_peers.insert(peer_addr.to_string(), now);
+    true
+}
+
+/// Handle a resolved mDNS service (potential peer).
+async fn handle_resolved_service(
+    info: &ServiceInfo,
+    our_discriminator_hex: &str,
+    our_public_id: &str,
+    engine: &Arc<FeedEngine>,
+    network_key: &[u8; 32],
+    identity: &Identity,
+    recent_peers: &mut HashMap<String, Instant>,
+) {
+    // Parse and validate peer info
+    let peer_info = match parse_peer_info(info, our_discriminator_hex, our_public_id) {
+        Some(info) => info,
+        None => return,
+    };
+
+    // Try each address
+    for addr in &peer_info.addresses {
+        let peer_addr = format!("{}:{}", addr, peer_info.port);
+
+        // Rate limit check
+        if !should_verify_peer(&peer_addr, recent_peers) {
+            continue;
+        }
 
         tracing::debug!(
             peer = %peer_addr,
-            peer_id = %peer_id,
+            peer_id = %peer_info.peer_id,
             "discovered mDNS peer, verifying handshake"
         );
 
-        // Verify with SHS handshake
+        // Parse socket address
         let parsed_addr: SocketAddr = match peer_addr.parse() {
             Ok(a) => a,
             Err(e) => {
@@ -254,6 +303,7 @@ async fn handle_resolved_service(
             }
         };
 
+        // Verify with SHS handshake
         let handshake_result = tokio::time::timeout(
             HANDSHAKE_VERIFY_TIMEOUT,
             verify_peer_handshake(parsed_addr, *network_key, identity.clone()),
@@ -263,14 +313,14 @@ async fn handle_resolved_service(
             Ok(Ok(())) => {
                 tracing::info!(
                     peer = %peer_addr,
-                    peer_id = %peer_id,
+                    peer_id = %peer_info.peer_id,
                     "verified mDNS peer"
                 );
 
-                let addr = peer_addr.clone();
+                let addr_clone = peer_addr.clone();
                 let eng = engine.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Err(e) = eng.store().insert_address_peer(&addr) {
+                    if let Err(e) = eng.store().insert_address_peer(&addr_clone) {
                         tracing::warn!(error = %e, "failed to persist mDNS peer");
                     }
                 }).await;
@@ -279,17 +329,10 @@ async fn handle_resolved_service(
                 break;
             }
             Ok(Err(e)) => {
-                tracing::debug!(
-                    peer = %peer_addr,
-                    error = %e,
-                    "mDNS peer handshake failed"
-                );
+                tracing::debug!(peer = %peer_addr, error = %e, "mDNS peer handshake failed");
             }
             Err(_) => {
-                tracing::debug!(
-                    peer = %peer_addr,
-                    "mDNS peer handshake timed out"
-                );
+                tracing::debug!(peer = %peer_addr, "mDNS peer handshake timed out");
             }
         }
     }

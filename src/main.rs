@@ -88,6 +88,10 @@ struct Cli {
     /// Maximum number of persistent connections to maintain
     #[arg(long)]
     max_persistent_connections: Option<usize>,
+
+    /// Enable mDNS/Bonjour peer discovery (works across tailnets)
+    #[arg(long)]
+    mdns: bool,
 }
 
 /// Build the final Config by merging: defaults -> YAML file -> CLI overrides.
@@ -151,6 +155,7 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
         on_message: cli.hook_on_message.clone(),
         webhook_url: cli.hook_webhook_url.clone(),
         timeout_secs: cli.hook_timeout_secs,
+        ..Default::default()
     };
     if cli_hook.is_active() {
         config.hooks.push(cli_hook);
@@ -162,6 +167,11 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
     }
     if let Some(max_conns) = cli.max_persistent_connections {
         config.max_persistent_connections = max_conns;
+    }
+
+    // mDNS configuration (--mdns enables)
+    if cli.mdns {
+        config.mdns_discovery = true;
     }
 
     config.validate()?;
@@ -209,6 +219,15 @@ async fn main() -> anyhow::Result<()> {
         gossip_port = config.gossip_port,
         "egregore starting"
     );
+
+    // Warn if using the default (public) network key
+    if config.is_default_network_key() {
+        tracing::warn!(
+            network_key = %config.network_key,
+            "using default network key - this is PUBLIC and shared across all default deployments. \
+             For production, set a unique network_key in your config file."
+        );
+    }
 
     // Init feed store
     let store = FeedStore::open(&config.db_path())?;
@@ -339,6 +358,66 @@ async fn main() -> anyhow::Result<()> {
                 gossip::discovery::run_discovery(disc_config, disc_identity, disc_engine).await
             {
                 tracing::error!(error = %e, "LAN discovery failed");
+            }
+        });
+    }
+
+    // Start mDNS discovery if enabled
+    if config.mdns_discovery {
+        let mdns_config = config.clone();
+        let mdns_identity = identity.clone();
+        let mdns_engine = engine.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                gossip::mdns::run_mdns_discovery(mdns_config, mdns_identity, mdns_engine).await
+            {
+                tracing::error!(error = %e, "mDNS discovery failed");
+            }
+        });
+    }
+
+    // Start retention cleanup task if enabled
+    if config.retention_enabled {
+        let retention_engine = engine.clone();
+        let retention_interval = std::time::Duration::from_secs(config.retention_interval_secs);
+        let tombstone_max_age = config.tombstone_max_age_secs;
+        tracing::info!(
+            interval_secs = config.retention_interval_secs,
+            "retention cleanup enabled"
+        );
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(retention_interval).await;
+                let eng = retention_engine.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let cleanup = eng.store().run_retention_cleanup();
+                    let tombstones = eng.store().cleanup_tombstones(tombstone_max_age);
+                    (cleanup, tombstones)
+                })
+                .await;
+
+                match result {
+                    Ok((Ok(cleanup), Ok(tombstones))) => {
+                        if cleanup.total() > 0 || tombstones > 0 {
+                            tracing::info!(
+                                expired = cleanup.expired,
+                                retention = cleanup.retention,
+                                compacted = cleanup.compacted,
+                                tombstones_cleaned = tombstones,
+                                "retention cleanup completed"
+                            );
+                        }
+                    }
+                    Ok((Err(e), _)) => {
+                        tracing::warn!(error = %e, "retention cleanup failed");
+                    }
+                    Ok((_, Err(e))) => {
+                        tracing::warn!(error = %e, "tombstone cleanup failed");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "retention task panicked");
+                    }
+                }
             }
         });
     }

@@ -53,12 +53,27 @@ impl FeedEngine {
     /// - `content`: The message payload (any JSON).
     /// - `relates`: Optional hash of a related message (for threading).
     /// - `tags`: Optional categorization tags.
+    /// - `trace_id`: Optional distributed tracing identifier.
+    /// - `span_id`: Optional distributed tracing span identifier.
     pub fn publish(
         &self,
         identity: &Identity,
         content: serde_json::Value,
         relates: Option<String>,
         tags: Vec<String>,
+    ) -> Result<Message> {
+        self.publish_with_trace(identity, content, relates, tags, None, None)
+    }
+
+    /// Publish a new message with optional distributed tracing context.
+    pub fn publish_with_trace(
+        &self,
+        identity: &Identity,
+        content: serde_json::Value,
+        relates: Option<String>,
+        tags: Vec<String>,
+        trace_id: Option<String>,
+        span_id: Option<String>,
     ) -> Result<Message> {
         let author = identity.public_id();
 
@@ -78,6 +93,8 @@ impl FeedEngine {
         // Clone values needed in closure
         let relates_clone = relates.clone();
         let tags_clone = tags.clone();
+        let trace_id_clone = trace_id.clone();
+        let span_id_clone = span_id.clone();
 
         let message = self.store.publish_message_atomic(&author, |new_seq, previous| {
             let unsigned = UnsignedMessage {
@@ -88,6 +105,8 @@ impl FeedEngine {
                 content: content.clone(),
                 relates: relates_clone.clone(),
                 tags: tags_clone.clone(),
+                trace_id: trace_id_clone.clone(),
+                span_id: span_id_clone.clone(),
             };
 
             let hash = unsigned.compute_hash();
@@ -102,6 +121,8 @@ impl FeedEngine {
                 content: unsigned.content,
                 relates: relates.clone(),
                 tags: tags.clone(),
+                trace_id: trace_id.clone(),
+                span_id: span_id.clone(),
                 hash,
                 signature,
             })
@@ -180,6 +201,8 @@ impl FeedEngine {
             content: msg.content.clone(),
             relates: msg.relates.clone(),
             tags: msg.tags.clone(),
+            trace_id: msg.trace_id.clone(),
+            span_id: msg.span_id.clone(),
         };
         let computed_hash = unsigned.compute_hash();
         if computed_hash != msg.hash {
@@ -472,6 +495,8 @@ mod tests {
             content: m2.content.clone(),
             relates: m2.relates.clone(),
             tags: m2.tags.clone(),
+            trace_id: m2.trace_id.clone(),
+            span_id: m2.span_id.clone(),
         };
         m2.hash = unsigned.compute_hash();
         let sig = sign_bytes(&identity, m2.hash.as_bytes());
@@ -499,6 +524,8 @@ mod tests {
             content: serde_json::json!({"type": "test"}),
             relates: None,
             tags: vec![],
+            trace_id: None,
+            span_id: None,
         };
         let hash = unsigned.compute_hash();
         let sig = sign_bytes(&identity, hash.as_bytes());
@@ -510,6 +537,8 @@ mod tests {
             content: unsigned.content,
             relates: None,
             tags: vec![],
+            trace_id: None,
+            span_id: None,
             hash,
             signature: B64.encode(sig.to_bytes()),
         };
@@ -544,6 +573,8 @@ mod tests {
             content: serde_json::json!({"type": "test", "n": 2}),
             relates: None,
             tags: vec![],
+            trace_id: None,
+            span_id: None,
         };
         let hash = unsigned.compute_hash();
         let sig = sign_bytes(&identity, hash.as_bytes());
@@ -555,6 +586,8 @@ mod tests {
             content: unsigned.content,
             relates: None,
             tags: vec![],
+            trace_id: None,
+            span_id: None,
             hash,
             signature: B64.encode(sig.to_bytes()),
         };
@@ -629,6 +662,8 @@ mod tests {
             content: serde_json::json!({"type": "fake", "n": 999}),
             relates: None,
             tags: vec![],
+            trace_id: None,
+            span_id: None,
         };
         let hash = unsigned.compute_hash();
         let sig = sign_bytes(&identity, hash.as_bytes());
@@ -640,6 +675,8 @@ mod tests {
             content: unsigned.content,
             relates: None,
             tags: vec![],
+            trace_id: None,
+            span_id: None,
             hash,
             signature: B64.encode(sig.to_bytes()),
         };
@@ -795,5 +832,64 @@ mod tests {
             );
             prev_hash = Some(msg.hash.clone());
         }
+    }
+
+    #[test]
+    fn publish_with_trace_context() {
+        let (engine, identity) = setup();
+
+        let msg = engine
+            .publish_with_trace(
+                &identity,
+                serde_json::json!({"type": "test", "data": "traced"}),
+                None,
+                vec![],
+                Some("trace-123".to_string()),
+                Some("span-456".to_string()),
+            )
+            .unwrap();
+
+        assert_eq!(msg.trace_id, Some("trace-123".to_string()));
+        assert_eq!(msg.span_id, Some("span-456".to_string()));
+
+        // Verify trace context is part of the hash (via round-trip)
+        let retrieved = engine
+            .store()
+            .get_message(&msg.hash)
+            .unwrap()
+            .expect("message should exist");
+        assert_eq!(retrieved.trace_id, Some("trace-123".to_string()));
+        assert_eq!(retrieved.span_id, Some("span-456".to_string()));
+    }
+
+    #[test]
+    fn ingest_message_with_trace_context() {
+        let (engine, identity) = setup();
+        let remote_store = FeedStore::open_memory().unwrap();
+        let remote_engine = FeedEngine::new(remote_store);
+
+        // Publish on remote with trace context
+        let m1 = remote_engine
+            .publish_with_trace(
+                &identity,
+                serde_json::json!({"type": "test"}),
+                None,
+                vec![],
+                Some("ingest-trace".to_string()),
+                Some("ingest-span".to_string()),
+            )
+            .unwrap();
+
+        // Ingest on local
+        engine.ingest(&m1).unwrap();
+
+        // Verify trace context preserved
+        let retrieved = engine
+            .store()
+            .get_message(&m1.hash)
+            .unwrap()
+            .expect("message should exist");
+        assert_eq!(retrieved.trace_id, Some("ingest-trace".to_string()));
+        assert_eq!(retrieved.span_id, Some("ingest-span".to_string()));
     }
 }

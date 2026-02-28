@@ -1,14 +1,15 @@
 //! Persistent connection task for push-based replication.
 //!
 //! Handles the lifecycle of a persistent connection after initial replication
-//! completes. Runs as an async task, processing incoming Push messages and
-//! detecting connection failures.
+//! completes. Runs as an async task, processing incoming Push messages,
+//! flow control messages, and detecting connection failures.
 
 use std::sync::Arc;
 
 use crate::error::{EgreError, Result};
 use crate::feed::engine::FeedEngine;
 use crate::gossip::connection::SecureReader;
+use crate::gossip::flow_control::DEFAULT_CREDIT_GRANT;
 use crate::gossip::registry::ConnectionRegistry;
 use crate::gossip::replication::GossipMessage;
 use crate::identity::PublicId;
@@ -142,6 +143,46 @@ impl PersistentConnectionTask {
                     peer = %self.peer_id.0,
                     "received Subscribe/SubscribeAck on active persistent connection"
                 );
+            }
+            GossipMessage::CreditGrant { amount } => {
+                // Peer is granting us credits to send more messages
+                tracing::debug!(
+                    peer = %self.peer_id.0,
+                    amount = amount,
+                    "received credit grant"
+                );
+                self.registry.grant_credits(&self.peer_id, amount).await;
+            }
+            GossipMessage::CreditRequest { suggested } => {
+                // Peer is requesting credits (they want to send us messages)
+                // Grant credits based on our capacity
+                let grant_amount = suggested.min(DEFAULT_CREDIT_GRANT);
+                tracing::debug!(
+                    peer = %self.peer_id.0,
+                    requested = suggested,
+                    granting = grant_amount,
+                    "received credit request, granting credits"
+                );
+                if let Err(e) = self.registry.send_credit_grant(&self.peer_id, grant_amount).await {
+                    tracing::warn!(
+                        peer = %self.peer_id.0,
+                        error = %e,
+                        "failed to send credit grant"
+                    );
+                }
+            }
+            GossipMessage::FlowControlAck { supported, initial_credits } => {
+                // Peer is acknowledging flow control capability
+                tracing::debug!(
+                    peer = %self.peer_id.0,
+                    supported = supported,
+                    initial_credits = initial_credits,
+                    "received flow control ack"
+                );
+                self.registry.set_peer_credits_supported(&self.peer_id, supported);
+                if supported && initial_credits > 0 {
+                    self.registry.grant_credits(&self.peer_id, initial_credits).await;
+                }
             }
         }
 

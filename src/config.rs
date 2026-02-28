@@ -5,7 +5,28 @@ use serde::{Deserialize, Serialize};
 
 /// Default network key (SHA-256 of "egregore-network-v1").
 /// Different keys create isolated networks.
-const DEFAULT_NETWORK_KEY: &str = "egregore-network-v1";
+///
+/// WARNING: This key is public and shared across all default deployments.
+/// For production use, set a unique network_key in your config.
+pub const DEFAULT_NETWORK_KEY: &str = "egregore-network-v1";
+
+// Default port assignments (arbitrary, not IANA registered)
+const DEFAULT_HTTP_PORT: u16 = 7654;
+const DEFAULT_GOSSIP_PORT: u16 = 7655;
+const DEFAULT_DISCOVERY_PORT: u16 = 7656;
+
+// Timing defaults
+const DEFAULT_GOSSIP_INTERVAL_SECS: u64 = 300; // 5 minutes
+const DEFAULT_HOOK_RETRY_DELAY_SECS: u64 = 5;
+const DEFAULT_RECONNECT_INITIAL_SECS: u64 = 5;
+const DEFAULT_RECONNECT_MAX_SECS: u64 = 300; // 5 minutes
+const DEFAULT_RETENTION_INTERVAL_SECS: u64 = 3600; // 1 hour
+const DEFAULT_TOMBSTONE_MAX_AGE_SECS: u64 = 604_800; // 7 days
+
+// Connection/flow defaults
+const DEFAULT_MAX_PERSISTENT_CONNECTIONS: usize = 32;
+const DEFAULT_FLOW_INITIAL_CREDITS: u32 = 100;
+const DEFAULT_FLOW_RATE_LIMIT: u32 = 100; // messages per second per peer
 
 /// A single hook definition. Each hook can be a subprocess, a webhook, or both.
 /// Each hook has its own filter and timeout.
@@ -21,12 +42,41 @@ pub struct HookEntry {
     pub webhook_url: Option<String>,
     /// Timeout in seconds for hook/webhook execution (default: 30).
     pub timeout_secs: Option<u64>,
+    /// Maximum number of retry attempts for failed/timed-out hooks (default: 0 = no retries).
+    #[serde(default)]
+    pub max_retries: u32,
+    /// Delay in seconds between retry attempts (default: 5).
+    #[serde(default = "default_retry_delay_secs")]
+    pub retry_delay_secs: u64,
+    /// Enable idempotency tracking to prevent duplicate hook execution (default: false).
+    /// When enabled, completed hooks are tracked and skipped on replay/restart.
+    #[serde(default)]
+    pub idempotent: bool,
+}
+
+fn default_retry_delay_secs() -> u64 {
+    DEFAULT_HOOK_RETRY_DELAY_SECS
 }
 
 impl HookEntry {
     /// Returns true if this entry has at least one actionable handler.
     pub fn is_active(&self) -> bool {
         self.on_message.is_some() || self.webhook_url.is_some()
+    }
+
+    /// Returns a unique identifier for this hook based on name or path/URL.
+    /// Used as part of the idempotency key.
+    pub fn unique_id(&self) -> String {
+        if let Some(ref name) = self.name {
+            return name.clone();
+        }
+        if let Some(ref path) = self.on_message {
+            return format!("subprocess:{}", path.display());
+        }
+        if let Some(ref url) = self.webhook_url {
+            return format!("webhook:{}", url);
+        }
+        "unknown".to_string()
     }
 }
 
@@ -57,38 +107,140 @@ pub struct Config {
     /// Maximum delay for reconnection attempts (in seconds).
     #[serde(default = "default_reconnect_max_secs")]
     pub reconnect_max_secs: u64,
+    /// Enable credit-based flow control for push connections.
+    /// When enabled, peers exchange credit grants to manage backpressure.
+    #[serde(default = "default_flow_control_enabled")]
+    pub flow_control_enabled: bool,
+    /// Initial credits granted to each peer connection.
+    #[serde(default = "default_flow_initial_credits")]
+    pub flow_initial_credits: u32,
+    /// Maximum messages per second per peer (0 = unlimited).
+    #[serde(default = "default_flow_rate_limit")]
+    pub flow_rate_limit_per_second: u32,
+    /// Enable mDNS/Bonjour peer discovery (works across tailnets).
+    #[serde(default)]
+    pub mdns_discovery: bool,
+    /// mDNS service type for peer discovery.
+    #[serde(default = "default_mdns_service")]
+    pub mdns_service: String,
+    /// Enable automatic retention cleanup.
+    #[serde(default)]
+    pub retention_enabled: bool,
+    /// Interval in seconds between retention cleanup runs (default: 3600 = 1 hour).
+    #[serde(default = "default_retention_interval_secs")]
+    pub retention_interval_secs: u64,
+    /// How long to keep tombstones in seconds (default: 604800 = 7 days).
+    #[serde(default = "default_tombstone_max_age_secs")]
+    pub tombstone_max_age_secs: u64,
+}
+
+fn default_retention_interval_secs() -> u64 {
+    DEFAULT_RETENTION_INTERVAL_SECS
+}
+
+fn default_tombstone_max_age_secs() -> u64 {
+    DEFAULT_TOMBSTONE_MAX_AGE_SECS
+}
+
+fn default_mdns_service() -> String {
+    "_egregore._tcp.local.".to_string()
 }
 
 fn default_max_persistent_connections() -> usize {
-    32
+    DEFAULT_MAX_PERSISTENT_CONNECTIONS
 }
 
 fn default_reconnect_initial_secs() -> u64 {
-    5
+    DEFAULT_RECONNECT_INITIAL_SECS
 }
 
 fn default_reconnect_max_secs() -> u64 {
-    300
+    DEFAULT_RECONNECT_MAX_SECS
+}
+
+fn default_flow_control_enabled() -> bool {
+    true
+}
+
+fn default_flow_initial_credits() -> u32 {
+    DEFAULT_FLOW_INITIAL_CREDITS
+}
+
+fn default_flow_rate_limit() -> u32 {
+    DEFAULT_FLOW_RATE_LIMIT
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::from("./data"),
-            port: 7654,
-            gossip_port: 7655,
-            gossip_interval_secs: 300,
+            port: DEFAULT_HTTP_PORT,
+            gossip_port: DEFAULT_GOSSIP_PORT,
+            gossip_interval_secs: DEFAULT_GOSSIP_INTERVAL_SECS,
             network_key: DEFAULT_NETWORK_KEY.to_string(),
             peers: Vec::new(),
             lan_discovery: false,
-            discovery_port: 7656,
+            discovery_port: DEFAULT_DISCOVERY_PORT,
             hooks: Vec::new(),
             push_enabled: true,
-            max_persistent_connections: default_max_persistent_connections(),
-            reconnect_initial_secs: default_reconnect_initial_secs(),
-            reconnect_max_secs: default_reconnect_max_secs(),
+            max_persistent_connections: DEFAULT_MAX_PERSISTENT_CONNECTIONS,
+            reconnect_initial_secs: DEFAULT_RECONNECT_INITIAL_SECS,
+            reconnect_max_secs: DEFAULT_RECONNECT_MAX_SECS,
+            flow_control_enabled: true,
+            flow_initial_credits: DEFAULT_FLOW_INITIAL_CREDITS,
+            flow_rate_limit_per_second: DEFAULT_FLOW_RATE_LIMIT,
+            mdns_discovery: false,
+            mdns_service: default_mdns_service(),
+            retention_enabled: false,
+            retention_interval_secs: DEFAULT_RETENTION_INTERVAL_SECS,
+            tombstone_max_age_secs: DEFAULT_TOMBSTONE_MAX_AGE_SECS,
         }
     }
+}
+
+/// Check if a URL points to an internal/private address (SSRF risk).
+///
+/// Returns true for localhost, loopback, private IP ranges, and link-local addresses.
+fn is_internal_url(url: &str) -> bool {
+    use std::net::IpAddr;
+
+    // Parse URL to extract host
+    let host = match url::Url::parse(url) {
+        Ok(parsed) => match parsed.host_str() {
+            Some(h) => h.to_lowercase(),
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+
+    // Check for localhost variants
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+
+    // Check for internal hostnames
+    if host.ends_with(".local") || host.ends_with(".internal") {
+        return true;
+    }
+
+    // Try to parse as IP address
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback()           // 127.0.0.0/8
+                    || v4.is_private()     // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                    || v4.is_link_local()  // 169.254.0.0/16
+                    || v4.is_unspecified() // 0.0.0.0
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback()       // ::1
+                    || v6.is_unspecified() // ::
+                    // Note: is_unique_local() and is_unicast_link_local() are unstable
+            }
+        };
+    }
+
+    false
 }
 
 impl Config {
@@ -98,6 +250,16 @@ impl Config {
 
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("egregore.db")
+    }
+
+    /// Build a FlowControlConfig from these settings.
+    pub fn flow_control_config(&self) -> crate::gossip::flow_control::FlowControlConfig {
+        crate::gossip::flow_control::FlowControlConfig {
+            initial_credits: self.flow_initial_credits,
+            rate_limit_per_second: self.flow_rate_limit_per_second,
+            credits_enabled: self.flow_control_enabled,
+            ..Default::default()
+        }
     }
 
     /// Returns the default config file path for a given data directory.
@@ -157,6 +319,14 @@ impl Config {
                 if !url.starts_with("http://") && !url.starts_with("https://") {
                     anyhow::bail!("webhook_url must start with http:// or https://: {}", url);
                 }
+                // SSRF protection: warn about internal/private URLs
+                if is_internal_url(url) {
+                    tracing::warn!(
+                        hook_name = ?hook.name,
+                        url = %url,
+                        "webhook URL points to internal/private address - potential SSRF risk"
+                    );
+                }
             }
         }
         Ok(())
@@ -167,6 +337,14 @@ impl Config {
         let mut hasher = Sha256::new();
         hasher.update(self.network_key.as_bytes());
         hasher.finalize().into()
+    }
+
+    /// Check if using the default (public) network key.
+    ///
+    /// Returns true if the network key matches DEFAULT_NETWORK_KEY.
+    /// Production deployments should use a unique key.
+    pub fn is_default_network_key(&self) -> bool {
+        self.network_key == DEFAULT_NETWORK_KEY
     }
 
     /// 8-byte discriminator derived from the network key.
@@ -299,5 +477,17 @@ mod tests {
             ..Config::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn is_default_network_key_detection() {
+        let default_config = Config::default();
+        assert!(default_config.is_default_network_key());
+
+        let custom_config = Config {
+            network_key: "my-private-network-2024".to_string(),
+            ..Config::default()
+        };
+        assert!(!custom_config.is_default_network_key());
     }
 }

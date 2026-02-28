@@ -1,8 +1,11 @@
 pub mod backoff;
+pub mod bloom;
 pub mod client;
 pub mod connection;
 pub mod discovery;
+pub mod flow_control;
 pub mod health;
+pub mod mdns;
 pub mod peers;
 pub mod persistent;
 pub mod push;

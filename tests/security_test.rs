@@ -44,10 +44,12 @@ fn create_signed_message(identity: &Identity, content: serde_json::Value) -> Mes
         previous: None,
         timestamp: Utc::now(),
         content,
+        schema_id: None,
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: None,
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(identity, hash.as_bytes());
@@ -57,10 +59,12 @@ fn create_signed_message(identity: &Identity, content: serde_json::Value) -> Mes
         previous: unsigned.previous,
         timestamp: unsigned.timestamp,
         content: unsigned.content,
+        schema_id: None,
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: None,
         hash,
         signature: B64.encode(sig.to_bytes()),
     }
@@ -91,6 +95,8 @@ async fn serve_malicious_messages(
             latest_sequence: messages.len() as u64,
         }],
         peer_observations: vec![],
+        bloom_summaries: vec![],
+        subscribed_topics: vec![],
     };
     conn.send(&serde_json::to_vec(&have).unwrap())
         .await
@@ -262,10 +268,12 @@ async fn forged_signature_rejected_during_replication() {
         previous: None,
         timestamp: Utc::now(),
         content: test_content("forged insight"),
+        schema_id: None,
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: None,
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(&attacker, hash.as_bytes());
@@ -275,10 +283,12 @@ async fn forged_signature_rejected_during_replication() {
         previous: unsigned.previous,
         timestamp: unsigned.timestamp,
         content: unsigned.content,
+        schema_id: None,
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: None,
         hash,
         signature: B64.encode(sig.to_bytes()),
     };
@@ -312,10 +322,12 @@ async fn tampered_content_rejected_during_replication() {
         previous: original.previous.clone(),
         timestamp: original.timestamp,
         content: test_content("tampered payload"),
+        schema_id: None,
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: None,
         hash: original.hash,
         signature: original.signature,
     };
@@ -349,10 +361,12 @@ async fn tampered_hash_rejected_during_replication() {
         previous: None,
         timestamp: original.timestamp,
         content: test_content("tampered payload"),
+        schema_id: None,
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: None,
     };
     let new_hash = tampered_unsigned.compute_hash();
     let tampered = Message {
@@ -361,10 +375,12 @@ async fn tampered_hash_rejected_during_replication() {
         previous: None,
         timestamp: original.timestamp,
         content: test_content("tampered payload"),
+        schema_id: None,
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: None,
         hash: new_hash,
         signature: original.signature, // signed the original hash, not this one
     };
@@ -440,10 +456,12 @@ async fn sequence_gap_accepted_but_flagged_during_replication() {
         previous: Some("fake_previous_hash".to_string()),
         timestamp: Utc::now(),
         content: test_content("late join message"),
+        schema_id: None,
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: None,
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(&author, hash.as_bytes());
@@ -453,10 +471,12 @@ async fn sequence_gap_accepted_but_flagged_during_replication() {
         previous: unsigned.previous,
         timestamp: unsigned.timestamp,
         content: unsigned.content,
+        schema_id: None,
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: unsigned.expires_at,
         hash: hash.clone(),
         signature: B64.encode(sig.to_bytes()),
     };
@@ -505,10 +525,12 @@ async fn fork_attack_rejected_during_replication() {
         previous: Some("forked_chain_fake_hash".to_string()),
         timestamp: Utc::now(),
         content: test_content("forked message"),
+        schema_id: None,
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: None,
     };
     let hash = unsigned.compute_hash();
     let sig = sign_bytes(&identity, hash.as_bytes());
@@ -518,10 +540,12 @@ async fn fork_attack_rejected_during_replication() {
         previous: unsigned.previous,
         timestamp: unsigned.timestamp,
         content: unsigned.content,
+        schema_id: None,
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: None,
         hash,
         signature: B64.encode(sig.to_bytes()),
     };

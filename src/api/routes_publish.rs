@@ -16,6 +16,9 @@ use crate::api::AppState;
 #[derive(Deserialize)]
 pub struct PublishRequest {
     pub content: serde_json::Value,
+    /// Schema identifier (e.g., "insight/v1"). If not provided, inferred from content type.
+    #[serde(default)]
+    pub schema_id: Option<String>,
     /// Hash of a related message (optional, for threading).
     #[serde(default)]
     pub relates: Option<String>,
@@ -39,9 +42,10 @@ pub async fn publish(
 
     let result =
         tokio::task::spawn_blocking(move || {
-            engine.publish_with_trace(
+            engine.publish_full(
                 &identity,
                 req.content,
+                req.schema_id,
                 req.relates,
                 req.tags,
                 req.trace_id,

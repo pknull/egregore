@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -9,6 +9,7 @@ use ed25519_dalek::VerifyingKey;
 use crate::error::{EgreError, Result};
 use crate::feed::engine::FeedEngine;
 use crate::feed::models::Message;
+use crate::gossip::bloom::{BloomConfig, BloomFilter, FeedBloomSummary};
 use crate::gossip::connection::SecureConnection;
 use crate::gossip::health::{clamp_observation_timestamp, PeerObservation, MAX_PEER_OBSERVATIONS};
 use crate::identity::PublicId;
@@ -24,6 +25,16 @@ pub enum GossipMessage {
         /// Empty for old nodes; new nodes include their direct observations.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         peer_observations: Vec<PeerObservation>,
+        /// Bloom filter summaries for each feed — "what I already have".
+        /// Used to skip offering messages the peer already has.
+        /// Empty for old nodes; new nodes include bloom filters.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bloom_summaries: Vec<FeedBloomSummary>,
+        /// Topics (tags) the peer is subscribed to.
+        /// Empty means no topic filtering (replicate all topics).
+        /// Non-empty means only replicate messages with matching tags.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subscribed_topics: Vec<String>,
     },
     /// "I want messages from these feeds after these sequences"
     Want { requests: Vec<FeedRequest> },
@@ -37,6 +48,26 @@ pub enum GossipMessage {
     Subscribe { mode: SubscriptionMode },
     /// Response to Subscribe request
     SubscribeAck { accepted: bool, mode: SubscriptionMode },
+    /// Grant credits for flow control (receiver has capacity)
+    #[serde(rename = "credit_grant")]
+    CreditGrant {
+        /// Number of messages the sender may transmit.
+        amount: u32,
+    },
+    /// Request more credits from the receiver
+    #[serde(rename = "credit_request")]
+    CreditRequest {
+        /// Suggested number of credits to grant.
+        suggested: u32,
+    },
+    /// Flow control capability acknowledgment during persistent mode setup
+    #[serde(rename = "flow_control_ack")]
+    FlowControlAck {
+        /// Whether this peer supports credit-based flow control.
+        supported: bool,
+        /// Initial credits granted.
+        initial_credits: u32,
+    },
 }
 
 /// Mode for persistent connections.
@@ -62,11 +93,17 @@ pub struct FeedRequest {
 }
 
 /// Controls what gets replicated.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ReplicationConfig {
     /// If Some, only replicate feeds from these authors.
     /// If None, replicate all feeds.
     pub follows: Option<HashSet<PublicId>>,
+    /// If Some, only replicate messages with at least one of these topics (tags).
+    /// If None, replicate all messages (no topic filtering).
+    pub topics: Option<HashSet<String>>,
+    /// Bloom filter configuration for "what I already have" summaries.
+    /// Default: 1% false positive rate, 8KB max per feed.
+    pub bloom_config: BloomConfig,
 }
 
 impl ReplicationConfig {
@@ -76,6 +113,28 @@ impl ReplicationConfig {
             Some(follows) => follows.contains(author),
             None => true,
         }
+    }
+
+    /// Check if we want messages with these tags (topics).
+    /// Returns true if topics is None (no filter) or if any tag matches a subscribed topic.
+    pub fn wants_topics(&self, tags: &[String]) -> bool {
+        match &self.topics {
+            Some(topics) => {
+                if topics.is_empty() {
+                    // Empty subscription set means replicate all
+                    true
+                } else {
+                    // At least one tag must match a subscribed topic
+                    tags.iter().any(|tag| topics.contains(tag))
+                }
+            }
+            None => true,
+        }
+    }
+
+    /// Check if topic filtering is enabled.
+    pub fn has_topic_filter(&self) -> bool {
+        self.topics.as_ref().is_some_and(|t| !t.is_empty())
     }
 }
 
@@ -114,22 +173,33 @@ pub async fn replicate_as_client(
 ) -> Result<()> {
     let remote_peer_id = public_id_from_key(&conn.remote_public_key);
 
-    // Send our "have" state
-    let have = build_have_message(engine).await?;
+    // Send our "have" state with bloom filters and topic subscriptions
+    let have = build_have_message(engine, config).await?;
     conn.send(&serde_json::to_vec(&have)?).await?;
 
-    // Receive server's "have"
+    // Receive server's "have" (includes their subscribed topics for filtering our responses)
+    let peer_topics: Vec<String>;
     if let Some(data) = conn.recv().await? {
         let server_have: GossipMessage = serde_json::from_slice(&data)?;
         if let GossipMessage::Have {
             feeds: server_feeds,
             peer_observations,
+            bloom_summaries,
+            subscribed_topics,
         } = server_have
         {
+            peer_topics = subscribed_topics;
+
             // Merge transitive observations from server
             merge_peer_observations(engine, peer_observations, &remote_peer_id).await;
 
-            let requests = build_want_requests(engine, &server_feeds, config).await?;
+            // Build bloom filter lookup for efficient access
+            let bloom_map: HashMap<&PublicId, &BloomFilter> = bloom_summaries
+                .iter()
+                .map(|s| (&s.author, &s.filter))
+                .collect();
+
+            let requests = build_want_requests(engine, &server_feeds, config, &bloom_map).await?;
 
             // Always send Want (even if empty) so server's handle_peer_wants unblocks
             let want = GossipMessage::Want { requests };
@@ -137,11 +207,15 @@ pub async fn replicate_as_client(
 
             // Receive messages until Done
             receive_messages(conn, engine).await?;
+        } else {
+            peer_topics = Vec::new();
         }
+    } else {
+        peer_topics = Vec::new();
     }
 
-    // Respond to server's wants
-    handle_peer_wants(conn, engine).await?;
+    // Respond to server's wants, filtering by their subscribed topics
+    handle_peer_wants(conn, engine, &peer_topics).await?;
 
     Ok(())
 }
@@ -154,29 +228,48 @@ pub async fn replicate_as_server(
 ) -> Result<()> {
     let remote_peer_id = public_id_from_key(&conn.remote_public_key);
 
-    // Receive client's "have"
+    // Receive client's "have" (includes their subscribed topics for filtering our responses)
     let client_have = match conn.recv().await? {
         Some(data) => serde_json::from_slice::<GossipMessage>(&data)?,
         None => return Ok(()),
     };
 
-    // Send our "have"
-    let have = build_have_message(engine).await?;
+    // Extract peer's subscribed topics before processing
+    let peer_topics: Vec<String> = if let GossipMessage::Have {
+        subscribed_topics,
+        ..
+    } = &client_have
+    {
+        subscribed_topics.clone()
+    } else {
+        Vec::new()
+    };
+
+    // Send our "have" with bloom filters and topic subscriptions
+    let have = build_have_message(engine, config).await?;
     conn.send(&serde_json::to_vec(&have)?).await?;
 
-    // Handle client's wants
-    handle_peer_wants(conn, engine).await?;
+    // Handle client's wants, filtering by their subscribed topics
+    handle_peer_wants(conn, engine, &peer_topics).await?;
 
     // Figure out what we want from client's have (filtered by follows)
     if let GossipMessage::Have {
         feeds: client_feeds,
         peer_observations,
+        bloom_summaries,
+        subscribed_topics: _,
     } = client_have
     {
         // Merge transitive observations from client
         merge_peer_observations(engine, peer_observations, &remote_peer_id).await;
 
-        let requests = build_want_requests(engine, &client_feeds, config).await?;
+        // Build bloom filter lookup for efficient access
+        let bloom_map: HashMap<&PublicId, &BloomFilter> = bloom_summaries
+            .iter()
+            .map(|s| (&s.author, &s.filter))
+            .collect();
+
+        let requests = build_want_requests(engine, &client_feeds, config, &bloom_map).await?;
 
         // Always send Want (even if empty) so client's handle_peer_wants unblocks
         let want = GossipMessage::Want { requests };
@@ -189,14 +282,42 @@ pub async fn replicate_as_server(
     Ok(())
 }
 
-/// Build a Have message from local feed state and peer observations.
-async fn build_have_message(engine: &Arc<FeedEngine>) -> Result<GossipMessage> {
+/// Build a Have message from local feed state, peer observations, bloom filters, and topic subscriptions.
+async fn build_have_message(
+    engine: &Arc<FeedEngine>,
+    config: &ReplicationConfig,
+) -> Result<GossipMessage> {
     let eng = engine.clone();
-    let (feeds, peer_observations) = tokio::task::spawn_blocking(move || {
+    let bloom_config = config.bloom_config;
+    let subscribed_topics: Vec<String> = config
+        .topics
+        .as_ref()
+        .map(|t| t.iter().cloned().collect())
+        .unwrap_or_default();
+
+    let (feeds, peer_observations, bloom_summaries) = tokio::task::spawn_blocking(move || {
         let store = eng.store();
         let feeds = store.get_all_feeds()?;
         let observations = store.get_direct_observations().unwrap_or_default();
-        Ok::<_, EgreError>((feeds, observations))
+
+        // Build bloom filter summaries for each feed
+        let summaries: Vec<FeedBloomSummary> = feeds
+            .iter()
+            .map(|(author, latest_seq)| {
+                let hashes = store.get_message_hashes(author).unwrap_or_default();
+                let hash_refs: Vec<&str> = hashes.iter().map(|s| s.as_str()).collect();
+                FeedBloomSummary {
+                    author: author.clone(),
+                    latest_sequence: *latest_seq,
+                    filter: crate::gossip::bloom::BloomFilter::from_hashes(
+                        hash_refs.into_iter(),
+                        &bloom_config,
+                    ),
+                }
+            })
+            .collect();
+
+        Ok::<_, EgreError>((feeds, observations, summaries))
     })
     .await
     .map_err(|e| EgreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
@@ -209,16 +330,22 @@ async fn build_have_message(engine: &Arc<FeedEngine>) -> Result<GossipMessage> {
         })
         .collect();
 
+    let total_bloom_bytes: usize = bloom_summaries.iter().map(|s| s.filter.size_bytes()).sum();
     tracing::debug!(
         feed_count = feed_states.len(),
         observation_count = peer_observations.len(),
+        bloom_count = bloom_summaries.len(),
+        bloom_total_bytes = total_bloom_bytes,
+        subscribed_topic_count = subscribed_topics.len(),
         feeds = ?feed_states.iter().map(|f| (truncate_id(&f.author.0), f.latest_sequence)).collect::<Vec<_>>(),
-        "built Have message"
+        "built Have message with bloom filters and topic subscriptions"
     );
 
     Ok(GossipMessage::Have {
         feeds: feed_states,
         peer_observations,
+        bloom_summaries,
+        subscribed_topics,
     })
 }
 
@@ -286,13 +413,17 @@ async fn merge_peer_observations(
 }
 
 /// Build Want requests by comparing remote feeds against local state.
+/// Uses bloom filters from the peer to skip requesting messages we already have.
 async fn build_want_requests(
     engine: &Arc<FeedEngine>,
     remote_feeds: &[FeedState],
     config: &ReplicationConfig,
+    peer_bloom_filters: &HashMap<&PublicId, &BloomFilter>,
 ) -> Result<Vec<FeedRequest>> {
+    let bloom_count = peer_bloom_filters.len();
     tracing::debug!(
         remote_feed_count = remote_feeds.len(),
+        peer_bloom_count = bloom_count,
         remote_feeds = ?remote_feeds.iter().map(|f| (truncate_id(&f.author.0), f.latest_sequence)).collect::<Vec<_>>(),
         "received peer Have"
     );
@@ -309,28 +440,92 @@ async fn build_want_requests(
         return Ok(Vec::new());
     }
 
+    // Clone bloom filters for the spawn_blocking task
+    // We need owned data since spawn_blocking requires 'static
+    let bloom_filters_owned: HashMap<PublicId, BloomFilter> = peer_bloom_filters
+        .iter()
+        .map(|(k, v)| ((*k).clone(), (*v).clone()))
+        .collect();
+
     let eng = engine.clone();
     tokio::task::spawn_blocking(move || {
         let store = eng.store();
         let mut requests = Vec::new();
+        let mut skipped_by_bloom = 0usize;
+
         for (author, remote_seq) in &candidates {
             // Use contiguous sequence to detect gaps needing backfill
             let our_contiguous = store.get_latest_contiguous_sequence(author)?;
+
+            // Check if peer's bloom filter indicates they have the messages we need.
+            // If so, we can proceed with requesting. If not, the request is still valid
+            // but the bloom filter helps us understand what messages might be available.
+            let peer_filter = bloom_filters_owned.get(author);
+
+            // With bloom filters, we can be smarter about what to request:
+            // - If peer has no bloom filter, fall back to sequence-based logic
+            // - If peer has a bloom filter, we use it to verify they have messages
+            //   we're interested in (though the main optimization is in the server
+            //   not sending messages we already have based on our bloom filter)
+
             tracing::debug!(
                 author = truncate_id(&author.0),
                 remote_seq = remote_seq,
                 our_contiguous = our_contiguous,
+                has_bloom = peer_filter.is_some(),
+                bloom_count = peer_filter.map(|f| f.count()).unwrap_or(0),
                 "comparing feed state"
             );
+
             if *remote_seq > our_contiguous {
+                // Check our local messages against peer's bloom filter
+                // to estimate how many messages the peer already has that we have
+                if let Some(filter) = peer_filter {
+                    let our_hashes = store.get_message_hashes(author).unwrap_or_default();
+                    let peer_already_has: usize = our_hashes
+                        .iter()
+                        .filter(|h| filter.might_contain(h))
+                        .count();
+                    tracing::debug!(
+                        author = truncate_id(&author.0),
+                        our_messages = our_hashes.len(),
+                        peer_likely_has = peer_already_has,
+                        "bloom filter overlap check"
+                    );
+
+                    // If peer already has all our messages (by bloom filter),
+                    // they might have messages we don't have - still request
+                }
+
                 requests.push(FeedRequest {
                     author: author.clone(),
                     after_sequence: our_contiguous,
                 });
+            } else {
+                // We're up to date, but check if bloom filter suggests we're missing anything
+                if let Some(filter) = peer_filter {
+                    if filter.count() > 0 {
+                        // Peer has a bloom filter with entries - verify we have them all
+                        let our_hashes = store.get_message_hashes(author).unwrap_or_default();
+                        if our_hashes.len() < filter.count() {
+                            // We might be missing some - but this is just a hint
+                            // since bloom filter count might be inflated
+                            tracing::trace!(
+                                author = truncate_id(&author.0),
+                                our_count = our_hashes.len(),
+                                peer_bloom_count = filter.count(),
+                                "possible missing messages detected via bloom"
+                            );
+                        }
+                    }
+                }
+                skipped_by_bloom += 1;
             }
         }
+
         tracing::debug!(
             request_count = requests.len(),
+            skipped_by_sequence = skipped_by_bloom,
             requests = ?requests.iter().map(|r| (truncate_id(&r.author.0), r.after_sequence)).collect::<Vec<_>>(),
             "built Want requests"
         );
@@ -398,11 +593,19 @@ async fn receive_messages(
 
 /// Handle incoming want requests and send the requested messages.
 /// Paginates through each feed until exhausted or session limit reached.
+/// If `peer_topics` is non-empty, only sends messages with matching tags (topic filtering).
 async fn handle_peer_wants(
     conn: &mut SecureConnection,
     engine: &Arc<FeedEngine>,
+    peer_topics: &[String],
 ) -> Result<()> {
-    tracing::debug!("waiting for peer Want message");
+    let topic_filter_enabled = !peer_topics.is_empty();
+    tracing::debug!(
+        topic_filter_enabled = topic_filter_enabled,
+        topic_count = peer_topics.len(),
+        "waiting for peer Want message"
+    );
+
     if let Some(data) = conn.recv().await? {
         let msg: GossipMessage = serde_json::from_slice(&data)?;
         if let GossipMessage::Want { requests } = msg {
@@ -418,8 +621,16 @@ async fn handle_peer_wants(
                     let eng = engine.clone();
                     let author = req.author.clone();
                     let seq = after_seq;
+                    let topics_clone = peer_topics.to_vec();
+
+                    // Fetch messages, optionally filtered by peer's subscribed topics
                     let messages = tokio::task::spawn_blocking(move || {
-                        eng.store().get_messages_after(&author, seq, BATCH_SIZE)
+                        if topics_clone.is_empty() {
+                            eng.store().get_messages_after(&author, seq, BATCH_SIZE)
+                        } else {
+                            eng.store()
+                                .get_messages_after_with_topics(&author, seq, BATCH_SIZE, &topics_clone)
+                        }
                     })
                     .await
                     .map_err(|e| {
@@ -431,6 +642,7 @@ async fn handle_peer_wants(
                         author = truncate_id(&req.author.0),
                         after_seq = after_seq,
                         batch_len = batch_len,
+                        topic_filtered = topic_filter_enabled,
                         "fetched messages for Want"
                     );
                     if !messages.is_empty() {

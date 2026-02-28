@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "egregore"
-version = "0.4.2"
+version = "1.0.0"
 edition = "2021"
 description = "SSB-inspired decentralized knowledge sharing for LLMs"
 license = "MIT"
@@ -49,6 +49,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 thiserror = "2.0"
 
+# URL parsing
+url = "2.5"
+
 # Encoding
 base64 = "0.22"
 
@@ -73,6 +76,14 @@ jsonschema = "0.29"
 
 # Concurrent hashmap for connection registry
 dashmap = "6.0"
+
+# URL encoding
+urlencoding = "2.1"
+
+# mDNS/Bonjour peer discovery
+mdns-sd = "0.11"
+hostname = "0.4"
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3.0"

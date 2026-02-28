@@ -11,9 +11,16 @@
 //! Both contribute to the sync loop's peer list via `list_all_syncable_addresses()`
 //! (SQL UNION, deduplicated).
 
+mod groups;
 mod health;
 mod messages;
 mod peers;
+pub mod retention;
+
+pub use groups::{
+    AssignmentStrategy, ConsumerGroup, GroupMember, GroupOffset, JoinGroupRequest,
+    JoinGroupResult,
+};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
@@ -103,6 +110,7 @@ const SCHEMA_DDL: &str = "
         first_seen TEXT NOT NULL, last_connected TEXT, last_synced TEXT
     );
     CREATE TABLE IF NOT EXISTS follows (author TEXT PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS topic_subscriptions (topic TEXT PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS peer_health (
         peer_id TEXT NOT NULL,
         last_seen_at TEXT NOT NULL,
@@ -240,6 +248,67 @@ impl FeedStore {
             )?;
         }
 
+        // Migration: add topic_subscriptions table
+        let has_topic_subscriptions: bool = conn
+            .prepare("SELECT 1 FROM topic_subscriptions LIMIT 0")
+            .is_ok();
+        if !has_topic_subscriptions {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS topic_subscriptions (topic TEXT PRIMARY KEY);",
+            )?;
+        }
+
+        // Migration: add consumer groups tables
+        Self::ensure_groups_schema(conn)?;
+
+        // Migration: add expires_at column to messages
+        let has_expires_at: bool = conn
+            .prepare("SELECT expires_at FROM messages LIMIT 0")
+            .is_ok();
+        if !has_expires_at {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN expires_at TEXT;
+                 CREATE INDEX IF NOT EXISTS idx_messages_expires_at ON messages(expires_at);",
+            )?;
+        }
+
+        // Migration: add retention_policies table
+        let has_retention_policies: bool = conn
+            .prepare("SELECT 1 FROM retention_policies LIMIT 0")
+            .is_ok();
+        if !has_retention_policies {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS retention_policies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope_type TEXT NOT NULL,  -- 'global', 'topic', 'author', 'content_type'
+                    scope_value TEXT,          -- NULL for global, topic/author/type value otherwise
+                    max_age_secs INTEGER,      -- messages older than this are eligible for deletion
+                    max_count INTEGER,         -- keep at most N messages (per scope)
+                    max_bytes INTEGER,         -- keep at most N bytes (per scope)
+                    compact_key TEXT,          -- if set, keep only latest per this JSON path
+                    created_at TEXT NOT NULL,
+                    UNIQUE(scope_type, scope_value)
+                );",
+            )?;
+        }
+
+        // Migration: add tombstones table for tracking deleted messages
+        let has_tombstones: bool = conn
+            .prepare("SELECT 1 FROM tombstones LIMIT 0")
+            .is_ok();
+        if !has_tombstones {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS tombstones (
+                    hash TEXT PRIMARY KEY,
+                    author TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    deleted_at TEXT NOT NULL,
+                    reason TEXT NOT NULL  -- 'expired', 'retention', 'compacted'
+                );
+                CREATE INDEX IF NOT EXISTS idx_tombstones_author_seq ON tombstones(author, sequence);",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -288,6 +357,65 @@ impl FeedStore {
         .map_err(EgreError::from)
     }
 
+    // ---- Topic subscription operations ----
+
+    pub fn add_topic_subscription(&self, topic: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO topic_subscriptions (topic) VALUES (?1)",
+            params![topic],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_topic_subscription(&self, topic: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM topic_subscriptions WHERE topic = ?1",
+            params![topic],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_topic_subscriptions(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT topic FROM topic_subscriptions")?;
+        let rows = stmt
+            .query_map([], |row| {
+                let topic: String = row.get(0)?;
+                Ok(topic)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn is_subscribed_to_topic(&self, topic: &str) -> Result<bool> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT COUNT(*) FROM topic_subscriptions WHERE topic = ?1",
+            params![topic],
+            |row| {
+                let count: i64 = row.get(0)?;
+                Ok(count > 0)
+            },
+        )
+        .map_err(EgreError::from)
+    }
+
+    /// Get all tags (topics) that are referenced by messages with the given tag.
+    /// This can be used for topic discovery.
+    pub fn get_all_known_topics(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT DISTINCT tag FROM message_tags ORDER BY tag")?;
+        let rows = stmt
+            .query_map([], |row| {
+                let tag: String = row.get(0)?;
+                Ok(tag)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     // ---- Metrics ----
 
     pub fn message_count(&self) -> Result<u64> {
@@ -320,6 +448,14 @@ impl FeedStore {
         let conn = self.conn();
         conn.query_row("SELECT COUNT(*) FROM follows", [], |row| row.get(0))
             .map_err(EgreError::from)
+    }
+
+    pub fn topic_subscription_count(&self) -> Result<u64> {
+        let conn = self.conn();
+        conn.query_row("SELECT COUNT(*) FROM topic_subscriptions", [], |row| {
+            row.get(0)
+        })
+        .map_err(EgreError::from)
     }
 
     // ---- Eviction ----
@@ -365,6 +501,50 @@ impl FeedStore {
 
         tx.commit()?;
         Ok(count)
+    }
+
+    // ---- Retention operations ----
+
+    /// Run retention cleanup: delete expired messages and apply policies.
+    pub fn run_retention_cleanup(&self) -> Result<retention::CleanupResult> {
+        let conn = self.conn();
+        let ops = retention::RetentionOps::new(&conn);
+        ops.run_cleanup()
+    }
+
+    /// Clean up old tombstones.
+    pub fn cleanup_tombstones(&self, max_age_secs: u64) -> Result<usize> {
+        let conn = self.conn();
+        let ops = retention::RetentionOps::new(&conn);
+        ops.cleanup_tombstones(max_age_secs)
+    }
+
+    /// Save a retention policy.
+    pub fn save_retention_policy(&self, policy: &retention::RetentionPolicy) -> Result<i64> {
+        let conn = self.conn();
+        let ops = retention::RetentionOps::new(&conn);
+        ops.save_policy(policy)
+    }
+
+    /// List all retention policies.
+    pub fn list_retention_policies(&self) -> Result<Vec<retention::RetentionPolicy>> {
+        let conn = self.conn();
+        let ops = retention::RetentionOps::new(&conn);
+        ops.list_policies()
+    }
+
+    /// Delete a retention policy.
+    pub fn delete_retention_policy(&self, id: i64) -> Result<bool> {
+        let conn = self.conn();
+        let ops = retention::RetentionOps::new(&conn);
+        ops.delete_policy(id)
+    }
+
+    /// Check if a message hash is tombstoned.
+    pub fn is_tombstoned(&self, hash: &str) -> Result<bool> {
+        let conn = self.conn();
+        let ops = retention::RetentionOps::new(&conn);
+        ops.is_tombstoned(hash)
     }
 }
 
@@ -428,10 +608,12 @@ pub(crate) fn make_test_message(
             "observation": "Test observation",
             "confidence": 0.9,
         }),
+        schema_id: Some("insight/v1".to_string()),
         relates: None,
         tags: vec![],
         trace_id: None,
         span_id: None,
+        expires_at: None,
         hash: format!("hash_{author}_{seq}"),
         signature: "sig".to_string(),
     }
@@ -507,5 +689,68 @@ mod tests {
         assert_eq!(evicted, 1);
         assert_eq!(store.message_count().unwrap(), 1);
         assert_eq!(store.feed_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn topic_subscription_crud() {
+        let store = FeedStore::open_memory().unwrap();
+        let topic = "rust-lang";
+
+        assert!(!store.is_subscribed_to_topic(topic).unwrap());
+        assert_eq!(store.topic_subscription_count().unwrap(), 0);
+
+        store.add_topic_subscription(topic).unwrap();
+        assert!(store.is_subscribed_to_topic(topic).unwrap());
+        assert_eq!(store.topic_subscription_count().unwrap(), 1);
+
+        let subs = store.get_topic_subscriptions().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0], topic);
+
+        store.remove_topic_subscription(topic).unwrap();
+        assert!(!store.is_subscribed_to_topic(topic).unwrap());
+        assert_eq!(store.topic_subscription_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn topic_subscription_idempotent() {
+        let store = FeedStore::open_memory().unwrap();
+        let topic = "llm-agents";
+
+        store.add_topic_subscription(topic).unwrap();
+        store.add_topic_subscription(topic).unwrap(); // no error
+        assert_eq!(store.topic_subscription_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn topic_subscription_multiple() {
+        let store = FeedStore::open_memory().unwrap();
+
+        store.add_topic_subscription("topic-a").unwrap();
+        store.add_topic_subscription("topic-b").unwrap();
+        store.add_topic_subscription("topic-c").unwrap();
+
+        assert_eq!(store.topic_subscription_count().unwrap(), 3);
+
+        let mut subs = store.get_topic_subscriptions().unwrap();
+        subs.sort();
+        assert_eq!(subs, vec!["topic-a", "topic-b", "topic-c"]);
+    }
+
+    #[test]
+    fn get_all_known_topics_from_messages() {
+        let store = FeedStore::open_memory().unwrap();
+
+        // Create messages with tags
+        let mut msg1 = make_test_message("@alice.ed25519", 1, None);
+        msg1.tags = vec!["rust".to_string(), "programming".to_string()];
+        store.insert_message(&msg1, true).unwrap();
+
+        let mut msg2 = make_test_message("@bob.ed25519", 1, None);
+        msg2.tags = vec!["rust".to_string(), "llm".to_string()];
+        store.insert_message(&msg2, true).unwrap();
+
+        let topics = store.get_all_known_topics().unwrap();
+        assert_eq!(topics, vec!["llm", "programming", "rust"]);
     }
 }

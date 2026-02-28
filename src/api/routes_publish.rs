@@ -22,6 +22,12 @@ pub struct PublishRequest {
     /// Categorization tags (optional).
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Distributed tracing: trace identifier (optional).
+    #[serde(default)]
+    pub trace_id: Option<String>,
+    /// Distributed tracing: span identifier (optional).
+    #[serde(default)]
+    pub span_id: Option<String>,
 }
 
 pub async fn publish(
@@ -32,11 +38,20 @@ pub async fn publish(
     let engine = state.engine.clone();
 
     let result =
-        tokio::task::spawn_blocking(move || engine.publish(&identity, req.content, req.relates, req.tags))
-            .await
-            .map_err(|e| egregore::error::EgreError::Config {
-                reason: format!("task join error: {e}"),
-            });
+        tokio::task::spawn_blocking(move || {
+            engine.publish_with_trace(
+                &identity,
+                req.content,
+                req.relates,
+                req.tags,
+                req.trace_id,
+                req.span_id,
+            )
+        })
+        .await
+        .map_err(|e| egregore::error::EgreError::Config {
+            reason: format!("task join error: {e}"),
+        });
 
     match result {
         Ok(Ok(msg)) => (StatusCode::CREATED, response::ok(msg)).into_response(),

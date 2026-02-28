@@ -32,6 +32,12 @@ pub struct Message {
     /// Categorization tags (optional).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Distributed tracing: trace identifier (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    /// Distributed tracing: span identifier (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
     /// SHA-256 hex of canonical JSON (excluding hash + signature).
     pub hash: String,
     /// Ed25519 signature of hash bytes (base64).
@@ -52,6 +58,12 @@ pub struct UnsignedMessage {
     /// Categorization tags (optional).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Distributed tracing: trace identifier (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    /// Distributed tracing: span identifier (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
 }
 
 impl UnsignedMessage {
@@ -138,6 +150,8 @@ mod tests {
             content: from_enum,
             relates: None,
             tags: vec![],
+            trace_id: None,
+            span_id: None,
         };
         let msg_json = UnsignedMessage {
             author: PublicId("@test.ed25519".to_string()),
@@ -149,6 +163,8 @@ mod tests {
             content: from_json,
             relates: None,
             tags: vec![],
+            trace_id: None,
+            span_id: None,
         };
         assert_eq!(msg_enum.compute_hash(), msg_json.compute_hash());
     }
@@ -170,6 +186,8 @@ mod tests {
             }),
             relates: None,
             tags: vec![],
+            trace_id: None,
+            span_id: None,
         };
         let h1 = msg.compute_hash();
         let h2 = msg.compute_hash();

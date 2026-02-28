@@ -104,6 +104,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Categorization tags (optional)"
+                    },
+                    "trace_id": {
+                        "type": "string",
+                        "description": "Distributed tracing identifier (optional)"
+                    },
+                    "span_id": {
+                        "type": "string",
+                        "description": "Distributed tracing span identifier (optional)"
                     }
                 },
                 "required": ["content"]
@@ -276,13 +284,22 @@ async fn tool_publish(args: Value, state: &AppState) -> ToolCallResult {
                 .collect()
         })
         .unwrap_or_default();
+    let trace_id = args
+        .get("trace_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let span_id = args
+        .get("span_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let identity = state.identity.clone();
     let engine = state.engine.clone();
 
-    let result =
-        tokio::task::spawn_blocking(move || engine.publish(&identity, content, relates, tags))
-            .await;
+    let result = tokio::task::spawn_blocking(move || {
+        engine.publish_with_trace(&identity, content, relates, tags, trace_id, span_id)
+    })
+    .await;
     ToolCallResult::from_blocking(result, |msg| {
         ToolCallResult::text(serde_json::to_string_pretty(&msg).unwrap())
     })

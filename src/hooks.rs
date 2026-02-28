@@ -80,13 +80,26 @@ impl HookExecutor {
         let hook_timeout = Duration::from_secs(timeout_secs);
         let hook_path = path.clone();
 
+        // Clone trace context for the blocking task
+        let trace_id = msg.trace_id.clone();
+        let span_id = msg.span_id.clone();
+
         let result = timeout(hook_timeout, async {
             tokio::task::spawn_blocking(move || {
-                let mut child = Command::new(&hook_path)
-                    .stdin(Stdio::piped())
+                let mut cmd = Command::new(&hook_path);
+                cmd.stdin(Stdio::piped())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()?;
+                    .stderr(Stdio::null());
+
+                // Propagate trace context as environment variables
+                if let Some(ref tid) = trace_id {
+                    cmd.env("EGREGORE_TRACE_ID", tid);
+                }
+                if let Some(ref sid) = span_id {
+                    cmd.env("EGREGORE_SPAN_ID", sid);
+                }
+
+                let mut child = cmd.spawn()?;
 
                 if let Some(ref mut stdin) = child.stdin {
                     stdin.write_all(json.as_bytes())?;
@@ -132,11 +145,17 @@ impl HookExecutor {
         let hook_timeout = Duration::from_secs(timeout_secs);
 
         let result = timeout(hook_timeout, async {
-            self.http_client
-                .post(url)
-                .json(msg)
-                .send()
-                .await
+            let mut request = self.http_client.post(url).json(msg);
+
+            // Propagate trace context as HTTP headers
+            if let Some(ref trace_id) = msg.trace_id {
+                request = request.header("X-Trace-Id", trace_id);
+            }
+            if let Some(ref span_id) = msg.span_id {
+                request = request.header("X-Span-Id", span_id);
+            }
+
+            request.send().await
         })
         .await;
 

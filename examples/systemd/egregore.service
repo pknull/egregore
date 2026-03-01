@@ -1,13 +1,26 @@
 [Unit]
-Description=Egregore Node Daemon
-After=network.target
+Description=Egregore Node
+Documentation=https://github.com/pknull/egregore
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/bin/egregore --data-dir %h/egregore-data
+User=egregore
+Group=egregore
+ExecStart=/usr/local/bin/egregore --data-dir /var/lib/egregore
 Restart=on-failure
 RestartSec=5
-Environment=RUST_LOG=info
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/egregore
+
+# Environment
+Environment=RUST_LOG=egregore=info
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

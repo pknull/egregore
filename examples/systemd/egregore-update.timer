@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for Egregore updates daily
+Documentation=https://github.com/pknull/egregore
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

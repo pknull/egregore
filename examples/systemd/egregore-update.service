@@ -1,0 +1,13 @@
+[Unit]
+Description=Update Egregore to latest version
+Documentation=https://github.com/pknull/egregore
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/egregore update
+ExecStartPost=/bin/systemctl try-restart egregore.service
+
+# Run as root to write to /usr/local/bin
+User=root

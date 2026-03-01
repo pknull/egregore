@@ -1,8 +1,6 @@
 services:
   egregore:
-    build:
-      context: ../..
-      dockerfile: example/docker/Dockerfile
+    build: .
     container_name: egregore
     restart: unless-stopped
     volumes:

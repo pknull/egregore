@@ -25,12 +25,15 @@ use egregore::identity::Identity;
 #[derive(Parser)]
 #[command(name = "egregore", version, about = "SSB-inspired LLM knowledge sharing")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to YAML config file (default: <data_dir>/config.yaml)
-    #[arg(long)]
+    #[arg(long, global = true)]
     config: Option<PathBuf>,
 
     /// Data directory for identity and database
-    #[arg(long, default_value = "./data")]
+    #[arg(long, default_value = "./data", global = true)]
     data_dir: PathBuf,
 
     /// HTTP API port (localhost only)
@@ -92,6 +95,16 @@ struct Cli {
     /// Enable mDNS/Bonjour peer discovery (works across tailnets)
     #[arg(long)]
     mdns: bool,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Check for updates and optionally install the latest version
+    Update {
+        /// Only check for updates, don't install
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 /// Build the final Config by merging: defaults -> YAML file -> CLI overrides.
@@ -179,6 +192,65 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
     Ok(config)
 }
 
+/// GitHub repository owner for updates.
+const REPO_OWNER: &str = "pknull";
+/// GitHub repository name for updates.
+const REPO_NAME: &str = "egregore";
+
+/// Handle the `update` subcommand.
+fn handle_update(check_only: bool) -> anyhow::Result<()> {
+    use self_update::cargo_crate_version;
+
+    let current_version = cargo_crate_version!();
+    println!("Current version: {}", current_version);
+
+    if check_only {
+        // Just check for updates
+        let releases = self_update::backends::github::ReleaseList::configure()
+            .repo_owner(REPO_OWNER)
+            .repo_name(REPO_NAME)
+            .build()?
+            .fetch()?;
+
+        if let Some(latest) = releases.first() {
+            let latest_version = latest.version.trim_start_matches('v');
+            if latest_version != current_version {
+                println!("New version available: {} -> {}", current_version, latest_version);
+                println!("Run `egregore update` to install");
+            } else {
+                println!("Already up to date");
+            }
+        } else {
+            println!("No releases found");
+        }
+    } else {
+        // Download and install
+        println!("Checking for updates...");
+
+        let status = self_update::backends::github::Update::configure()
+            .repo_owner(REPO_OWNER)
+            .repo_name(REPO_NAME)
+            .bin_name("egregore")
+            .current_version(current_version)
+            .show_download_progress(true)
+            .no_confirm(false)
+            .build()?
+            .update()?;
+
+        match status {
+            self_update::Status::UpToDate(v) => {
+                println!("Already up to date ({})", v);
+            }
+            self_update::Status::Updated(v) => {
+                println!("Updated to version {}", v);
+                println!("Restart egregore to use the new version");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -190,6 +262,15 @@ async fn main() -> anyhow::Result<()> {
 
     let mut matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches_mut(&mut matches)?;
+
+    // Handle subcommands
+    if let Some(command) = &cli.command {
+        match command {
+            Command::Update { check } => {
+                return handle_update(*check);
+            }
+        }
+    }
 
     // Handle --init-config
     if cli.init_config {

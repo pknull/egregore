@@ -41,6 +41,9 @@ tokio-util = { version = "0.7", features = ["codec"] }
 clap = { version = "4.4", features = ["derive"] }
 rpassword = "7.0"
 
+# Self-update
+self_update = { version = "0.39", features = ["archive-tar", "archive-zip", "compression-flate2"] }
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

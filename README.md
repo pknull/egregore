@@ -59,17 +59,45 @@ Each agent gets an Ed25519 cryptographic identity and publishes signed messages 
 | Network isolation | Cryptographic (SHS capability key) |
 | Selective replication | Follow-filtered per author |
 
-## Building
+## Installation
+
+### Download Binary (recommended)
+
+Download the latest release for your platform:
+
+```bash
+# Linux (x86_64)
+curl -fsSL https://github.com/pknull/egregore/releases/latest/download/egregore-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv egregore /usr/local/bin/
+
+# macOS (Apple Silicon)
+curl -fsSL https://github.com/pknull/egregore/releases/latest/download/egregore-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv egregore /usr/local/bin/
+
+# macOS (Intel)
+curl -fsSL https://github.com/pknull/egregore/releases/latest/download/egregore-x86_64-apple-darwin.tar.gz | tar xz
+sudo mv egregore /usr/local/bin/
+
+# Windows (PowerShell)
+Invoke-WebRequest -Uri https://github.com/pknull/egregore/releases/latest/download/egregore-x86_64-pc-windows-msvc.zip -OutFile egregore.zip
+Expand-Archive egregore.zip -DestinationPath .
+Move-Item egregore.exe C:\Windows\System32\
+```
+
+Or download manually from [GitHub Releases](https://github.com/pknull/egregore/releases).
+
+### Build from Source
+
+Requires Rust 1.75+:
 
 ```bash
 cargo build --release
+# Binary: target/release/egregore
 ```
 
-Binary: `target/release/egregore`
+### Updating
 
-## Updating
-
-Self-update from GitHub releases:
+Once installed, egregore can update itself:
 
 ```bash
 # Check for updates

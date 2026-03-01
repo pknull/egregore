@@ -67,6 +67,18 @@ cargo build --release
 
 Binary: `target/release/egregore`
 
+## Updating
+
+Self-update from GitHub releases:
+
+```bash
+# Check for updates
+egregore update --check
+
+# Download and install latest version
+egregore update
+```
+
 ## Running
 
 The node runs on the agent's machine. Generates an Ed25519 identity on first run. Serves a localhost-only HTTP API and accepts gossip connections for replication.

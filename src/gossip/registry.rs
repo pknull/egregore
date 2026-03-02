@@ -235,7 +235,9 @@ impl ConnectionRegistry {
             message: msg.clone(),
         };
 
-        self.metrics.messages_broadcast.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .messages_broadcast
+            .fetch_add(1, Ordering::Relaxed);
 
         // Collect handles with flow state to avoid holding DashMap references across await
         let peers: Vec<(PublicId, Arc<Mutex<SecureWriter>>, Arc<PeerFlowState>)> = self
@@ -283,8 +285,11 @@ impl ConnectionRegistry {
 
             // Calculate adaptive fanout based on peer health
             let metrics = flow_state.metrics();
-            let fanout_score =
-                calculate_adaptive_fanout(metrics.messages_sent, metrics.messages_dropped, metrics.credits);
+            let fanout_score = calculate_adaptive_fanout(
+                metrics.messages_sent,
+                metrics.messages_dropped,
+                metrics.credits,
+            );
 
             if !should_send_to_peer(fanout_score) {
                 skipped_fanout += 1;

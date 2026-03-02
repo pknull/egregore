@@ -239,10 +239,9 @@ impl<'a> RetentionOps<'a> {
 
     /// Delete a retention policy by ID.
     pub fn delete_policy(&self, id: i64) -> Result<bool> {
-        let deleted = self.conn.execute(
-            "DELETE FROM retention_policies WHERE id = ?1",
-            params![id],
-        )?;
+        let deleted = self
+            .conn
+            .execute("DELETE FROM retention_policies WHERE id = ?1", params![id])?;
         Ok(deleted > 0)
     }
 
@@ -289,7 +288,11 @@ impl<'a> RetentionOps<'a> {
 
     /// Apply a single retention policy.
     /// Returns (retention_deleted, compacted_deleted).
-    fn apply_policy(&self, policy: &RetentionPolicy, now: &DateTime<Utc>) -> Result<(usize, usize)> {
+    fn apply_policy(
+        &self,
+        policy: &RetentionPolicy,
+        now: &DateTime<Utc>,
+    ) -> Result<(usize, usize)> {
         let mut retention_deleted = 0;
         let mut compacted_deleted = 0;
 
@@ -303,10 +306,8 @@ impl<'a> RetentionOps<'a> {
                 let cutoff_str = cutoff.to_rfc3339();
 
                 let where_clause = self.scope_where_clause(&policy.scope);
-                let delete_sql = format!(
-                    "DELETE FROM messages WHERE timestamp < ?1 {}",
-                    where_clause
-                );
+                let delete_sql =
+                    format!("DELETE FROM messages WHERE timestamp < ?1 {}", where_clause);
 
                 // Record tombstones first
                 let tombstone_sql = format!(
@@ -316,7 +317,8 @@ impl<'a> RetentionOps<'a> {
                      WHERE timestamp < ?2 {}",
                     where_clause
                 );
-                self.conn.execute(&tombstone_sql, params![now.to_rfc3339(), cutoff_str])?;
+                self.conn
+                    .execute(&tombstone_sql, params![now.to_rfc3339(), cutoff_str])?;
 
                 retention_deleted += self.conn.execute(&delete_sql, params![cutoff_str])?;
             }
@@ -392,7 +394,8 @@ impl<'a> RetentionOps<'a> {
              ) {}",
             where_clause, where_clause
         );
-        self.conn.execute(&tombstone_sql, params![now.to_rfc3339(), max_count as i64])?;
+        self.conn
+            .execute(&tombstone_sql, params![now.to_rfc3339(), max_count as i64])?;
 
         let delete_sql = format!(
             "DELETE FROM messages
@@ -439,7 +442,8 @@ impl<'a> RetentionOps<'a> {
              AND json_extract(m.content_json, ?2) IS NOT NULL {}",
             where_clause, where_clause
         );
-        self.conn.execute(&tombstone_sql, params![now.to_rfc3339(), compact_key])?;
+        self.conn
+            .execute(&tombstone_sql, params![now.to_rfc3339(), compact_key])?;
 
         let delete_sql = format!(
             "DELETE FROM messages
@@ -565,7 +569,8 @@ mod tests {
             "INSERT INTO messages (hash, author, sequence, timestamp, content_type, content_json)
              VALUES ('hash3', 'author1', 3, ?1, 'test', '{}')",
             params![Utc::now().to_rfc3339()],
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = ops.run_cleanup().unwrap();
         assert_eq!(result.expired, 1);

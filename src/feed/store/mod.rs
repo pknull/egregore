@@ -18,8 +18,7 @@ mod peers;
 pub mod retention;
 
 pub use groups::{
-    AssignmentStrategy, ConsumerGroup, GroupMember, GroupOffset, JoinGroupRequest,
-    JoinGroupResult,
+    AssignmentStrategy, ConsumerGroup, GroupMember, GroupOffset, JoinGroupRequest, JoinGroupResult,
 };
 
 use chrono::{DateTime, Utc};
@@ -168,9 +167,7 @@ impl FeedStore {
     /// SCHEMA_DDL creates indexes on these columns, so they must exist first.
     fn run_pre_schema_migrations(conn: &Connection) -> Result<()> {
         // Check if messages table exists (fresh database has no tables yet)
-        let has_messages: bool = conn
-            .prepare("SELECT 1 FROM messages LIMIT 0")
-            .is_ok();
+        let has_messages: bool = conn.prepare("SELECT 1 FROM messages LIMIT 0").is_ok();
         if !has_messages {
             // Fresh database - SCHEMA_DDL will create everything
             return Ok(());
@@ -187,9 +184,7 @@ impl FeedStore {
         }
 
         // Migration: add relates column to messages
-        let has_relates: bool = conn
-            .prepare("SELECT relates FROM messages LIMIT 0")
-            .is_ok();
+        let has_relates: bool = conn.prepare("SELECT relates FROM messages LIMIT 0").is_ok();
         if !has_relates {
             conn.execute_batch("ALTER TABLE messages ADD COLUMN relates TEXT;")?;
         }
@@ -200,9 +195,7 @@ impl FeedStore {
     /// Migrations that run AFTER SCHEMA_DDL (new tables, etc.).
     fn run_post_schema_migrations(conn: &Connection) -> Result<()> {
         // Migration: add peer_health table
-        let has_peer_health: bool = conn
-            .prepare("SELECT 1 FROM peer_health LIMIT 0")
-            .is_ok();
+        let has_peer_health: bool = conn.prepare("SELECT 1 FROM peer_health LIMIT 0").is_ok();
         if !has_peer_health {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS peer_health (
@@ -220,9 +213,7 @@ impl FeedStore {
         }
 
         // Migration: add local_state table
-        let has_local_state: bool = conn
-            .prepare("SELECT 1 FROM local_state LIMIT 0")
-            .is_ok();
+        let has_local_state: bool = conn.prepare("SELECT 1 FROM local_state LIMIT 0").is_ok();
         if !has_local_state {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS local_state (
@@ -233,9 +224,7 @@ impl FeedStore {
         }
 
         // Migration: add message_tags table
-        let has_message_tags: bool = conn
-            .prepare("SELECT 1 FROM message_tags LIMIT 0")
-            .is_ok();
+        let has_message_tags: bool = conn.prepare("SELECT 1 FROM message_tags LIMIT 0").is_ok();
         if !has_message_tags {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS message_tags (
@@ -293,9 +282,7 @@ impl FeedStore {
         }
 
         // Migration: add tombstones table for tracking deleted messages
-        let has_tombstones: bool = conn
-            .prepare("SELECT 1 FROM tombstones LIMIT 0")
-            .is_ok();
+        let has_tombstones: bool = conn.prepare("SELECT 1 FROM tombstones LIMIT 0").is_ok();
         if !has_tombstones {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS tombstones (
@@ -325,10 +312,7 @@ impl FeedStore {
 
     pub fn remove_follow(&self, author: &PublicId) -> Result<()> {
         let conn = self.conn();
-        conn.execute(
-            "DELETE FROM follows WHERE author = ?1",
-            params![author.0],
-        )?;
+        conn.execute("DELETE FROM follows WHERE author = ?1", params![author.0])?;
         Ok(())
     }
 

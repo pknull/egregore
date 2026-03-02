@@ -83,10 +83,20 @@ impl HookEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub data_dir: PathBuf,
+    /// Enable HTTP API server (REST + SSE + optional MCP endpoint).
+    #[serde(default = "default_api_enabled")]
+    pub api_enabled: bool,
+    /// Enable MCP endpoint (/mcp) on HTTP API.
+    #[serde(default = "default_mcp_enabled")]
+    pub mcp_enabled: bool,
     pub port: u16,
     pub gossip_port: u16,
     pub gossip_interval_secs: u64,
     pub network_key: String,
+    /// Enable strict schema validation.
+    /// When true, unknown content types/schemas are rejected at publish/ingest.
+    #[serde(default)]
+    pub schema_strict: bool,
     pub peers: Vec<String>,
     pub lan_discovery: bool,
     pub discovery_port: u16,
@@ -170,14 +180,25 @@ fn default_flow_rate_limit() -> u32 {
     DEFAULT_FLOW_RATE_LIMIT
 }
 
+fn default_api_enabled() -> bool {
+    true
+}
+
+fn default_mcp_enabled() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::from("./data"),
+            api_enabled: true,
+            mcp_enabled: true,
             port: DEFAULT_HTTP_PORT,
             gossip_port: DEFAULT_GOSSIP_PORT,
             gossip_interval_secs: DEFAULT_GOSSIP_INTERVAL_SECS,
             network_key: DEFAULT_NETWORK_KEY.to_string(),
+            schema_strict: false,
             peers: Vec::new(),
             lan_discovery: false,
             discovery_port: DEFAULT_DISCOVERY_PORT,
@@ -235,7 +256,7 @@ fn is_internal_url(url: &str) -> bool {
             IpAddr::V6(v6) => {
                 v6.is_loopback()       // ::1
                     || v6.is_unspecified() // ::
-                    // Note: is_unique_local() and is_unicast_link_local() are unstable
+                                           // Note: is_unique_local() and is_unicast_link_local() are unstable
             }
         };
     }
@@ -296,14 +317,31 @@ impl Config {
 
     /// Validate the config for obvious errors.
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.port == self.gossip_port {
-            anyhow::bail!("port and gossip_port must differ ({} == {})", self.port, self.gossip_port);
-        }
-        if self.port == self.discovery_port || self.gossip_port == self.discovery_port {
+        if self.api_enabled {
+            if self.port == self.gossip_port {
+                anyhow::bail!(
+                    "port and gossip_port must differ ({} == {})",
+                    self.port,
+                    self.gossip_port
+                );
+            }
+            if self.port == self.discovery_port || self.gossip_port == self.discovery_port {
+                anyhow::bail!(
+                    "discovery_port ({}) must differ from port ({}) and gossip_port ({})",
+                    self.discovery_port,
+                    self.port,
+                    self.gossip_port
+                );
+            }
+        } else if self.gossip_port == self.discovery_port {
             anyhow::bail!(
-                "discovery_port ({}) must differ from port ({}) and gossip_port ({})",
-                self.discovery_port, self.port, self.gossip_port
+                "discovery_port ({}) must differ from gossip_port ({})",
+                self.discovery_port,
+                self.gossip_port
             );
+        }
+        if !self.api_enabled && self.mcp_enabled {
+            tracing::warn!("mcp_enabled=true has no effect when api_enabled=false");
         }
         for hook in &self.hooks {
             if let Some(ref path) = hook.on_message {
@@ -379,7 +417,10 @@ mod tests {
             network_key: "other-network-key".to_string(),
             ..Config::default()
         };
-        assert_ne!(c1.network_key_discriminator(), c2.network_key_discriminator());
+        assert_ne!(
+            c1.network_key_discriminator(),
+            c2.network_key_discriminator()
+        );
     }
 
     #[test]
@@ -413,6 +454,8 @@ mod tests {
     fn yaml_round_trip() {
         let config = Config {
             peers: vec!["192.168.1.100:7655".to_string()],
+            schema_strict: true,
+            mcp_enabled: false,
             hooks: vec![
                 HookEntry {
                     name: Some("test-hook".to_string()),
@@ -433,15 +476,24 @@ mod tests {
         let parsed: Config = serde_yaml::from_str(&yaml).unwrap();
 
         assert_eq!(parsed.peers.len(), 1);
+        assert!(parsed.schema_strict);
+        assert!(parsed.api_enabled);
+        assert!(!parsed.mcp_enabled);
         assert_eq!(parsed.hooks.len(), 2);
         assert_eq!(parsed.hooks[0].name.as_deref(), Some("test-hook"));
-        assert_eq!(parsed.hooks[1].webhook_url.as_deref(), Some("https://example.com/hook"));
+        assert_eq!(
+            parsed.hooks[1].webhook_url.as_deref(),
+            Some("https://example.com/hook")
+        );
     }
 
     #[test]
     fn yaml_empty_hooks_defaults() {
         let yaml = "data_dir: ./data\nport: 7654\ngossip_port: 7655\ngossip_interval_secs: 300\nnetwork_key: test\npeers: []\nlan_discovery: false\ndiscovery_port: 7656\n";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.schema_strict);
+        assert!(config.api_enabled);
+        assert!(config.mcp_enabled);
         assert!(config.hooks.is_empty());
     }
 
@@ -453,6 +505,17 @@ mod tests {
             ..Config::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_allows_port_conflict_when_api_disabled() {
+        let config = Config {
+            api_enabled: false,
+            port: 7654,
+            gossip_port: 7654,
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]

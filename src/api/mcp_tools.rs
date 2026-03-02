@@ -119,7 +119,8 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "egregore_query",
-            description: "Query feed messages by author, search text, content type, tag, or related message",
+            description:
+                "Query feed messages by author, search text, content type, tag, or related message",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -306,7 +307,10 @@ async fn tool_publish(args: Value, state: &AppState) -> ToolCallResult {
 }
 
 async fn tool_query(args: Value, state: &AppState) -> ToolCallResult {
-    let search = args.get("search").and_then(|v| v.as_str()).map(String::from);
+    let search = args
+        .get("search")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let author = args
         .get("author")
         .and_then(|v| v.as_str())
@@ -335,8 +339,7 @@ async fn tool_query(args: Value, state: &AppState) -> ToolCallResult {
 
     if let Some(search_text) = search {
         let limit = limit.unwrap_or(20);
-        let result =
-            tokio::task::spawn_blocking(move || engine.search(&search_text, limit)).await;
+        let result = tokio::task::spawn_blocking(move || engine.search(&search_text, limit)).await;
         ToolCallResult::from_blocking(result, pretty)
     } else {
         let query = FeedQuery {
@@ -419,8 +422,7 @@ async fn tool_follow(args: Value, state: &AppState) -> ToolCallResult {
 
     let engine = state.engine.clone();
     let author_id = PublicId(author.clone());
-    let result =
-        tokio::task::spawn_blocking(move || engine.store().add_follow(&author_id)).await;
+    let result = tokio::task::spawn_blocking(move || engine.store().add_follow(&author_id)).await;
 
     ToolCallResult::from_blocking(result, |()| {
         ToolCallResult::text(serde_json::json!({ "followed": author }).to_string())

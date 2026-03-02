@@ -11,6 +11,15 @@ data_dir: ./data
 # Default: 7654
 port: 7654
 
+# Enable HTTP API server (REST + SSE + optional MCP endpoint).
+# Default: true
+api_enabled: true
+
+# Enable MCP endpoint at POST /mcp on the HTTP API port.
+# Ignored if api_enabled is false.
+# Default: true
+mcp_enabled: true
+
 # Gossip TCP port (binds to all interfaces).
 # Default: 7655
 gossip_port: 7655
@@ -22,6 +31,11 @@ gossip_interval_secs: 300
 # Network key for isolation. Nodes with different keys cannot communicate.
 # Default: egregore-network-v1
 network_key: egregore-network-v1
+
+# Enable strict schema validation.
+# When true, messages with unknown content type/schema are rejected at publish/ingest.
+# Default: false
+schema_strict: false
 
 # Enable UDP LAN peer discovery.
 # Default: false

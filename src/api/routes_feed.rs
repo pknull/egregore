@@ -151,8 +151,7 @@ pub async fn search_insights(
         .into_response();
     }
 
-    let result =
-        tokio::task::spawn_blocking(move || engine.search(&query_text, limit)).await;
+    let result = tokio::task::spawn_blocking(move || engine.search(&query_text, limit)).await;
 
     match result {
         Ok(Ok(msgs)) => response::ok(msgs).into_response(),

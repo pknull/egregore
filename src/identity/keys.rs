@@ -67,10 +67,9 @@ impl Identity {
         let bytes = std::fs::read(path).map_err(|_| EgreError::IdentityNotFound {
             path: path.display().to_string(),
         })?;
-        let key_bytes: [u8; 32] =
-            bytes.try_into().map_err(|_| EgreError::InvalidKeypair {
-                reason: "expected 32 bytes".into(),
-            })?;
+        let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| EgreError::InvalidKeypair {
+            reason: "expected 32 bytes".into(),
+        })?;
         let signing_key = SigningKey::from_bytes(&key_bytes);
         Ok(Self { signing_key })
     }
@@ -148,10 +147,9 @@ impl PublicId {
         let bytes = B64.decode(inner).map_err(|e| EgreError::InvalidKeypair {
             reason: format!("base64 decode failed: {e}"),
         })?;
-        let key_bytes: [u8; 32] =
-            bytes.try_into().map_err(|_| EgreError::InvalidKeypair {
-                reason: "expected 32 bytes after decode".into(),
-            })?;
+        let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| EgreError::InvalidKeypair {
+            reason: "expected 32 bytes after decode".into(),
+        })?;
         VerifyingKey::from_bytes(&key_bytes).map_err(|e| EgreError::InvalidKeypair {
             reason: format!("invalid ed25519 public key: {e}"),
         })
@@ -162,9 +160,11 @@ impl PublicId {
     pub fn to_x25519_public_key(&self) -> Result<x25519_dalek::PublicKey> {
         let vk = self.to_verifying_key()?;
         let ed_point = curve25519_dalek::edwards::CompressedEdwardsY(vk.to_bytes());
-        let ed_point = ed_point.decompress().ok_or_else(|| EgreError::InvalidKeypair {
-            reason: "failed to decompress Ed25519 point".into(),
-        })?;
+        let ed_point = ed_point
+            .decompress()
+            .ok_or_else(|| EgreError::InvalidKeypair {
+                reason: "failed to decompress Ed25519 point".into(),
+            })?;
         let montgomery = ed_point.to_montgomery();
         Ok(x25519_dalek::PublicKey::from(montgomery.to_bytes()))
     }
@@ -201,10 +201,7 @@ mod tests {
         identity.save_unencrypted(&key_path).unwrap();
 
         let loaded = Identity::load_unencrypted(&key_path).unwrap();
-        assert_eq!(
-            identity.verifying_key(),
-            loaded.verifying_key()
-        );
+        assert_eq!(identity.verifying_key(), loaded.verifying_key());
     }
 
     #[test]

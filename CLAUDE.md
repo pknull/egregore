@@ -104,6 +104,7 @@ src/
 ## Documentation
 
 - `README.md` — Technical overview, CLI flags, API tables
-- `docs/architecture.md` — Protocol specification, crypto details
+- `docs/architecture/README.md` — Architecture slices by feature (with shared maps)
 - `docs/operations.md` — Step-by-step deployment procedures
+- `docs/features/README.md` — Feature index with per-feature deep dives
 - `docs/api/node-api.yaml` — OpenAPI 3.0 spec for the HTTP API

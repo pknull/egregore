@@ -106,25 +106,55 @@ mod tests {
         let interval = 60; // 60 second sync interval
 
         // Within 2 intervals = recent
-        assert_eq!(PeerHealthStatus::from_age_secs(0, interval), PeerHealthStatus::Recent);
-        assert_eq!(PeerHealthStatus::from_age_secs(60, interval), PeerHealthStatus::Recent);
-        assert_eq!(PeerHealthStatus::from_age_secs(119, interval), PeerHealthStatus::Recent);
+        assert_eq!(
+            PeerHealthStatus::from_age_secs(0, interval),
+            PeerHealthStatus::Recent
+        );
+        assert_eq!(
+            PeerHealthStatus::from_age_secs(60, interval),
+            PeerHealthStatus::Recent
+        );
+        assert_eq!(
+            PeerHealthStatus::from_age_secs(119, interval),
+            PeerHealthStatus::Recent
+        );
 
         // 2-4 intervals = stale
-        assert_eq!(PeerHealthStatus::from_age_secs(120, interval), PeerHealthStatus::Stale);
-        assert_eq!(PeerHealthStatus::from_age_secs(299, interval), PeerHealthStatus::Stale);
+        assert_eq!(
+            PeerHealthStatus::from_age_secs(120, interval),
+            PeerHealthStatus::Stale
+        );
+        assert_eq!(
+            PeerHealthStatus::from_age_secs(299, interval),
+            PeerHealthStatus::Stale
+        );
 
         // 5-9 intervals = suspected
-        assert_eq!(PeerHealthStatus::from_age_secs(300, interval), PeerHealthStatus::Suspected);
-        assert_eq!(PeerHealthStatus::from_age_secs(599, interval), PeerHealthStatus::Suspected);
+        assert_eq!(
+            PeerHealthStatus::from_age_secs(300, interval),
+            PeerHealthStatus::Suspected
+        );
+        assert_eq!(
+            PeerHealthStatus::from_age_secs(599, interval),
+            PeerHealthStatus::Suspected
+        );
 
         // 10+ intervals = unknown
-        assert_eq!(PeerHealthStatus::from_age_secs(600, interval), PeerHealthStatus::Unknown);
-        assert_eq!(PeerHealthStatus::from_age_secs(3600, interval), PeerHealthStatus::Unknown);
+        assert_eq!(
+            PeerHealthStatus::from_age_secs(600, interval),
+            PeerHealthStatus::Unknown
+        );
+        assert_eq!(
+            PeerHealthStatus::from_age_secs(3600, interval),
+            PeerHealthStatus::Unknown
+        );
     }
 
     #[test]
     fn zero_interval_returns_unknown() {
-        assert_eq!(PeerHealthStatus::from_age_secs(100, 0), PeerHealthStatus::Unknown);
+        assert_eq!(
+            PeerHealthStatus::from_age_secs(100, 0),
+            PeerHealthStatus::Unknown
+        );
     }
 }

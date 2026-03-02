@@ -43,10 +43,9 @@ pub async fn add_topic_subscription(
     let engine = state.engine.clone();
     let topic_owned = trimmed.to_string();
 
-    let result = tokio::task::spawn_blocking(move || {
-        engine.store().add_topic_subscription(&topic_owned)
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || engine.store().add_topic_subscription(&topic_owned))
+            .await;
 
     match result {
         Ok(Ok(())) => (
@@ -74,8 +73,7 @@ pub async fn remove_topic_subscription(
     let engine = state.engine.clone();
 
     let result =
-        tokio::task::spawn_blocking(move || engine.store().remove_topic_subscription(&topic))
-            .await;
+        tokio::task::spawn_blocking(move || engine.store().remove_topic_subscription(&topic)).await;
 
     match result {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),

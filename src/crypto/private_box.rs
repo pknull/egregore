@@ -55,11 +55,15 @@ pub fn box_message(
     let nonce = Nonce::from(nonce_bytes);
 
     // Encrypt body with symmetric key
-    let body_cipher = ChaCha20Poly1305::new_from_slice(&sym_key)
-        .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+    let body_cipher =
+        ChaCha20Poly1305::new_from_slice(&sym_key).map_err(|e| EgreError::Crypto {
+            reason: e.to_string(),
+        })?;
     let encrypted_body = body_cipher
         .encrypt(&nonce, plaintext)
-        .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+        .map_err(|e| EgreError::Crypto {
+            reason: e.to_string(),
+        })?;
 
     // For each recipient, encrypt the symmetric key with DH(sender, recipient)
     let sender_secret = sender.to_x25519_static_secret();
@@ -69,11 +73,15 @@ pub fn box_message(
         let shared = sender_secret.diffie_hellman(recipient_pk);
         let shared_key = sha256(shared.as_bytes());
 
-        let entry_cipher = ChaCha20Poly1305::new_from_slice(&shared_key)
-            .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+        let entry_cipher =
+            ChaCha20Poly1305::new_from_slice(&shared_key).map_err(|e| EgreError::Crypto {
+                reason: e.to_string(),
+            })?;
         let encrypted_sym_key = entry_cipher
             .encrypt(&nonce, sym_key.as_ref())
-            .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+            .map_err(|e| EgreError::Crypto {
+                reason: e.to_string(),
+            })?;
 
         recipient_entries.extend_from_slice(&encrypted_sym_key);
     }
@@ -121,8 +129,10 @@ pub fn unbox_message(
     let shared = our_secret.diffie_hellman(sender_x25519_pk);
     let shared_key = sha256(shared.as_bytes());
 
-    let entry_cipher = ChaCha20Poly1305::new_from_slice(&shared_key)
-        .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+    let entry_cipher =
+        ChaCha20Poly1305::new_from_slice(&shared_key).map_err(|e| EgreError::Crypto {
+            reason: e.to_string(),
+        })?;
 
     // Try each recipient slot
     for i in 0..recipient_count {
@@ -135,8 +145,10 @@ pub fn unbox_message(
                 reason: "decrypted key wrong size".into(),
             })?;
 
-            let body_cipher = ChaCha20Poly1305::new_from_slice(&sym_key)
-                .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+            let body_cipher =
+                ChaCha20Poly1305::new_from_slice(&sym_key).map_err(|e| EgreError::Crypto {
+                    reason: e.to_string(),
+                })?;
             let plaintext = body_cipher
                 .decrypt(&nonce, &ciphertext[body_start..])
                 .map_err(|_| EgreError::Crypto {
@@ -207,12 +219,7 @@ mod tests {
         let recipient = Identity::generate();
         let outsider = Identity::generate();
 
-        let boxed = box_message(
-            &sender,
-            &[recipient.to_x25519_public_key()],
-            b"private",
-        )
-        .unwrap();
+        let boxed = box_message(&sender, &[recipient.to_x25519_public_key()], b"private").unwrap();
 
         let result = unbox_message(&outsider, &sender.to_x25519_public_key(), &boxed).unwrap();
         assert!(result.is_none());
@@ -230,22 +237,14 @@ mod tests {
         let sender = Identity::generate();
         let recipient = Identity::generate();
 
-        let mut boxed = box_message(
-            &sender,
-            &[recipient.to_x25519_public_key()],
-            b"secret",
-        )
-        .unwrap();
+        let mut boxed =
+            box_message(&sender, &[recipient.to_x25519_public_key()], b"secret").unwrap();
 
         // Corrupt a byte
         let last = boxed.len() - 1;
         boxed[last] ^= 0xFF;
 
-        let result = unbox_message(
-            &recipient,
-            &sender.to_x25519_public_key(),
-            &boxed,
-        );
+        let result = unbox_message(&recipient, &sender.to_x25519_public_key(), &boxed);
         // Should fail or return None
         assert!(result.is_err() || result.unwrap().is_none());
     }

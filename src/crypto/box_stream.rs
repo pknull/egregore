@@ -1,7 +1,7 @@
 //! Box Stream — encrypted framing over an authenticated connection.
 //!
 //! After SHS completes, all data flows through Box Stream frames. Each frame
-//! is independently encrypted with ChaCha20-Poly1305 using per-direction keys.
+//! is independently encrypted with XChaCha20-Poly1305 using per-direction keys.
 //!
 //! Frame format:
 //!   [encrypted_header(34 bytes) | encrypted_body(len bytes)]
@@ -14,9 +14,21 @@
 //! A goodbye frame (all-zero header plaintext) signals clean stream termination.
 //! Body size capped at 4096 bytes; larger payloads are split by the application
 //! layer (see gossip/replication.rs).
+//!
+//! # Cipher Choice
+//!
+//! We use XChaCha20-Poly1305 (24-byte nonce) rather than ChaCha20-Poly1305
+//! (12-byte nonce) to match the original SSB Box Stream design which uses
+//! XSalsa20-Poly1305. This allows direct use of the full 24-byte nonce
+//! derived from ephemeral keys without truncation.
+//!
+//! References:
+//! - SSB Protocol Guide: https://ssbc.github.io/scuttlebutt-protocol-guide/
+//! - XChaCha20 IETF Draft: https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-xchacha-03
+//! - Libsodium XChaCha20: https://libsodium.gitbook.io/doc/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction
 
 use chacha20poly1305::aead::{Aead, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 
 use crate::error::{EgreError, Result};
 
@@ -27,24 +39,28 @@ const MAX_BODY_SIZE: usize = 4096;
 
 /// Encrypts frames for sending over a Box Stream.
 pub struct BoxStreamWriter {
-    cipher: ChaCha20Poly1305,
+    cipher: XChaCha20Poly1305,
     nonce: [u8; 24],
 }
 
 /// Decrypts frames received from a Box Stream.
 pub struct BoxStreamReader {
-    cipher: ChaCha20Poly1305,
+    cipher: XChaCha20Poly1305,
     nonce: [u8; 24],
 }
 
 impl BoxStreamWriter {
     pub fn new(key: [u8; 32], nonce: [u8; 24]) -> Self {
-        let cipher = ChaCha20Poly1305::new_from_slice(&key).expect("valid key length");
+        let cipher = XChaCha20Poly1305::new_from_slice(&key).expect("valid key length");
         Self { cipher, nonce }
     }
 
     /// Encrypt a body into a box stream frame.
     /// Returns: [encrypted_header(34) | encrypted_body(len + 16)]
+    ///
+    /// Per SSB Box Stream spec, nonces are assigned: header gets N, body gets N+1.
+    /// We must encrypt body first to compute its MAC (needed for header), but
+    /// we pre-allocate both nonces to maintain correct ordering.
     pub fn encrypt_frame(&mut self, body: &[u8]) -> Result<Vec<u8>> {
         if body.is_empty() {
             return Err(EgreError::Crypto {
@@ -57,11 +73,14 @@ impl BoxStreamWriter {
             });
         }
 
-        // Encrypt body first to get the body MAC
+        // Pre-allocate nonces in protocol order: header N, body N+1
+        let header_nonce = self.next_nonce();
         let body_nonce = self.next_nonce();
+
+        // Encrypt body first to get the body MAC (needed for header)
         let body_ct = self
             .cipher
-            .encrypt(&chacha_nonce(&body_nonce), body)
+            .encrypt(XNonce::from_slice(&body_nonce), body)
             .map_err(|e| EgreError::Crypto {
                 reason: e.to_string(),
             })?;
@@ -75,11 +94,10 @@ impl BoxStreamWriter {
         header_plain.extend_from_slice(&body_len);
         header_plain.extend_from_slice(body_mac);
 
-        // Encrypt header
-        let header_nonce = self.next_nonce();
+        // Encrypt header with its pre-allocated nonce
         let header_ct = self
             .cipher
-            .encrypt(&chacha_nonce(&header_nonce), header_plain.as_slice())
+            .encrypt(XNonce::from_slice(&header_nonce), header_plain.as_slice())
             .map_err(|e| EgreError::Crypto {
                 reason: e.to_string(),
             })?;
@@ -97,7 +115,7 @@ impl BoxStreamWriter {
         let zeros = [0u8; HEADER_PLAIN_SIZE];
         let ct = self
             .cipher
-            .encrypt(&chacha_nonce(&nonce), zeros.as_ref())
+            .encrypt(XNonce::from_slice(&nonce), zeros.as_ref())
             .map_err(|e| EgreError::Crypto {
                 reason: e.to_string(),
             })?;
@@ -113,7 +131,7 @@ impl BoxStreamWriter {
 
 impl BoxStreamReader {
     pub fn new(key: [u8; 32], nonce: [u8; 24]) -> Self {
-        let cipher = ChaCha20Poly1305::new_from_slice(&key).expect("valid key length");
+        let cipher = XChaCha20Poly1305::new_from_slice(&key).expect("valid key length");
         Self { cipher, nonce }
     }
 
@@ -127,7 +145,7 @@ impl BoxStreamReader {
         let nonce = self.next_nonce();
         let header_plain = self
             .cipher
-            .decrypt(&chacha_nonce(&nonce), header_ct.as_ref())
+            .decrypt(XNonce::from_slice(&nonce), header_ct.as_ref())
             .map_err(|_| EgreError::Crypto {
                 reason: "header decryption failed".into(),
             })?;
@@ -154,7 +172,7 @@ impl BoxStreamReader {
         full_ct.extend_from_slice(body_mac);
 
         self.cipher
-            .decrypt(&chacha_nonce(&nonce), full_ct.as_slice())
+            .decrypt(XNonce::from_slice(&nonce), full_ct.as_slice())
             .map_err(|_| EgreError::Crypto {
                 reason: "body decryption failed".into(),
             })
@@ -165,11 +183,6 @@ impl BoxStreamReader {
         increment_nonce(&mut self.nonce);
         current
     }
-}
-
-/// Convert 24-byte nonce to ChaCha20 12-byte nonce (use last 12 bytes).
-fn chacha_nonce(nonce_24: &[u8; 24]) -> Nonce {
-    *Nonce::from_slice(&nonce_24[..12])
 }
 
 /// Increment a 24-byte nonce (big-endian).
@@ -281,5 +294,53 @@ mod tests {
         increment_nonce(&mut nonce);
         assert_eq!(nonce[23], 0);
         assert_eq!(nonce[22], 1);
+    }
+
+    /// Regression test for nonce reuse vulnerability (issue #68).
+    ///
+    /// The original implementation used ChaCha20-Poly1305 (12-byte nonce) but
+    /// stored 24-byte nonces. It truncated to bytes [0..12] while incrementing
+    /// bytes [12..24], resulting in static effective nonces.
+    ///
+    /// This test verifies that encrypting the same plaintext twice produces
+    /// different ciphertexts, which proves unique nonces are being used.
+    #[test]
+    fn nonce_uniqueness_regression() {
+        let (key, nonce, _, _) = test_keys();
+        let mut writer = BoxStreamWriter::new(key, nonce);
+
+        let plaintext = b"identical message";
+
+        // Encrypt same plaintext twice
+        let frame1 = writer.encrypt_frame(plaintext).unwrap();
+        let frame2 = writer.encrypt_frame(plaintext).unwrap();
+
+        // With proper nonce handling, identical plaintexts MUST produce
+        // different ciphertexts. If they're equal, nonces are being reused.
+        assert_ne!(
+            frame1, frame2,
+            "CRITICAL: identical plaintexts produced identical ciphertexts - nonce reuse detected"
+        );
+    }
+
+    /// Stress test for nonce uniqueness across many operations.
+    #[test]
+    fn nonce_uniqueness_stress() {
+        use std::collections::HashSet;
+
+        let (key, nonce, _, _) = test_keys();
+        let mut writer = BoxStreamWriter::new(key, nonce);
+
+        let mut seen_frames: HashSet<Vec<u8>> = HashSet::new();
+        let plaintext = b"repeated payload";
+
+        // Encrypt 1000 identical messages
+        for i in 0..1000 {
+            let frame = writer.encrypt_frame(plaintext).unwrap();
+            assert!(
+                seen_frames.insert(frame),
+                "Nonce reuse detected at frame {i}"
+            );
+        }
     }
 }

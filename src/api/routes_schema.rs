@@ -135,11 +135,7 @@ pub async fn register_schema(
     }
 
     match state.engine.schema_registry().register(schema.clone()) {
-        Ok(()) => (
-            StatusCode::CREATED,
-            response::ok(SchemaInfo::from(&schema)),
-        )
-            .into_response(),
+        Ok(()) => (StatusCode::CREATED, response::ok(SchemaInfo::from(&schema))).into_response(),
         Err(e) => response::from_error(e),
     }
 }

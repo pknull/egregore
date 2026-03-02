@@ -22,11 +22,11 @@ use tokio::net::TcpStream;
 
 use crate::feed::engine::FeedEngine;
 use crate::gossip::backoff::ExponentialBackoff;
+use crate::gossip::bloom::BloomConfig;
 use crate::gossip::connection::SecureConnection;
 use crate::gossip::health::HEALTH_EVICTION_HOURS;
 use crate::gossip::persistent::PersistentConnectionTask;
 use crate::gossip::registry::{ConnectionHandle, ConnectionRegistry};
-use crate::gossip::bloom::BloomConfig;
 use crate::gossip::replication::{self, ReplicationConfig};
 use crate::identity::{Identity, PublicId};
 
@@ -134,10 +134,8 @@ pub async fn run_sync_loop_with_push(
         let mut peer_set: HashSet<String> = config.static_peers.iter().cloned().collect();
 
         let db_engine = engine.clone();
-        match tokio::task::spawn_blocking(move || {
-            db_engine.store().list_all_syncable_addresses()
-        })
-        .await
+        match tokio::task::spawn_blocking(move || db_engine.store().list_all_syncable_addresses())
+            .await
         {
             Ok(Ok(db_peers)) => {
                 peer_set.extend(db_peers);
@@ -178,14 +176,8 @@ pub async fn run_sync_loop_with_push(
                 }
             }
 
-            let result = sync_one_peer(
-                peer_addr,
-                &config,
-                &engine,
-                &repl_config,
-                registry.as_ref(),
-            )
-            .await;
+            let result =
+                sync_one_peer(peer_addr, &config, &engine, &repl_config, registry.as_ref()).await;
 
             // Update backoff based on result
             match result {
@@ -198,15 +190,16 @@ pub async fn run_sync_loop_with_push(
                 }
                 SyncResult::Failed => {
                     // Apply backoff on failure
-                    let backoff = peer_backoffs
-                        .entry(peer_addr.clone())
-                        .or_insert_with(|| PeerBackoff {
-                            backoff: ExponentialBackoff::new(
-                                config.backoff_initial,
-                                config.backoff_max,
-                            ),
-                            retry_after: None,
-                        });
+                    let backoff =
+                        peer_backoffs
+                            .entry(peer_addr.clone())
+                            .or_insert_with(|| PeerBackoff {
+                                backoff: ExponentialBackoff::new(
+                                    config.backoff_initial,
+                                    config.backoff_max,
+                                ),
+                                retry_after: None,
+                            });
                     let delay = backoff.backoff.next_delay();
                     backoff.retry_after = Some(now + delay);
 
@@ -377,8 +370,7 @@ async fn sync_with_peer(
                 let (reader, writer) = conn.into_split();
 
                 // Register the writer half
-                let handle =
-                    ConnectionHandle::new(writer, remote_pub_id.clone(), peer_addr, true);
+                let handle = ConnectionHandle::new(writer, remote_pub_id.clone(), peer_addr, true);
 
                 if reg.register(handle) {
                     // Spawn task to handle incoming Push messages

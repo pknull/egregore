@@ -51,20 +51,17 @@ pub async fn run_discovery(
         })?;
 
     let socket = UdpSocket::bind(bind_addr).await?;
-    socket.set_broadcast(true).map_err(|e| {
-        crate::error::EgreError::Config {
+    socket
+        .set_broadcast(true)
+        .map_err(|e| crate::error::EgreError::Config {
             reason: format!("failed to enable broadcast: {e}"),
-        }
-    })?;
+        })?;
 
     let socket = Arc::new(socket);
     let discriminator = config.network_key_discriminator();
     let our_public_id = identity.public_id().0;
 
-    tracing::info!(
-        port = config.discovery_port,
-        "LAN discovery started"
-    );
+    tracing::info!(port = config.discovery_port, "LAN discovery started");
 
     // Spawn listener task
     let listen_socket = socket.clone();
@@ -181,12 +178,15 @@ async fn listen_loop(
             Err(_) => continue,
         };
 
-        let peer_addr =
-            match validate_announcement(&announcement, &src_addr, our_discriminator, &our_public_id)
-            {
-                Some(addr) => addr,
-                None => continue,
-            };
+        let peer_addr = match validate_announcement(
+            &announcement,
+            &src_addr,
+            our_discriminator,
+            &our_public_id,
+        ) {
+            Some(addr) => addr,
+            None => continue,
+        };
 
         // Rate limit: skip if we recently inserted this peer
         let now = Instant::now();
@@ -318,7 +318,10 @@ mod tests {
             network_key: "other-network".to_string(),
             ..Config::default()
         };
-        assert_ne!(ann.network_key_hash, other_config.network_key_discriminator());
+        assert_ne!(
+            ann.network_key_hash,
+            other_config.network_key_discriminator()
+        );
     }
 
     #[test]

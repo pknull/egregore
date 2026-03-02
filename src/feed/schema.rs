@@ -188,122 +188,140 @@ impl SchemaRegistry {
     /// Register built-in schemas for known content types.
     fn register_builtin_schemas(&self) {
         // insight/v1
-        let _ = self.register(SchemaDefinition::new(
-            "insight",
-            1,
-            serde_json::json!({
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "type": "object",
-                "required": ["type", "title", "observation"],
-                "properties": {
-                    "type": { "const": "insight" },
-                    "title": { "type": "string", "minLength": 1 },
-                    "context": { "type": ["string", "null"] },
-                    "observation": { "type": "string", "minLength": 1 },
-                    "evidence": { "type": ["string", "null"] },
-                    "guidance": { "type": ["string", "null"] },
-                    "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-                    "tags": { "type": "array", "items": { "type": "string" } }
-                },
-                "additionalProperties": false
-            }),
-        ).with_description("Insight content type - observations with optional evidence"));
+        let _ = self.register(
+            SchemaDefinition::new(
+                "insight",
+                1,
+                serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "required": ["type", "title", "observation"],
+                    "properties": {
+                        "type": { "const": "insight" },
+                        "title": { "type": "string", "minLength": 1 },
+                        "context": { "type": ["string", "null"] },
+                        "observation": { "type": "string", "minLength": 1 },
+                        "evidence": { "type": ["string", "null"] },
+                        "guidance": { "type": ["string", "null"] },
+                        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+                        "tags": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "additionalProperties": false
+                }),
+            )
+            .with_description("Insight content type - observations with optional evidence"),
+        );
 
         // endorsement/v1
-        let _ = self.register(SchemaDefinition::new(
-            "endorsement",
-            1,
-            serde_json::json!({
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "type": "object",
-                "required": ["type", "message_hash"],
-                "properties": {
-                    "type": { "const": "endorsement" },
-                    "message_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-                    "comment": { "type": ["string", "null"] }
-                },
-                "additionalProperties": false
-            }),
-        ).with_description("Endorsement of another message"));
+        let _ = self.register(
+            SchemaDefinition::new(
+                "endorsement",
+                1,
+                serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "required": ["type", "message_hash"],
+                    "properties": {
+                        "type": { "const": "endorsement" },
+                        "message_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                        "comment": { "type": ["string", "null"] }
+                    },
+                    "additionalProperties": false
+                }),
+            )
+            .with_description("Endorsement of another message"),
+        );
 
         // dispute/v1
-        let _ = self.register(SchemaDefinition::new(
-            "dispute",
-            1,
-            serde_json::json!({
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "type": "object",
-                "required": ["type", "message_hash", "reason"],
-                "properties": {
-                    "type": { "const": "dispute" },
-                    "message_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-                    "reason": { "type": "string", "minLength": 1 },
-                    "evidence": { "type": ["string", "null"] }
-                },
-                "additionalProperties": false
-            }),
-        ).with_description("Dispute of another message"));
+        let _ = self.register(
+            SchemaDefinition::new(
+                "dispute",
+                1,
+                serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "required": ["type", "message_hash", "reason"],
+                    "properties": {
+                        "type": { "const": "dispute" },
+                        "message_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                        "reason": { "type": "string", "minLength": 1 },
+                        "evidence": { "type": ["string", "null"] }
+                    },
+                    "additionalProperties": false
+                }),
+            )
+            .with_description("Dispute of another message"),
+        );
 
         // query/v1
-        let _ = self.register(SchemaDefinition::new(
-            "query",
-            1,
-            serde_json::json!({
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "type": "object",
-                "required": ["type", "question"],
-                "properties": {
-                    "type": { "const": "query" },
-                    "question": { "type": "string", "minLength": 1 },
-                    "tags": { "type": "array", "items": { "type": "string" } },
-                    "execution_context": {
-                        "type": ["string", "null"],
-                        "enum": [null, "informational", "advisory", "approved_directive"]
-                    }
-                },
-                "additionalProperties": false
-            }),
-        ).with_description("Query to the mesh"));
+        let _ = self.register(
+            SchemaDefinition::new(
+                "query",
+                1,
+                serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "required": ["type", "question"],
+                    "properties": {
+                        "type": { "const": "query" },
+                        "question": { "type": "string", "minLength": 1 },
+                        "tags": { "type": "array", "items": { "type": "string" } },
+                        "execution_context": {
+                            "type": ["string", "null"],
+                            "enum": [null, "informational", "advisory", "approved_directive"]
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+            )
+            .with_description("Query to the mesh"),
+        );
 
         // response/v1
-        let _ = self.register(SchemaDefinition::new(
-            "response",
-            1,
-            serde_json::json!({
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "type": "object",
-                "required": ["type", "query_hash", "answer"],
-                "properties": {
-                    "type": { "const": "response" },
-                    "query_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-                    "answer": { "type": "string", "minLength": 1 },
-                    "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-                    "execution_context": {
-                        "type": ["string", "null"],
-                        "enum": [null, "informational", "advisory", "approved_directive"]
-                    }
-                },
-                "additionalProperties": false
-            }),
-        ).with_description("Response to a query"));
+        let _ = self.register(
+            SchemaDefinition::new(
+                "response",
+                1,
+                serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "required": ["type", "query_hash", "answer"],
+                    "properties": {
+                        "type": { "const": "response" },
+                        "query_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                        "answer": { "type": "string", "minLength": 1 },
+                        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+                        "execution_context": {
+                            "type": ["string", "null"],
+                            "enum": [null, "informational", "advisory", "approved_directive"]
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+            )
+            .with_description("Response to a query"),
+        );
 
         // profile/v1
-        let _ = self.register(SchemaDefinition::new(
-            "profile",
-            1,
-            serde_json::json!({
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "type": "object",
-                "required": ["type", "name"],
-                "properties": {
-                    "type": { "const": "profile" },
-                    "name": { "type": "string", "minLength": 1 },
-                    "description": { "type": ["string", "null"] },
-                    "capabilities": { "type": "array", "items": { "type": "string" } }
-                },
-                "additionalProperties": false
-            }),
-        ).with_description("Agent profile information"));
+        let _ = self.register(
+            SchemaDefinition::new(
+                "profile",
+                1,
+                serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "required": ["type", "name"],
+                    "properties": {
+                        "type": { "const": "profile" },
+                        "name": { "type": "string", "minLength": 1 },
+                        "description": { "type": ["string", "null"] },
+                        "capabilities": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "additionalProperties": false
+                }),
+            )
+            .with_description("Agent profile information"),
+        );
     }
 
     /// Register a schema definition.
@@ -312,11 +330,10 @@ impl SchemaRegistry {
     /// (for the same content type) or if compatibility check fails.
     pub fn register(&self, schema: SchemaDefinition) -> Result<()> {
         // Validate the JSON Schema itself
-        let validator = jsonschema::validator_for(&schema.json_schema).map_err(|e| {
-            EgreError::Schema {
+        let validator =
+            jsonschema::validator_for(&schema.json_schema).map_err(|e| EgreError::Schema {
                 reason: format!("invalid JSON Schema: {}", e),
-            }
-        })?;
+            })?;
 
         // Check version monotonicity
         {
@@ -384,21 +401,18 @@ impl SchemaRegistry {
     /// If `schema_id` is None:
     /// - In strict mode: returns error
     /// - In non-strict mode: attempts to infer schema from content type field
-    pub fn validate(
-        &self,
-        content: &serde_json::Value,
-        schema_id: Option<&str>,
-    ) -> Result<()> {
+    pub fn validate(&self, content: &serde_json::Value, schema_id: Option<&str>) -> Result<()> {
         let effective_schema_id = match schema_id {
             Some(id) => id.to_string(),
             None => {
                 // Try to infer schema from content type
-                let content_type = content
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| EgreError::Schema {
-                        reason: "content missing 'type' field".into(),
-                    })?;
+                let content_type =
+                    content
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| EgreError::Schema {
+                            reason: "content missing 'type' field".into(),
+                        })?;
 
                 // Use latest version for this content type
                 let versions = self.latest_versions.read().unwrap();
@@ -425,9 +439,7 @@ impl SchemaRegistry {
                     return Err(EgreError::Schema {
                         reason: format!(
                             "validation failed for {}: {}: {}",
-                            effective_schema_id,
-                            error.instance_path,
-                            error
+                            effective_schema_id, error.instance_path, error
                         ),
                     });
                 }
@@ -444,11 +456,7 @@ impl SchemaRegistry {
     }
 
     /// Check compatibility between two schema versions.
-    fn check_compatibility(
-        &self,
-        old: &SchemaDefinition,
-        new: &SchemaDefinition,
-    ) -> Result<()> {
+    fn check_compatibility(&self, old: &SchemaDefinition, new: &SchemaDefinition) -> Result<()> {
         match new.compatibility {
             CompatibilityMode::None => Ok(()),
             CompatibilityMode::Backward => self.check_backward_compatible(old, new),
@@ -489,9 +497,7 @@ impl SchemaRegistry {
             if !old_required.contains(field) {
                 // Check if the field existed in old schema (as optional)
                 let old_props = old.json_schema.get("properties");
-                let field_existed = old_props
-                    .and_then(|p| p.get(*field))
-                    .is_some();
+                let field_existed = old_props.and_then(|p| p.get(*field)).is_some();
 
                 if !field_existed {
                     return Err(EgreError::Schema {
@@ -626,7 +632,11 @@ mod tests {
         let result = registry.validate(&content, Some("insight/v1"));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("observation"), "error should mention missing field: {}", err);
+        assert!(
+            err.contains("observation"),
+            "error should mention missing field: {}",
+            err
+        );
     }
 
     #[test]
@@ -654,7 +664,10 @@ mod tests {
 
         let result = registry.validate(&content, None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unknown content type"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unknown content type"));
     }
 
     #[test]
@@ -700,27 +713,18 @@ mod tests {
     fn version_must_increase() {
         let registry = SchemaRegistry::new(false);
 
-        let schema_v1 = SchemaDefinition::new(
-            "versioned",
-            1,
-            serde_json::json!({ "type": "object" }),
-        );
+        let schema_v1 =
+            SchemaDefinition::new("versioned", 1, serde_json::json!({ "type": "object" }));
         assert!(registry.register(schema_v1).is_ok());
 
         // Same version should fail
-        let schema_v1_again = SchemaDefinition::new(
-            "versioned",
-            1,
-            serde_json::json!({ "type": "object" }),
-        );
+        let schema_v1_again =
+            SchemaDefinition::new("versioned", 1, serde_json::json!({ "type": "object" }));
         assert!(registry.register(schema_v1_again).is_err());
 
         // Higher version should succeed
-        let schema_v2 = SchemaDefinition::new(
-            "versioned",
-            2,
-            serde_json::json!({ "type": "object" }),
-        );
+        let schema_v2 =
+            SchemaDefinition::new("versioned", 2, serde_json::json!({ "type": "object" }));
         assert!(registry.register(schema_v2).is_ok());
     }
 
@@ -741,7 +745,8 @@ mod tests {
                     "extra": { "type": "string" }
                 }
             }),
-        ).with_compatibility(CompatibilityMode::Backward);
+        )
+        .with_compatibility(CompatibilityMode::Backward);
         assert!(registry.register(schema_v1).is_ok());
 
         // v2 that makes "extra" required should fail (backward incompatible)
@@ -762,10 +767,14 @@ mod tests {
                     "brand_new_field": { "type": "string" }
                 }
             }),
-        ).with_compatibility(CompatibilityMode::Backward);
+        )
+        .with_compatibility(CompatibilityMode::Backward);
 
         let result = registry.register(schema_v2_bad);
-        assert!(result.is_err(), "should reject new required field not in old schema");
+        assert!(
+            result.is_err(),
+            "should reject new required field not in old schema"
+        );
     }
 
     #[test]
@@ -784,7 +793,8 @@ mod tests {
                     "must_have": { "type": "string" }
                 }
             }),
-        ).with_compatibility(CompatibilityMode::Forward);
+        )
+        .with_compatibility(CompatibilityMode::Forward);
         assert!(registry.register(schema_v1).is_ok());
 
         // v2 that removes "must_have" from required should fail (forward incompatible)
@@ -799,7 +809,8 @@ mod tests {
                     "name": { "type": "string" }
                 }
             }),
-        ).with_compatibility(CompatibilityMode::Forward);
+        )
+        .with_compatibility(CompatibilityMode::Forward);
 
         let result = registry.register(schema_v2_bad);
         assert!(result.is_err(), "should reject removing required field");

@@ -163,7 +163,11 @@ impl PersistentConnectionTask {
                     granting = grant_amount,
                     "received credit request, granting credits"
                 );
-                if let Err(e) = self.registry.send_credit_grant(&self.peer_id, grant_amount).await {
+                if let Err(e) = self
+                    .registry
+                    .send_credit_grant(&self.peer_id, grant_amount)
+                    .await
+                {
                     tracing::warn!(
                         peer = %self.peer_id.0,
                         error = %e,
@@ -171,7 +175,10 @@ impl PersistentConnectionTask {
                     );
                 }
             }
-            GossipMessage::FlowControlAck { supported, initial_credits } => {
+            GossipMessage::FlowControlAck {
+                supported,
+                initial_credits,
+            } => {
                 // Peer is acknowledging flow control capability
                 tracing::debug!(
                     peer = %self.peer_id.0,
@@ -179,9 +186,12 @@ impl PersistentConnectionTask {
                     initial_credits = initial_credits,
                     "received flow control ack"
                 );
-                self.registry.set_peer_credits_supported(&self.peer_id, supported);
+                self.registry
+                    .set_peer_credits_supported(&self.peer_id, supported);
                 if supported && initial_credits > 0 {
-                    self.registry.grant_credits(&self.peer_id, initial_credits).await;
+                    self.registry
+                        .grant_credits(&self.peer_id, initial_credits)
+                        .await;
                 }
             }
         }

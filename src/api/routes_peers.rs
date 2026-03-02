@@ -111,10 +111,8 @@ pub async fn add_peer(
     let address = req.address.clone();
     let engine = state.engine.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        engine.store().insert_address_peer(&address)
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || engine.store().insert_address_peer(&address)).await;
 
     match result {
         Ok(Ok(())) => (
@@ -151,10 +149,8 @@ pub async fn delete_peer(
 
     let engine = state.engine.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        engine.store().remove_address_peer(&address)
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || engine.store().remove_address_peer(&address)).await;
 
     match result {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),

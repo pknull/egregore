@@ -499,14 +499,13 @@ impl FeedStore {
             let mut stmt = conn.prepare(
                 "SELECT member_id, joined_at, last_heartbeat, assignment_generation FROM group_members WHERE group_id = ?1 ORDER BY joined_at ASC",
             )?;
-            let rows = stmt
-                .query_map(params![group_id], |row| {
-                    let member_id: String = row.get(0)?;
-                    let joined_at: String = row.get(1)?;
-                    let last_heartbeat: String = row.get(2)?;
-                    let assignment_generation: u64 = row.get(3)?;
-                    Ok((member_id, joined_at, last_heartbeat, assignment_generation))
-                })?;
+            let rows = stmt.query_map(params![group_id], |row| {
+                let member_id: String = row.get(0)?;
+                let joined_at: String = row.get(1)?;
+                let last_heartbeat: String = row.get(2)?;
+                let assignment_generation: u64 = row.get(3)?;
+                Ok((member_id, joined_at, last_heartbeat, assignment_generation))
+            })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
 
@@ -539,29 +538,36 @@ impl FeedStore {
         members
             .into_iter()
             .take(MAX_QUERY_RESULTS)
-            .map(|(member_id, joined_at_str, last_heartbeat_str, assignment_generation)| {
-                let joined_at = parse_rfc3339_or_now(&joined_at_str, "joined_at");
-                let last_heartbeat = parse_rfc3339_or_now(&last_heartbeat_str, "last_heartbeat");
-                let assigned_feeds = assignments_map.remove(&member_id).unwrap_or_default();
+            .map(
+                |(member_id, joined_at_str, last_heartbeat_str, assignment_generation)| {
+                    let joined_at = parse_rfc3339_or_now(&joined_at_str, "joined_at");
+                    let last_heartbeat =
+                        parse_rfc3339_or_now(&last_heartbeat_str, "last_heartbeat");
+                    let assigned_feeds = assignments_map.remove(&member_id).unwrap_or_default();
 
-                Ok(GroupMember {
-                    group_id: group_id.to_string(),
-                    member_id: PublicId(member_id),
-                    joined_at,
-                    last_heartbeat,
-                    assigned_feeds,
-                    assignment_generation: if assignment_generation == generation {
-                        assignment_generation
-                    } else {
-                        generation
-                    },
-                })
-            })
+                    Ok(GroupMember {
+                        group_id: group_id.to_string(),
+                        member_id: PublicId(member_id),
+                        joined_at,
+                        last_heartbeat,
+                        assigned_feeds,
+                        assignment_generation: if assignment_generation == generation {
+                            assignment_generation
+                        } else {
+                            generation
+                        },
+                    })
+                },
+            )
             .collect()
     }
 
     /// Get feed assignments for a specific member.
-    pub fn get_member_assignments(&self, group_id: &str, member_id: &PublicId) -> Result<Vec<PublicId>> {
+    pub fn get_member_assignments(
+        &self,
+        group_id: &str,
+        member_id: &PublicId,
+    ) -> Result<Vec<PublicId>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT author FROM group_assignments WHERE group_id = ?1 AND member_id = ?2 ORDER BY author ASC",
@@ -854,18 +860,13 @@ impl FeedStore {
 
 /// Perform round-robin assignment of feeds to members.
 /// Returns a list of (member, assigned_feeds) tuples.
-fn round_robin_assign(
-    members: &[PublicId],
-    feeds: &[PublicId],
-) -> Vec<(PublicId, Vec<PublicId>)> {
+fn round_robin_assign(members: &[PublicId], feeds: &[PublicId]) -> Vec<(PublicId, Vec<PublicId>)> {
     if members.is_empty() {
         return Vec::new();
     }
 
-    let mut assignments: Vec<(PublicId, Vec<PublicId>)> = members
-        .iter()
-        .map(|m| (m.clone(), Vec::new()))
-        .collect();
+    let mut assignments: Vec<(PublicId, Vec<PublicId>)> =
+        members.iter().map(|m| (m.clone(), Vec::new())).collect();
 
     for (i, feed) in feeds.iter().enumerate() {
         let member_idx = i % members.len();
@@ -1033,8 +1034,12 @@ mod tests {
 
         store.join_group("inc-test", &member).unwrap();
 
-        store.commit_offset("inc-test", &author, 10, &member).unwrap();
-        store.commit_offset("inc-test", &author, 5, &member).unwrap(); // Lower value
+        store
+            .commit_offset("inc-test", &author, 10, &member)
+            .unwrap();
+        store
+            .commit_offset("inc-test", &author, 5, &member)
+            .unwrap(); // Lower value
 
         let offset = store.get_offset("inc-test", &author).unwrap().unwrap();
         // Should still be 10 (MAX behavior)
@@ -1198,7 +1203,9 @@ mod tests {
         store.heartbeat("evict-active", &m1).unwrap();
 
         // Evict with reasonable timeout - member should survive
-        let evicted = store.evict_stale_members(super::DEFAULT_HEARTBEAT_TIMEOUT_SECS).unwrap();
+        let evicted = store
+            .evict_stale_members(super::DEFAULT_HEARTBEAT_TIMEOUT_SECS)
+            .unwrap();
         assert_eq!(evicted, 0);
 
         // Member still exists

@@ -16,8 +16,10 @@ use std::sync::{Arc, RwLock};
 
 use crate::error::{EgreError, Result};
 
-/// Default message schema written when schemas directory is empty.
-const DEFAULT_MESSAGE_SCHEMA: &str = r#"{
+/// Default schemas written when schemas directory is empty.
+/// All schemas are file-based - nothing is compiled in.
+const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
+    ("message.v1.json", r#"{
   "content_type": "message",
   "version": 1,
   "description": "Simple text message with optional title and metadata",
@@ -29,30 +31,133 @@ const DEFAULT_MESSAGE_SCHEMA: &str = r#"{
     "required": ["type", "text"],
     "properties": {
       "type": { "const": "message" },
-      "title": {
-        "type": ["string", "null"],
-        "description": "Optional title or subject"
-      },
-      "text": {
-        "type": "string",
-        "minLength": 1,
-        "description": "The message body"
-      },
-      "format": {
-        "type": ["string", "null"],
-        "enum": [null, "plain", "markdown", "html"],
-        "description": "Text format hint"
-      },
-      "metadata": {
-        "type": ["object", "null"],
-        "description": "Arbitrary key-value metadata",
-        "additionalProperties": true
-      }
+      "title": { "type": ["string", "null"], "description": "Optional title or subject" },
+      "text": { "type": "string", "minLength": 1, "description": "The message body" },
+      "format": { "type": ["string", "null"], "enum": [null, "plain", "markdown", "html"] },
+      "metadata": { "type": ["object", "null"], "additionalProperties": true }
     },
     "additionalProperties": false
   }
-}
-"#;
+}"#),
+    ("insight.v1.json", r#"{
+  "content_type": "insight",
+  "version": 1,
+  "description": "Observation with optional evidence and guidance",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "title", "observation"],
+    "properties": {
+      "type": { "const": "insight" },
+      "title": { "type": "string", "minLength": 1 },
+      "context": { "type": ["string", "null"] },
+      "observation": { "type": "string", "minLength": 1 },
+      "evidence": { "type": ["string", "null"] },
+      "guidance": { "type": ["string", "null"] },
+      "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+      "tags": { "type": "array", "items": { "type": "string" } }
+    },
+    "additionalProperties": false
+  }
+}"#),
+    ("endorsement.v1.json", r#"{
+  "content_type": "endorsement",
+  "version": 1,
+  "description": "Endorsement of another message",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "message_hash"],
+    "properties": {
+      "type": { "const": "endorsement" },
+      "message_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "comment": { "type": ["string", "null"] }
+    },
+    "additionalProperties": false
+  }
+}"#),
+    ("dispute.v1.json", r#"{
+  "content_type": "dispute",
+  "version": 1,
+  "description": "Dispute of another message with reason",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "message_hash", "reason"],
+    "properties": {
+      "type": { "const": "dispute" },
+      "message_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "reason": { "type": "string", "minLength": 1 },
+      "evidence": { "type": ["string", "null"] }
+    },
+    "additionalProperties": false
+  }
+}"#),
+    ("query.v1.json", r#"{
+  "content_type": "query",
+  "version": 1,
+  "description": "Question to the mesh",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "question"],
+    "properties": {
+      "type": { "const": "query" },
+      "question": { "type": "string", "minLength": 1 },
+      "tags": { "type": "array", "items": { "type": "string" } },
+      "execution_context": { "type": ["string", "null"], "enum": [null, "informational", "advisory", "approved_directive"] }
+    },
+    "additionalProperties": false
+  }
+}"#),
+    ("response.v1.json", r#"{
+  "content_type": "response",
+  "version": 1,
+  "description": "Response to a query",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "query_hash", "answer"],
+    "properties": {
+      "type": { "const": "response" },
+      "query_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "answer": { "type": "string", "minLength": 1 },
+      "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+      "execution_context": { "type": ["string", "null"], "enum": [null, "informational", "advisory", "approved_directive"] }
+    },
+    "additionalProperties": false
+  }
+}"#),
+    ("profile.v1.json", r#"{
+  "content_type": "profile",
+  "version": 1,
+  "description": "Agent profile information",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "name"],
+    "properties": {
+      "type": { "const": "profile" },
+      "name": { "type": "string", "minLength": 1 },
+      "description": { "type": ["string", "null"] },
+      "capabilities": { "type": "array", "items": { "type": "string" } }
+    },
+    "additionalProperties": false
+  }
+}"#),
+];
 
 /// Codec format for message serialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -235,14 +340,12 @@ impl SchemaRegistry {
     /// unknown schema are rejected. If false, they pass through (for
     /// backward compatibility with pre-schema messages).
     pub fn new(strict_mode: bool) -> Self {
-        let registry = Self {
+        Self {
             schemas: Arc::new(RwLock::new(HashMap::new())),
             latest_versions: Arc::new(RwLock::new(HashMap::new())),
             validators: Arc::new(RwLock::new(HashMap::new())),
             strict_mode,
-        };
-        registry.register_builtin_schemas();
-        registry
+        }
     }
 
     /// Create a new schema registry and load custom schemas from a directory.
@@ -295,13 +398,15 @@ impl SchemaRegistry {
             .collect();
         paths.sort();
 
-        // If no schema files exist, create the default message schema
+        // If no schema files exist, create all default schemas
         if paths.is_empty() {
-            let default_path = dir.join("message.v1.json");
-            if let Err(e) = fs::write(&default_path, DEFAULT_MESSAGE_SCHEMA) {
-                eprintln!("Failed to write default schema {:?}: {}", default_path, e);
-            } else {
-                paths.push(default_path);
+            for (filename, content) in DEFAULT_SCHEMAS {
+                let schema_path = dir.join(filename);
+                if let Err(e) = fs::write(&schema_path, content) {
+                    eprintln!("Failed to write default schema {:?}: {}", schema_path, e);
+                } else {
+                    paths.push(schema_path);
+                }
             }
         }
 
@@ -336,146 +441,6 @@ impl SchemaRegistry {
         self.register(schema)?;
         Ok(())
     }
-
-    /// Register built-in schemas for known content types.
-    fn register_builtin_schemas(&self) {
-        // insight/v1
-        let _ = self.register(
-            SchemaDefinition::new(
-                "insight",
-                1,
-                serde_json::json!({
-                    "$schema": "https://json-schema.org/draft/2020-12/schema",
-                    "type": "object",
-                    "required": ["type", "title", "observation"],
-                    "properties": {
-                        "type": { "const": "insight" },
-                        "title": { "type": "string", "minLength": 1 },
-                        "context": { "type": ["string", "null"] },
-                        "observation": { "type": "string", "minLength": 1 },
-                        "evidence": { "type": ["string", "null"] },
-                        "guidance": { "type": ["string", "null"] },
-                        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-                        "tags": { "type": "array", "items": { "type": "string" } }
-                    },
-                    "additionalProperties": false
-                }),
-            )
-            .with_description("Insight content type - observations with optional evidence"),
-        );
-
-        // endorsement/v1
-        let _ = self.register(
-            SchemaDefinition::new(
-                "endorsement",
-                1,
-                serde_json::json!({
-                    "$schema": "https://json-schema.org/draft/2020-12/schema",
-                    "type": "object",
-                    "required": ["type", "message_hash"],
-                    "properties": {
-                        "type": { "const": "endorsement" },
-                        "message_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-                        "comment": { "type": ["string", "null"] }
-                    },
-                    "additionalProperties": false
-                }),
-            )
-            .with_description("Endorsement of another message"),
-        );
-
-        // dispute/v1
-        let _ = self.register(
-            SchemaDefinition::new(
-                "dispute",
-                1,
-                serde_json::json!({
-                    "$schema": "https://json-schema.org/draft/2020-12/schema",
-                    "type": "object",
-                    "required": ["type", "message_hash", "reason"],
-                    "properties": {
-                        "type": { "const": "dispute" },
-                        "message_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-                        "reason": { "type": "string", "minLength": 1 },
-                        "evidence": { "type": ["string", "null"] }
-                    },
-                    "additionalProperties": false
-                }),
-            )
-            .with_description("Dispute of another message"),
-        );
-
-        // query/v1
-        let _ = self.register(
-            SchemaDefinition::new(
-                "query",
-                1,
-                serde_json::json!({
-                    "$schema": "https://json-schema.org/draft/2020-12/schema",
-                    "type": "object",
-                    "required": ["type", "question"],
-                    "properties": {
-                        "type": { "const": "query" },
-                        "question": { "type": "string", "minLength": 1 },
-                        "tags": { "type": "array", "items": { "type": "string" } },
-                        "execution_context": {
-                            "type": ["string", "null"],
-                            "enum": [null, "informational", "advisory", "approved_directive"]
-                        }
-                    },
-                    "additionalProperties": false
-                }),
-            )
-            .with_description("Query to the mesh"),
-        );
-
-        // response/v1
-        let _ = self.register(
-            SchemaDefinition::new(
-                "response",
-                1,
-                serde_json::json!({
-                    "$schema": "https://json-schema.org/draft/2020-12/schema",
-                    "type": "object",
-                    "required": ["type", "query_hash", "answer"],
-                    "properties": {
-                        "type": { "const": "response" },
-                        "query_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-                        "answer": { "type": "string", "minLength": 1 },
-                        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-                        "execution_context": {
-                            "type": ["string", "null"],
-                            "enum": [null, "informational", "advisory", "approved_directive"]
-                        }
-                    },
-                    "additionalProperties": false
-                }),
-            )
-            .with_description("Response to a query"),
-        );
-
-        // profile/v1
-        let _ = self.register(
-            SchemaDefinition::new(
-                "profile",
-                1,
-                serde_json::json!({
-                    "$schema": "https://json-schema.org/draft/2020-12/schema",
-                    "type": "object",
-                    "required": ["type", "name"],
-                    "properties": {
-                        "type": { "const": "profile" },
-                        "name": { "type": "string", "minLength": 1 },
-                        "description": { "type": ["string", "null"] },
-                        "capabilities": { "type": "array", "items": { "type": "string" } }
-                    },
-                    "additionalProperties": false
-                }),
-            )
-            .with_description("Agent profile information"),
-        );
-    }
-
     /// Register a schema definition.
     ///
     /// Returns error if the schema version is not greater than existing versions
@@ -725,6 +690,21 @@ impl SchemaRegistry {
 mod tests {
     use super::*;
 
+    /// Create a registry with default schemas loaded from a temp directory.
+    fn registry_with_defaults(strict: bool) -> (SchemaRegistry, std::path::PathBuf) {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "egregore_schema_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let registry = SchemaRegistry::with_schemas_dir(strict, &temp_dir);
+        (registry, temp_dir)
+    }
+
     #[test]
     fn schema_id_parsing() {
         assert_eq!(
@@ -745,8 +725,8 @@ mod tests {
     }
 
     #[test]
-    fn builtin_schemas_registered() {
-        let registry = SchemaRegistry::new(false);
+    fn default_schemas_loaded() {
+        let (registry, temp_dir) = registry_with_defaults(false);
 
         assert!(registry.get("insight/v1").is_some());
         assert!(registry.get("endorsement/v1").is_some());
@@ -754,11 +734,14 @@ mod tests {
         assert!(registry.get("query/v1").is_some());
         assert!(registry.get("response/v1").is_some());
         assert!(registry.get("profile/v1").is_some());
+        assert!(registry.get("message/v1").is_some());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn validate_valid_insight() {
-        let registry = SchemaRegistry::new(false);
+        let (registry, temp_dir) = registry_with_defaults(false);
 
         let content = serde_json::json!({
             "type": "insight",
@@ -769,11 +752,12 @@ mod tests {
         });
 
         assert!(registry.validate(&content, Some("insight/v1")).is_ok());
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn validate_invalid_insight_missing_required() {
-        let registry = SchemaRegistry::new(true);
+        let (registry, temp_dir) = registry_with_defaults(true);
 
         let content = serde_json::json!({
             "type": "insight",
@@ -789,11 +773,12 @@ mod tests {
             "error should mention missing field: {}",
             err
         );
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn validate_infers_schema_from_content_type() {
-        let registry = SchemaRegistry::new(false);
+        let (registry, temp_dir) = registry_with_defaults(false);
 
         let content = serde_json::json!({
             "type": "profile",
@@ -803,11 +788,12 @@ mod tests {
 
         // No schema_id provided, should infer from type
         assert!(registry.validate(&content, None).is_ok());
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn strict_mode_rejects_unknown_types() {
-        let registry = SchemaRegistry::new(true);
+        let (registry, temp_dir) = registry_with_defaults(true);
 
         let content = serde_json::json!({
             "type": "unknown_type",
@@ -820,6 +806,7 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unknown content type"));
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -1005,7 +992,7 @@ mod tests {
 
     #[test]
     fn infer_schema_id_from_content() {
-        let registry = SchemaRegistry::new(false);
+        let (registry, temp_dir) = registry_with_defaults(false);
 
         let content = serde_json::json!({
             "type": "insight",
@@ -1023,33 +1010,43 @@ mod tests {
             "data": "test"
         });
         assert_eq!(registry.infer_schema_id(&unknown), None);
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn list_all_schemas() {
-        let registry = SchemaRegistry::new(false);
+        let (registry, temp_dir) = registry_with_defaults(false);
         let all = registry.list_all();
 
-        // Should have at least the builtin schemas
-        assert!(all.len() >= 6);
+        // Should have all 7 default schemas
+        assert_eq!(all.len(), 7);
 
         let schema_ids: Vec<&str> = all.iter().map(|s| s.schema_id.as_str()).collect();
         assert!(schema_ids.contains(&"insight/v1"));
         assert!(schema_ids.contains(&"profile/v1"));
+        assert!(schema_ids.contains(&"message/v1"));
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
-    fn load_schemas_from_empty_dir_creates_default() {
+    fn load_schemas_from_empty_dir_creates_defaults() {
         let temp_dir = std::env::temp_dir().join(format!("egregore_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir); // Clean up if exists
 
         let registry = SchemaRegistry::with_schemas_dir(false, &temp_dir);
 
-        // Should have created the default message schema
+        // Should have created all 7 default schemas
         assert!(registry.get("message/v1").is_some());
+        assert!(registry.get("insight/v1").is_some());
+        assert!(registry.get("endorsement/v1").is_some());
+        assert!(registry.get("dispute/v1").is_some());
+        assert!(registry.get("query/v1").is_some());
+        assert!(registry.get("response/v1").is_some());
+        assert!(registry.get("profile/v1").is_some());
 
-        // File should exist
+        // Files should exist
         assert!(temp_dir.join("message.v1.json").exists());
+        assert!(temp_dir.join("insight.v1.json").exists());
 
         // Clean up
         let _ = std::fs::remove_dir_all(&temp_dir);

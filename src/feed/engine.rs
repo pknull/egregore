@@ -399,6 +399,22 @@ mod tests {
         (engine, identity)
     }
 
+    fn setup_with_schemas() -> (FeedEngine, Identity, std::path::PathBuf) {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "egregore_engine_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::with_schemas_dir(store, &temp_dir);
+        let identity = Identity::generate();
+        (engine, identity, temp_dir)
+    }
+
     #[test]
     fn publish_first_message() {
         let (engine, identity) = setup();
@@ -1092,7 +1108,7 @@ mod tests {
 
     #[test]
     fn publish_infers_schema_id() {
-        let (engine, identity) = setup();
+        let (engine, identity, temp_dir) = setup_with_schemas();
 
         let msg = engine
             .publish(
@@ -1110,6 +1126,7 @@ mod tests {
 
         // Should infer profile/v1 from the content type
         assert_eq!(msg.schema_id, Some("profile/v1".to_string()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -1179,11 +1196,20 @@ mod tests {
 
     #[test]
     fn ingest_validates_schema() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "egregore_ingest_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
         let store = FeedStore::open_memory().unwrap();
-        let strict_engine = FeedEngine::new_strict(store);
+        let strict_engine = FeedEngine::with_schemas_dir_strict(store, &temp_dir);
 
         let remote_store = FeedStore::open_memory().unwrap();
-        let remote_engine = FeedEngine::new(remote_store);
+        let remote_engine = FeedEngine::with_schemas_dir(remote_store, &temp_dir);
         let identity = Identity::generate();
 
         // Publish a valid message on remote (non-strict)
@@ -1207,6 +1233,7 @@ mod tests {
 
         // Should ingest successfully on strict engine
         strict_engine.ingest(&valid_msg).unwrap();
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

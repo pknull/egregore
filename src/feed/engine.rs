@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -44,6 +45,17 @@ impl FeedEngine {
     /// In strict mode, messages without valid schemas are rejected.
     pub fn new_strict(store: FeedStore) -> Self {
         Self::with_schema_registry(store, SchemaRegistry::new(true))
+    }
+
+    /// Create a new feed engine with custom schemas from a directory.
+    /// Loads all `.json` schema files from the directory.
+    pub fn with_schemas_dir(store: FeedStore, schemas_dir: &Path) -> Self {
+        Self::with_schema_registry(store, SchemaRegistry::with_schemas_dir(false, schemas_dir))
+    }
+
+    /// Create a new feed engine with strict validation and custom schemas.
+    pub fn with_schemas_dir_strict(store: FeedStore, schemas_dir: &Path) -> Self {
+        Self::with_schema_registry(store, SchemaRegistry::with_schemas_dir(true, schemas_dir))
     }
 
     pub fn store(&self) -> &FeedStore {

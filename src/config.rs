@@ -273,6 +273,11 @@ impl Config {
         self.data_dir.join("egregore.db")
     }
 
+    /// Directory for custom schema definitions (.json files).
+    pub fn schemas_dir(&self) -> PathBuf {
+        self.data_dir.join("schemas")
+    }
+
     /// Build a FlowControlConfig from these settings.
     pub fn flow_control_config(&self) -> crate::gossip::flow_control::FlowControlConfig {
         crate::gossip::flow_control::FlowControlConfig {

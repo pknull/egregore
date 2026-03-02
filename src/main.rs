@@ -350,12 +350,14 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::warn!(error = %e, "failed to increment generation counter"),
     }
 
+    let schemas_dir = config.schemas_dir();
     let engine = if config.schema_strict {
         tracing::info!("strict schema validation enabled");
-        Arc::new(FeedEngine::new_strict(store))
+        Arc::new(FeedEngine::with_schemas_dir_strict(store, &schemas_dir))
     } else {
-        Arc::new(FeedEngine::new(store))
+        Arc::new(FeedEngine::with_schemas_dir(store, &schemas_dir))
     };
+    tracing::info!(schemas_dir = %schemas_dir.display(), "custom schemas directory");
 
     // Start hook executor if configured
     if let Some(executor) = HookExecutor::new(config.hooks.clone()) {

@@ -10,9 +10,49 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use crate::error::{EgreError, Result};
+
+/// Default message schema written when schemas directory is empty.
+const DEFAULT_MESSAGE_SCHEMA: &str = r#"{
+  "content_type": "message",
+  "version": 1,
+  "description": "Simple text message with optional title and metadata",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "text"],
+    "properties": {
+      "type": { "const": "message" },
+      "title": {
+        "type": ["string", "null"],
+        "description": "Optional title or subject"
+      },
+      "text": {
+        "type": "string",
+        "minLength": 1,
+        "description": "The message body"
+      },
+      "format": {
+        "type": ["string", "null"],
+        "enum": [null, "plain", "markdown", "html"],
+        "description": "Text format hint"
+      },
+      "metadata": {
+        "type": ["object", "null"],
+        "description": "Arbitrary key-value metadata",
+        "additionalProperties": true
+      }
+    },
+    "additionalProperties": false
+  }
+}
+"#;
 
 /// Codec format for message serialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -72,6 +112,26 @@ impl Default for CompatibilityMode {
     fn default() -> Self {
         Self::Backward
     }
+}
+
+/// Schema definition as stored in a file (without computed schema_id).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaFileDefinition {
+    /// Content type this schema validates (e.g., "insight").
+    pub content_type: String,
+    /// Schema version (monotonically increasing).
+    pub version: u32,
+    /// JSON Schema definition for validation.
+    pub json_schema: serde_json::Value,
+    /// Preferred codec for this schema.
+    #[serde(default)]
+    pub codec: Option<Codec>,
+    /// Compatibility mode for schema evolution.
+    #[serde(default)]
+    pub compatibility: Option<CompatibilityMode>,
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// A schema definition with metadata.
@@ -183,6 +243,98 @@ impl SchemaRegistry {
         };
         registry.register_builtin_schemas();
         registry
+    }
+
+    /// Create a new schema registry and load custom schemas from a directory.
+    ///
+    /// Custom schemas are JSON files in the directory. Each file should contain
+    /// a SchemaDefinition-compatible structure:
+    /// ```json
+    /// {
+    ///   "content_type": "my_type",
+    ///   "version": 1,
+    ///   "json_schema": { ... },
+    ///   "codec": "json",
+    ///   "compatibility": "backward",
+    ///   "description": "Optional description"
+    /// }
+    /// ```
+    pub fn with_schemas_dir(strict_mode: bool, schemas_dir: &Path) -> Self {
+        let registry = Self::new(strict_mode);
+        registry.load_schemas_from_dir(schemas_dir);
+        registry
+    }
+
+    /// Load all `.json` schema files from a directory.
+    ///
+    /// Files are loaded in sorted order (alphabetically by filename).
+    /// If the directory is empty, a default `message.v1.json` schema is created.
+    /// Errors are logged but don't prevent other schemas from loading.
+    pub fn load_schemas_from_dir(&self, dir: &Path) {
+        // Create directory if it doesn't exist
+        if !dir.exists() {
+            if let Err(e) = fs::create_dir_all(dir) {
+                eprintln!("Failed to create schemas directory {:?}: {}", dir, e);
+                return;
+            }
+        }
+
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                eprintln!("Failed to read schemas directory {:?}: {}", dir, e);
+                return;
+            }
+        };
+
+        // Collect and sort entries for deterministic loading order
+        let mut paths: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map_or(false, |ext| ext == "json"))
+            .collect();
+        paths.sort();
+
+        // If no schema files exist, create the default message schema
+        if paths.is_empty() {
+            let default_path = dir.join("message.v1.json");
+            if let Err(e) = fs::write(&default_path, DEFAULT_MESSAGE_SCHEMA) {
+                eprintln!("Failed to write default schema {:?}: {}", default_path, e);
+            } else {
+                paths.push(default_path);
+            }
+        }
+
+        for path in paths {
+            if let Err(e) = self.load_schema_file(&path) {
+                eprintln!("Failed to load schema from {:?}: {}", path, e);
+            }
+        }
+    }
+
+    /// Load a single schema file.
+    fn load_schema_file(&self, path: &Path) -> Result<()> {
+        let content = fs::read_to_string(path).map_err(|e| EgreError::Schema {
+            reason: format!("failed to read file: {}", e),
+        })?;
+
+        let file_def: SchemaFileDefinition =
+            serde_json::from_str(&content).map_err(|e| EgreError::Schema {
+                reason: format!("failed to parse JSON: {}", e),
+            })?;
+
+        let schema = SchemaDefinition {
+            schema_id: format!("{}/v{}", file_def.content_type, file_def.version),
+            content_type: file_def.content_type,
+            version: file_def.version,
+            json_schema: file_def.json_schema,
+            codec: file_def.codec.unwrap_or_default(),
+            compatibility: file_def.compatibility.unwrap_or_default(),
+            description: file_def.description,
+        };
+
+        self.register(schema)?;
+        Ok(())
     }
 
     /// Register built-in schemas for known content types.
@@ -884,5 +1036,52 @@ mod tests {
         let schema_ids: Vec<&str> = all.iter().map(|s| s.schema_id.as_str()).collect();
         assert!(schema_ids.contains(&"insight/v1"));
         assert!(schema_ids.contains(&"profile/v1"));
+    }
+
+    #[test]
+    fn load_schemas_from_empty_dir_creates_default() {
+        let temp_dir = std::env::temp_dir().join(format!("egregore_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir); // Clean up if exists
+
+        let registry = SchemaRegistry::with_schemas_dir(false, &temp_dir);
+
+        // Should have created the default message schema
+        assert!(registry.get("message/v1").is_some());
+
+        // File should exist
+        assert!(temp_dir.join("message.v1.json").exists());
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn load_schemas_from_dir_with_custom_schema() {
+        let temp_dir = std::env::temp_dir().join(format!("egregore_test_custom_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Write a custom schema
+        let custom_schema = r#"{
+            "content_type": "test_custom",
+            "version": 1,
+            "json_schema": {
+                "type": "object",
+                "required": ["type"],
+                "properties": { "type": { "const": "test_custom" } }
+            }
+        }"#;
+        std::fs::write(temp_dir.join("test_custom.v1.json"), custom_schema).unwrap();
+
+        let registry = SchemaRegistry::with_schemas_dir(false, &temp_dir);
+
+        // Should have loaded the custom schema
+        assert!(registry.get("test_custom/v1").is_some());
+
+        // Should NOT have created default (directory wasn't empty)
+        assert!(!temp_dir.join("message.v1.json").exists());
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

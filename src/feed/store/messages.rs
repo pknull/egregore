@@ -40,9 +40,11 @@ impl FeedStore {
             )
             .unwrap_or(0);
 
-        let new_seq = latest_seq.checked_add(1).ok_or_else(|| EgreError::FeedIntegrity {
-            reason: "sequence number overflow".into(),
-        })?;
+        let new_seq = latest_seq
+            .checked_add(1)
+            .ok_or_else(|| EgreError::FeedIntegrity {
+                reason: "sequence number overflow".into(),
+            })?;
 
         // Get previous hash if needed
         let previous: Option<String> = if new_seq > 1 {
@@ -171,11 +173,7 @@ impl FeedStore {
              ON CONFLICT(author) DO UPDATE SET
                 latest_sequence = MAX(feeds.latest_sequence, excluded.latest_sequence),
                 last_seen = excluded.last_seen",
-            params![
-                msg.author.0,
-                msg.sequence,
-                msg.timestamp.to_rfc3339(),
-            ],
+            params![msg.author.0, msg.sequence, msg.timestamp.to_rfc3339(),],
         )?;
 
         Ok(())
@@ -247,7 +245,10 @@ impl FeedStore {
         }
 
         if let Some(ref ct) = query.content_type {
-            sql.push_str(&format!(" AND m.content_type = ?{}", param_values.len() + 1));
+            sql.push_str(&format!(
+                " AND m.content_type = ?{}",
+                param_values.len() + 1
+            ));
             param_values.push(Box::new(ct.clone()));
         }
 
@@ -660,12 +661,7 @@ mod tests {
         // Filter by "rust" topic should return messages 1 and 3
         let topics = vec!["rust".to_string()];
         let results = store
-            .get_messages_after_with_topics(
-                &PublicId("@alice.ed25519".to_string()),
-                0,
-                10,
-                &topics,
-            )
+            .get_messages_after_with_topics(&PublicId("@alice.ed25519".to_string()), 0, 10, &topics)
             .unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].sequence, 1);
@@ -674,12 +670,7 @@ mod tests {
         // Filter by "python" topic should return only message 2
         let topics = vec!["python".to_string()];
         let results = store
-            .get_messages_after_with_topics(
-                &PublicId("@alice.ed25519".to_string()),
-                0,
-                10,
-                &topics,
-            )
+            .get_messages_after_with_topics(&PublicId("@alice.ed25519".to_string()), 0, 10, &topics)
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].sequence, 2);
@@ -700,12 +691,7 @@ mod tests {
         // Empty topics should return all messages
         let topics: Vec<String> = vec![];
         let results = store
-            .get_messages_after_with_topics(
-                &PublicId("@alice.ed25519".to_string()),
-                0,
-                10,
-                &topics,
-            )
+            .get_messages_after_with_topics(&PublicId("@alice.ed25519".to_string()), 0, 10, &topics)
             .unwrap();
         assert_eq!(results.len(), 2);
     }

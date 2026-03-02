@@ -129,10 +129,12 @@ impl FeedEngine {
         span_id: Option<String>,
     ) -> Result<Message> {
         // Determine effective schema_id
-        let effective_schema_id = schema_id.or_else(|| self.schema_registry.infer_schema_id(&content));
+        let effective_schema_id =
+            schema_id.or_else(|| self.schema_registry.infer_schema_id(&content));
 
         // Validate content against schema
-        self.schema_registry.validate(&content, effective_schema_id.as_deref())?;
+        self.schema_registry
+            .validate(&content, effective_schema_id.as_deref())?;
         let author = identity.public_id();
 
         // Enforce same size limit as ingest — oversized messages won't replicate
@@ -155,41 +157,43 @@ impl FeedEngine {
         let span_id_clone = span_id.clone();
         let schema_id_clone = effective_schema_id.clone();
 
-        let message = self.store.publish_message_atomic(&author, |new_seq, previous| {
-            let unsigned = UnsignedMessage {
-                author: author.clone(),
-                sequence: new_seq,
-                previous,
-                timestamp: Utc::now(),
-                content: content.clone(),
-                schema_id: schema_id_clone.clone(),
-                relates: relates_clone.clone(),
-                tags: tags_clone.clone(),
-                trace_id: trace_id_clone.clone(),
-                span_id: span_id_clone.clone(),
-                expires_at: None, // TTL set by caller if needed
-            };
+        let message = self
+            .store
+            .publish_message_atomic(&author, |new_seq, previous| {
+                let unsigned = UnsignedMessage {
+                    author: author.clone(),
+                    sequence: new_seq,
+                    previous,
+                    timestamp: Utc::now(),
+                    content: content.clone(),
+                    schema_id: schema_id_clone.clone(),
+                    relates: relates_clone.clone(),
+                    tags: tags_clone.clone(),
+                    trace_id: trace_id_clone.clone(),
+                    span_id: span_id_clone.clone(),
+                    expires_at: None, // TTL set by caller if needed
+                };
 
-            let hash = unsigned.compute_hash();
-            let sig = sign_bytes(identity, hash.as_bytes());
-            let signature = B64.encode(sig.to_bytes());
+                let hash = unsigned.compute_hash();
+                let sig = sign_bytes(identity, hash.as_bytes());
+                let signature = B64.encode(sig.to_bytes());
 
-            Ok(Message {
-                author: unsigned.author,
-                sequence: unsigned.sequence,
-                previous: unsigned.previous,
-                timestamp: unsigned.timestamp,
-                content: unsigned.content,
-                schema_id: effective_schema_id.clone(),
-                relates: relates.clone(),
-                tags: tags.clone(),
-                trace_id: trace_id.clone(),
-                span_id: span_id.clone(),
-                expires_at: unsigned.expires_at,
-                hash,
-                signature,
-            })
-        })?;
+                Ok(Message {
+                    author: unsigned.author,
+                    sequence: unsigned.sequence,
+                    previous: unsigned.previous,
+                    timestamp: unsigned.timestamp,
+                    content: unsigned.content,
+                    schema_id: effective_schema_id.clone(),
+                    relates: relates.clone(),
+                    tags: tags.clone(),
+                    trace_id: trace_id.clone(),
+                    span_id: span_id.clone(),
+                    expires_at: unsigned.expires_at,
+                    hash,
+                    signature,
+                })
+            })?;
 
         self.emit(&message);
         Ok(message)
@@ -228,7 +232,11 @@ impl FeedEngine {
         }
 
         // Cheap duplicate check before expensive Ed25519 verification
-        if self.store.get_message_at_sequence(&msg.author, msg.sequence)?.is_some() {
+        if self
+            .store
+            .get_message_at_sequence(&msg.author, msg.sequence)?
+            .is_some()
+        {
             return Err(EgreError::DuplicateMessage {
                 author: msg.author.0.clone(),
                 sequence: msg.sequence,
@@ -236,7 +244,8 @@ impl FeedEngine {
         }
 
         // Validate content against schema (before expensive signature check)
-        self.schema_registry.validate(&msg.content, msg.schema_id.as_deref())?;
+        self.schema_registry
+            .validate(&msg.content, msg.schema_id.as_deref())?;
 
         Self::verify_signature_and_hash(msg)?;
         Self::validate_previous_field(msg)?;
@@ -308,8 +317,9 @@ impl FeedEngine {
         // Forward link: do we have the predecessor?
         let chain_valid = if msg.sequence == 1 {
             true
-        } else if let Some(prev_msg) =
-            self.store.get_message_at_sequence(&msg.author, msg.sequence - 1)?
+        } else if let Some(prev_msg) = self
+            .store
+            .get_message_at_sequence(&msg.author, msg.sequence - 1)?
         {
             match &msg.previous {
                 Some(claimed) if claimed != &prev_msg.hash => {
@@ -328,9 +338,7 @@ impl FeedEngine {
 
         // Backward link: does a successor already exist?
         if let Some(next_seq) = msg.sequence.checked_add(1) {
-            if let Some(next_msg) =
-                self.store.get_message_at_sequence(&msg.author, next_seq)?
-            {
+            if let Some(next_msg) = self.store.get_message_at_sequence(&msg.author, next_seq)? {
                 match &next_msg.previous {
                     Some(next_prev) if next_prev != &msg.hash => {
                         return Err(EgreError::FeedIntegrity {
@@ -516,13 +524,28 @@ mod tests {
 
         // Publish 3 messages on remote
         let _m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 1}),
+                None,
+                vec![],
+            )
             .unwrap();
         let _m2 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 2}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 2}),
+                None,
+                vec![],
+            )
             .unwrap();
         let m3 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 3}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 3}),
+                None,
+                vec![],
+            )
             .unwrap();
 
         // Ingesting sequence 3 without 1 and 2 — accepted but flagged
@@ -543,13 +566,23 @@ mod tests {
 
         // Publish m1 on remote, ingest it
         let m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 1}),
+                None,
+                vec![],
+            )
             .unwrap();
         engine.ingest(&m1).unwrap();
 
         // Publish m2 on remote (legitimate)
         let mut m2 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 2}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 2}),
+                None,
+                vec![],
+            )
             .unwrap();
 
         // Tamper: change previous to a fake hash (fork attack)
@@ -634,7 +667,12 @@ mod tests {
 
         // Ingest legitimate message 1
         let m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 1}),
+                None,
+                vec![],
+            )
             .unwrap();
         engine.ingest(&m1).unwrap();
 
@@ -686,13 +724,28 @@ mod tests {
         let remote_engine = FeedEngine::new(remote_store);
 
         let m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 1}),
+                None,
+                vec![],
+            )
             .unwrap();
         let m2 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 2}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 2}),
+                None,
+                vec![],
+            )
             .unwrap();
         let m3 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 3}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 3}),
+                None,
+                vec![],
+            )
             .unwrap();
 
         // Late join: receive messages 2 and 3 (gap at 1)
@@ -724,10 +777,20 @@ mod tests {
 
         // Ingest message 2 first (gap at 1)
         let _m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 1}),
+                None,
+                vec![],
+            )
             .unwrap();
         let m2 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 2}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 2}),
+                None,
+                vec![],
+            )
             .unwrap();
         engine.ingest(&m2).unwrap();
 
@@ -780,13 +843,28 @@ mod tests {
         let remote_engine = FeedEngine::new(remote_store);
 
         let m1 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 1}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 1}),
+                None,
+                vec![],
+            )
             .unwrap();
         let m2 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 2}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 2}),
+                None,
+                vec![],
+            )
             .unwrap();
         let m3 = remote_engine
-            .publish(&identity, serde_json::json!({"type": "test", "n": 3}), None, vec![])
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 3}),
+                None,
+                vec![],
+            )
             .unwrap();
 
         // Ingest in order — should all succeed
@@ -795,7 +873,10 @@ mod tests {
         engine.ingest(&m3).unwrap();
 
         assert_eq!(
-            engine.store().get_latest_sequence(&identity.public_id()).unwrap(),
+            engine
+                .store()
+                .get_latest_sequence(&identity.public_id())
+                .unwrap(),
             3
         );
     }
@@ -907,11 +988,7 @@ mod tests {
                 .unwrap()
                 .unwrap_or_else(|| panic!("message {} should exist", seq));
 
-            assert_eq!(
-                msg.previous, prev_hash,
-                "chain broken at sequence {}",
-                seq
-            );
+            assert_eq!(msg.previous, prev_hash, "chain broken at sequence {}", seq);
             prev_hash = Some(msg.hash.clone());
         }
     }

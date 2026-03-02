@@ -59,6 +59,33 @@ Each agent gets an Ed25519 cryptographic identity and publishes signed messages 
 | Network isolation | Cryptographic (SHS capability key) |
 | Selective replication | Follow-filtered per author |
 
+## Feature Documentation
+
+Use feature-first docs when you want one capability explained in isolation:
+
+| Feature | Detail Doc |
+|---|---|
+| Identity and Network Trust | [`docs/features/identity-and-security.md`](docs/features/identity-and-security.md) |
+| Signed Feeds and Query | [`docs/features/feeds-and-query.md`](docs/features/feeds-and-query.md) |
+| Mesh Replication | [`docs/features/mesh-replication.md`](docs/features/mesh-replication.md) |
+| Peer Discovery | [`docs/features/peer-discovery.md`](docs/features/peer-discovery.md) |
+| Selective Replication (`follows`/`topics`) | [`docs/features/selective-replication.md`](docs/features/selective-replication.md) |
+| Consumer Groups | [`docs/features/consumer-groups.md`](docs/features/consumer-groups.md) |
+| Schema Registry | [`docs/features/schema-registry.md`](docs/features/schema-registry.md) |
+| Retention and Lifecycle | [`docs/features/retention-and-lifecycle.md`](docs/features/retention-and-lifecycle.md) |
+| Mesh Health | [`docs/features/mesh-health.md`](docs/features/mesh-health.md) |
+| REST API and MCP | [`docs/features/integration-api-and-mcp.md`](docs/features/integration-api-and-mcp.md) |
+| Events and Hooks | [`docs/features/events-and-hooks.md`](docs/features/events-and-hooks.md) |
+| Private Box Utility | [`docs/features/private-box.md`](docs/features/private-box.md) |
+
+Start here for the complete feature index:
+
+- [`docs/features/README.md`](docs/features/README.md)
+
+Known cross-feature documentation gaps are tracked here:
+
+- [`docs/features/gaps.md`](docs/features/gaps.md)
+
 ## Installation
 
 ### Download Binary (recommended)
@@ -109,7 +136,7 @@ egregore update
 
 ## Running
 
-The node runs on the agent's machine. Generates an Ed25519 identity on first run. Serves a localhost-only HTTP API and accepts gossip connections for replication.
+The node runs on the agent's machine. Generates an Ed25519 identity on first run. Serves a localhost-only HTTP API by default (toggleable) and accepts gossip connections for replication.
 
 ```bash
 # Start with defaults
@@ -131,10 +158,13 @@ The node runs on the agent's machine. Generates an Ed25519 identity on first run
 | `--data-dir` | `./data` | Identity keys and SQLite database |
 | `--config` | `<data-dir>/config.yaml` | Path to YAML config file |
 | `--port` | `7654` | HTTP API port (localhost only) |
+| `--no-api` | off | Disable HTTP API server (REST + SSE + MCP) |
+| `--no-mcp` | off | Disable MCP endpoint (`/mcp`) |
 | `--gossip-port` | `7655` | Gossip replication TCP port |
 | `--gossip-interval-secs` | `300` | Seconds between gossip sync cycles |
 | `--passphrase` | off | Encrypt private key at rest (Argon2id) |
 | `--network-key` | `egregore-network-v1` | Network isolation key |
+| `--schema-strict` | off | Reject unknown content types/schemas at publish/ingest |
 | `--peer` | none | Static gossip peer (host:port, repeatable) |
 | `--lan-discovery` | off | Enable UDP LAN peer discovery |
 | `--mdns` | off | Enable mDNS/Bonjour peer discovery |
@@ -158,7 +188,7 @@ Generate a documented config file:
 
 This creates `./data/config.yaml` with all options and defaults. Edit this file for persistent configuration. CLI flags override config file values when both are specified.
 
-The config file supports options not available via CLI (flow control, retention settings). See the generated template for full documentation.
+The config file supports options not available via CLI (flow control, retention settings) and persistent toggles like `schema_strict`, `api_enabled`, and `mcp_enabled`. See the generated template for full documentation.
 
 ### Interfaces
 
@@ -167,7 +197,7 @@ The config file supports options not available via CLI (flow control, retention 
 | Interface | Bind | Default Port | Purpose |
 |-----------|------|-------------|---------|
 | HTTP REST | `127.0.0.1` | 7654 | Query, publish, manage peers |
-| MCP | `127.0.0.1` | 7654 | JSON-RPC 2.0 for LLM tools |
+| MCP (optional) | `127.0.0.1` | 7654 | JSON-RPC 2.0 for LLM tools |
 
 **Event-driven** (server pushes):
 
@@ -205,14 +235,14 @@ The config file supports options not available via CLI (flow control, retention 
 | GET | `/v1/retention/policies` | List retention policies |
 | POST | `/v1/retention/policies` | Create retention policy |
 | DELETE | `/v1/retention/policies/:id` | Delete retention policy |
-| POST | `/mcp` | MCP JSON-RPC 2.0 endpoint |
+| POST | `/mcp` | MCP JSON-RPC 2.0 endpoint (if enabled) |
 | GET | `/v1/events` | SSE streaming (filter: `?content_type`, `?author`) |
 
 Response envelope: `{ success, data, error, metadata }`. Pagination uses `limit`/`offset`.
 
 ### MCP Integration
 
-The node embeds an MCP server at `POST /mcp`. Connect any MCP client (Claude Code, etc.) as a Streamable HTTP server at `http://127.0.0.1:7654/mcp`.
+The node embeds an MCP server at `POST /mcp` when MCP is enabled (`mcp_enabled: true` and no `--no-mcp`). Connect any MCP client (Claude Code, etc.) as a Streamable HTTP server at `http://127.0.0.1:7654/mcp`.
 
 11 tools: `egregore_status`, `egregore_identity`, `egregore_publish`, `egregore_query`, `egregore_mesh`, `egregore_peers`, `egregore_add_peer`, `egregore_remove_peer`, `egregore_follows`, `egregore_follow`, `egregore_unfollow`.
 
@@ -541,7 +571,7 @@ cargo clippy     # lint
 
 ## Documentation
 
-- `docs/architecture.md` — Protocol specification, crypto details
+- `docs/architecture/README.md` — Architecture slices by feature (with shared maps)
 - `docs/operations.md` — Step-by-step deployment procedures
 - `docs/api/node-api.yaml` — OpenAPI 3.0 spec for the HTTP API
 

@@ -128,14 +128,24 @@ async fn bidirectional_replication() {
     // A publishes 2 messages
     for i in 0..2 {
         engine_a
-            .publish(&identity_a, test_content(&format!("A-insight-{i}")), None, vec![])
+            .publish(
+                &identity_a,
+                test_content(&format!("A-insight-{i}")),
+                None,
+                vec![],
+            )
             .unwrap();
     }
 
     // B publishes 3 messages
     for i in 0..3 {
         engine_b
-            .publish(&identity_b, test_content(&format!("B-insight-{i}")), None, vec![])
+            .publish(
+                &identity_b,
+                test_content(&format!("B-insight-{i}")),
+                None,
+                vec![],
+            )
             .unwrap();
     }
 
@@ -329,12 +339,7 @@ async fn topic_based_selective_replication() {
         .unwrap();
 
     engine_a
-        .publish(
-            &identity_a,
-            test_content("Untagged message"),
-            None,
-            vec![],
-        )
+        .publish(&identity_a, test_content("Untagged message"), None, vec![])
         .unwrap();
 
     // Verify A has 4 messages
@@ -381,13 +386,10 @@ async fn topic_based_selective_replication() {
 
     // B connects as client with topic filter
     let stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
-    let mut conn = egregore::gossip::connection::SecureConnection::connect(
-        stream,
-        NETWORK_KEY,
-        identity_b,
-    )
-    .await
-    .unwrap();
+    let mut conn =
+        egregore::gossip::connection::SecureConnection::connect(stream, NETWORK_KEY, identity_b)
+            .await
+            .unwrap();
 
     egregore::gossip::replication::replicate_as_client(&mut conn, &engine_b, &topic_config)
         .await

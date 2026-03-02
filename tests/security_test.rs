@@ -177,7 +177,9 @@ async fn replicate_once(
     let eng = server_engine.clone();
     let handle = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let mut conn = SecureConnection::accept(stream, NETWORK_KEY, id).await.unwrap();
+        let mut conn = SecureConnection::accept(stream, NETWORK_KEY, id)
+            .await
+            .unwrap();
         let config = ReplicationConfig::default();
         egregore::gossip::replication::replicate_as_server(&mut conn, &eng, &config)
             .await
@@ -230,8 +232,7 @@ async fn wrong_network_key_rejects_gossip_connection() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let client_result =
-        SecureConnection::connect(stream, client_key, Identity::generate()).await;
+    let client_result = SecureConnection::connect(stream, client_key, Identity::generate()).await;
 
     let server_result = tokio::time::timeout(Duration::from_secs(5), server_handle)
         .await
@@ -571,7 +572,6 @@ async fn fork_attack_rejected_during_replication() {
 
 #[tokio::test]
 async fn malformed_gossip_message_handled() {
-
     let _ = tracing_subscriber::fmt()
         .with_env_filter("egregore=debug")
         .try_init();
@@ -596,7 +596,10 @@ async fn malformed_gossip_message_handled() {
         let result =
             egregore::gossip::replication::replicate_as_server(&mut conn, &server_eng, &config)
                 .await;
-        assert!(result.is_err(), "malformed input should cause error, not panic");
+        assert!(
+            result.is_err(),
+            "malformed input should cause error, not panic"
+        );
         let _ = conn.close().await;
     });
 

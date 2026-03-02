@@ -376,15 +376,15 @@ pub async fn join_group(
     let engine = state.engine.clone();
     let member_id = PublicId(req.member_id);
 
-    let result = tokio::task::spawn_blocking(move || {
-        engine.store().join_group(&group_id, &member_id)
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || engine.store().join_group(&group_id, &member_id)).await;
 
     match result {
-        Ok(Ok(join_result)) => {
-            (StatusCode::OK, response::ok(JoinGroupResponse::from(join_result))).into_response()
-        }
+        Ok(Ok(join_result)) => (
+            StatusCode::OK,
+            response::ok(JoinGroupResponse::from(join_result)),
+        )
+            .into_response(),
         Ok(Err(e)) => response::from_error(e),
         Err(_) => response::err::<JoinGroupResponse>(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -413,10 +413,9 @@ pub async fn leave_group(
     let engine = state.engine.clone();
     let member_id = PublicId(req.member_id);
 
-    let result = tokio::task::spawn_blocking(move || {
-        engine.store().leave_group(&group_id, &member_id)
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || engine.store().leave_group(&group_id, &member_id))
+            .await;
 
     match result {
         Ok(Ok(true)) => StatusCode::NO_CONTENT.into_response(),

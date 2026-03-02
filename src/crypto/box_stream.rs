@@ -62,7 +62,9 @@ impl BoxStreamWriter {
         let body_ct = self
             .cipher
             .encrypt(&chacha_nonce(&body_nonce), body)
-            .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+            .map_err(|e| EgreError::Crypto {
+                reason: e.to_string(),
+            })?;
 
         // body_ct = body_ciphertext(len) + body_mac(16)
         let body_mac = &body_ct[body_ct.len() - TAG_SIZE..];
@@ -78,7 +80,9 @@ impl BoxStreamWriter {
         let header_ct = self
             .cipher
             .encrypt(&chacha_nonce(&header_nonce), header_plain.as_slice())
-            .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+            .map_err(|e| EgreError::Crypto {
+                reason: e.to_string(),
+            })?;
 
         // Frame: [encrypted_header | body_ciphertext_without_mac]
         let mut frame = Vec::with_capacity(header_ct.len() + body_ct.len() - TAG_SIZE);
@@ -94,7 +98,9 @@ impl BoxStreamWriter {
         let ct = self
             .cipher
             .encrypt(&chacha_nonce(&nonce), zeros.as_ref())
-            .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+            .map_err(|e| EgreError::Crypto {
+                reason: e.to_string(),
+            })?;
         Ok(ct)
     }
 
@@ -139,11 +145,7 @@ impl BoxStreamReader {
     }
 
     /// Decrypt the body using the MAC from the header.
-    pub fn decrypt_body(
-        &mut self,
-        body_ct: &[u8],
-        body_mac: &[u8; TAG_SIZE],
-    ) -> Result<Vec<u8>> {
+    pub fn decrypt_body(&mut self, body_ct: &[u8], body_mac: &[u8; TAG_SIZE]) -> Result<Vec<u8>> {
         let nonce = self.next_nonce();
 
         // Reconstruct full ciphertext with MAC appended
@@ -204,7 +206,8 @@ mod tests {
         let frame = writer.encrypt_frame(plaintext).unwrap();
 
         // Split frame into header and body
-        let header: [u8; HEADER_ENCRYPTED_SIZE] = frame[..HEADER_ENCRYPTED_SIZE].try_into().unwrap();
+        let header: [u8; HEADER_ENCRYPTED_SIZE] =
+            frame[..HEADER_ENCRYPTED_SIZE].try_into().unwrap();
         let body_ct = &frame[HEADER_ENCRYPTED_SIZE..];
 
         let (body_len, body_mac) = reader.decrypt_header(&header).unwrap().unwrap();
@@ -241,7 +244,8 @@ mod tests {
         let mut reader = BoxStreamReader::new(key, nonce);
 
         let frame = writer.goodbye().unwrap();
-        let header: [u8; HEADER_ENCRYPTED_SIZE] = frame[..HEADER_ENCRYPTED_SIZE].try_into().unwrap();
+        let header: [u8; HEADER_ENCRYPTED_SIZE] =
+            frame[..HEADER_ENCRYPTED_SIZE].try_into().unwrap();
         let result = reader.decrypt_header(&header).unwrap();
         assert!(result.is_none());
     }
@@ -253,7 +257,8 @@ mod tests {
         let mut reader = BoxStreamReader::new([99u8; 32], nonce);
 
         let frame = writer.encrypt_frame(b"secret").unwrap();
-        let header: [u8; HEADER_ENCRYPTED_SIZE] = frame[..HEADER_ENCRYPTED_SIZE].try_into().unwrap();
+        let header: [u8; HEADER_ENCRYPTED_SIZE] =
+            frame[..HEADER_ENCRYPTED_SIZE].try_into().unwrap();
         let result = reader.decrypt_header(&header);
         assert!(result.is_err());
     }

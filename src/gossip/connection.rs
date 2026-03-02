@@ -22,9 +22,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
 use crate::crypto::box_stream::{BoxStreamReader, BoxStreamWriter};
-use crate::crypto::handshake::{
-    ClientHandshake, HandshakeOutcome, ServerHandshake,
-};
+use crate::crypto::handshake::{ClientHandshake, HandshakeOutcome, ServerHandshake};
 use crate::error::{EgreError, Result};
 use crate::identity::Identity;
 

@@ -341,7 +341,11 @@ impl TokenBucket {
             return true;
         }
         // Clamp elapsed time to prevent long pauses from granting unlimited tokens
-        let elapsed = self.last_refill.elapsed().as_secs_f64().min(MAX_REFILL_ELAPSED_SECS);
+        let elapsed = self
+            .last_refill
+            .elapsed()
+            .as_secs_f64()
+            .min(MAX_REFILL_ELAPSED_SECS);
         let current_tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
         current_tokens >= 1.0
     }
@@ -361,7 +365,10 @@ impl TokenBucket {
     fn refill(&mut self) {
         let now = Instant::now();
         // Clamp elapsed time to prevent long pauses from granting unlimited tokens
-        let elapsed = now.duration_since(self.last_refill).as_secs_f64().min(MAX_REFILL_ELAPSED_SECS);
+        let elapsed = now
+            .duration_since(self.last_refill)
+            .as_secs_f64()
+            .min(MAX_REFILL_ELAPSED_SECS);
         self.tokens = (self.tokens + elapsed * self.rate).min(self.capacity);
         self.last_refill = now;
     }
@@ -399,11 +406,7 @@ pub enum FlowControlMessage {
 /// * `messages_sent` - Total messages sent to this peer
 /// * `messages_dropped` - Messages dropped due to backpressure
 /// * `credits` - Current credit count
-pub fn calculate_adaptive_fanout(
-    messages_sent: u64,
-    messages_dropped: u64,
-    credits: u32,
-) -> f64 {
+pub fn calculate_adaptive_fanout(messages_sent: u64, messages_dropped: u64, credits: u32) -> f64 {
     // If no messages sent, assume healthy
     if messages_sent == 0 {
         return 1.0;

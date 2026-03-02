@@ -40,22 +40,21 @@ pub async fn publish(
     let identity = state.identity.clone();
     let engine = state.engine.clone();
 
-    let result =
-        tokio::task::spawn_blocking(move || {
-            engine.publish_full(
-                &identity,
-                req.content,
-                req.schema_id,
-                req.relates,
-                req.tags,
-                req.trace_id,
-                req.span_id,
-            )
-        })
-        .await
-        .map_err(|e| egregore::error::EgreError::Config {
-            reason: format!("task join error: {e}"),
-        });
+    let result = tokio::task::spawn_blocking(move || {
+        engine.publish_full(
+            &identity,
+            req.content,
+            req.schema_id,
+            req.relates,
+            req.tags,
+            req.trace_id,
+            req.span_id,
+        )
+    })
+    .await
+    .map_err(|e| egregore::error::EgreError::Config {
+        reason: format!("task join error: {e}"),
+    });
 
     match result {
         Ok(Ok(msg)) => (StatusCode::CREATED, response::ok(msg)).into_response(),

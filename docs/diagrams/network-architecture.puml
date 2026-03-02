@@ -48,6 +48,12 @@ skinparam component {
     BackgroundColor<<external>> #D1C4E9
     FontColor<<external>> #311B92
     BorderColor<<external>> #512DA8
+    BackgroundColor<<router>> #FFCCBC
+    FontColor<<router>> #5D4037
+    BorderColor<<router>> #E64A19
+    BackgroundColor<<worker>> #D7CCC8
+    FontColor<<worker>> #3E2723
+    BorderColor<<worker>> #6D4C41
 }
 
 skinparam note {
@@ -86,7 +92,11 @@ package "Site 1 (LAN)" <<site>> {
 
         component "Gossip :7655" <<gossip>> as gossip_a
         component "UDP :7656" <<gossip>> as udp_a
+        component "Ingress Filter\nfollows + topics" <<router>> as ingress_a
         component "Feed Engine\n+ broadcast" <<engine>> as engine_a
+        component "Group Router\n(author -> member)" <<router>> as groups_a
+        component "Worker @AAA\n(local member)" <<worker>> as worker_aaa
+        component "Worker @BBB\n(local member)" <<worker>> as worker_bbb
         database "SQLite" <<store>> as store_a
         component "Ed25519" <<crypto>> as key_a
 
@@ -94,7 +104,11 @@ package "Site 1 (LAN)" <<site>> {
         mcp_a -down-> engine_a
         engine_a -up-> sse_a : push
         engine_a -up-> hooks_a : push
-        gossip_a -down-> engine_a
+        gossip_a -down-> ingress_a : incoming mesh
+        ingress_a -down-> engine_a : ingest accepted
+        engine_a -right-> groups_a : local dispatch
+        groups_a -right-> worker_aaa : assigned authors
+        groups_a -right-> worker_bbb : assigned authors
         engine_a -down-> store_a
         engine_a -down-> key_a
     }
@@ -223,6 +237,14 @@ note bottom of gossip_b
   relay distributes to C.
 end note
 
+note right of groups_a
+  **Groups are local only.**
+  Members are local workers
+  identified by member_id.
+  Assignment is by **author feed**
+  (not per-message).
+end note
+
 note as N_crypto
   **Crypto Layer**
   ....
@@ -246,7 +268,7 @@ note as N_replication
   ....
   Have > Have > Want > Messages > Done
   Bidirectional per connection
-  Follow-filtered (agent) or open (relay)
+  Follow/topic-filtered (agent) or open (relay)
   Batches of 50, gap-tolerant
 end note
 
@@ -265,12 +287,45 @@ note as N_events
   Both fire on publish() and ingest()
 end note
 
+note as N_scope
+  **Ingress Modes (per node)**
+  ....
+  **Ad-hoc mesh**
+  empty follows + no topic filter
+  replicate all authors/topics
+  ....
+  **Scoped control plane**
+  follows and/or topics configured
+  ingest only matching traffic
+  ....
+  Push lowers latency;
+  pull loop reconciles state.
+end note
+
+note as N_routing
+  **Filter vs Routing**
+  ....
+  follows/topics = ingress filter
+  decide what enters local store
+  ....
+  groups = local dispatch
+  decide whether @AAA or @BBB
+  processes an author feed
+end note
+
+N_scope .. gossip_a
+N_scope .. gossip_relay
+N_routing .. ingress_a
+N_routing .. groups_a
+
 legend right
   |<#C8E6C9> API |= Request-based: HTTP REST + MCP (client pulls) |
   |<#B2DFDB> Trigger |= Event-driven: SSE + Hooks (server pushes) |
   |<#BBDEFB> Gossip |= SHS + Box Stream over TCP |
   |<#FFF9C4> Engine |= Sign, verify, chain, query, broadcast events |
-  |<#E1BEE7> Store |= SQLite (messages, peers, follows, FTS5) |
+  |<#FFCCBC> Router |= Ingress filters + local group routing |
+  |<#D7CCC8> Worker |= Local group member process (@AAA, @BBB, etc.) |
+  |<#E1BEE7> Store |= SQLite (messages, peers, follows, topics, groups, FTS5) |
   |<#FFCDD2> Crypto |= Ed25519 keypair / X25519 DH |
   |<#FFE0B2> Eviction |= TTL-based message cleanup |
   |<#D1C4E9> External |= Webhook consumers (Slack, chatbots, etc.) |

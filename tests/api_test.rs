@@ -29,15 +29,24 @@ fn create_test_app() -> (Arc<FeedEngine>, axum::Router) {
         .route("/v1/groups", axum::routing::get(list_groups))
         .route("/v1/groups/:id", axum::routing::get(get_group))
         .route("/v1/groups/:id", axum::routing::delete(delete_group))
-        .route("/v1/groups/:id/members", axum::routing::get(get_group_members))
+        .route(
+            "/v1/groups/:id/members",
+            axum::routing::get(get_group_members),
+        )
         .route("/v1/groups/:id/join", axum::routing::post(join_group))
         .route("/v1/groups/:id/leave", axum::routing::post(leave_group))
-        .route("/v1/groups/:id/offsets", axum::routing::get(get_group_offsets))
+        .route(
+            "/v1/groups/:id/offsets",
+            axum::routing::get(get_group_offsets),
+        )
         .route("/v1/groups/:id/offsets", axum::routing::post(commit_offset))
         // Topics routes
         .route("/v1/topics", axum::routing::get(list_topics))
         .route("/v1/topics/:topic", axum::routing::post(subscribe_topic))
-        .route("/v1/topics/:topic", axum::routing::delete(unsubscribe_topic))
+        .route(
+            "/v1/topics/:topic",
+            axum::routing::delete(unsubscribe_topic),
+        )
         .with_state(state);
 
     (engine, app)
@@ -85,17 +94,23 @@ async fn create_group(
     let engine = state.engine.clone();
     let group_id = req.group_id;
     match engine.store().create_group(&group_id) {
-        Ok(group) => (StatusCode::CREATED, Json(json!({
-            "success": true,
-            "data": {
-                "group_id": group.group_id,
-                "generation": group.generation
-            }
-        }))),
-        Err(_) => (StatusCode::CONFLICT, Json(json!({
-            "success": false,
-            "error": { "code": "GROUP_EXISTS" }
-        }))),
+        Ok(group) => (
+            StatusCode::CREATED,
+            Json(json!({
+                "success": true,
+                "data": {
+                    "group_id": group.group_id,
+                    "generation": group.generation
+                }
+            })),
+        ),
+        Err(_) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "success": false,
+                "error": { "code": "GROUP_EXISTS" }
+            })),
+        ),
     }
 }
 
@@ -115,17 +130,23 @@ async fn get_group(
     Path(group_id): Path<String>,
 ) -> impl IntoResponse {
     match state.engine.store().get_group(&group_id).unwrap() {
-        Some(group) => (StatusCode::OK, Json(json!({
-            "success": true,
-            "data": {
-                "group_id": group.group_id,
-                "generation": group.generation
-            }
-        }))),
-        None => (StatusCode::NOT_FOUND, Json(json!({
-            "success": false,
-            "error": { "code": "GROUP_NOT_FOUND" }
-        }))),
+        Some(group) => (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "data": {
+                    "group_id": group.group_id,
+                    "generation": group.generation
+                }
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "success": false,
+                "error": { "code": "GROUP_NOT_FOUND" }
+            })),
+        ),
     }
 }
 
@@ -144,18 +165,24 @@ async fn get_group_members(
     Path(group_id): Path<String>,
 ) -> impl IntoResponse {
     if state.engine.store().get_group(&group_id).unwrap().is_none() {
-        return (StatusCode::NOT_FOUND, Json(json!({
-            "success": false,
-            "error": { "code": "GROUP_NOT_FOUND" }
-        })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "success": false,
+                "error": { "code": "GROUP_NOT_FOUND" }
+            })),
+        );
     }
     let members = state.engine.store().get_group_members(&group_id).unwrap();
-    (StatusCode::OK, Json(json!({
-        "success": true,
-        "data": members.into_iter().map(|m| json!({
-            "member_id": m.member_id.0
-        })).collect::<Vec<_>>()
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "success": true,
+            "data": members.into_iter().map(|m| json!({
+                "member_id": m.member_id.0
+            })).collect::<Vec<_>>()
+        })),
+    )
 }
 
 async fn join_group(
@@ -166,19 +193,25 @@ async fn join_group(
     use egregore::identity::PublicId;
     let member_id = PublicId(req.member_id);
     match state.engine.store().join_group(&group_id, &member_id) {
-        Ok(result) => (StatusCode::OK, Json(json!({
-            "success": true,
-            "data": {
-                "group_id": result.group_id,
-                "member_id": result.member_id.0,
-                "generation": result.generation,
-                "is_leader": result.is_leader
-            }
-        }))),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({
-            "success": false,
-            "error": { "message": e.to_string() }
-        }))),
+        Ok(result) => (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "data": {
+                    "group_id": result.group_id,
+                    "member_id": result.member_id.0,
+                    "generation": result.generation,
+                    "is_leader": result.is_leader
+                }
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "error": { "message": e.to_string() }
+            })),
+        ),
     }
 }
 
@@ -189,7 +222,12 @@ async fn leave_group(
 ) -> impl IntoResponse {
     use egregore::identity::PublicId;
     let member_id = PublicId(req.member_id);
-    match state.engine.store().leave_group(&group_id, &member_id).unwrap() {
+    match state
+        .engine
+        .store()
+        .leave_group(&group_id, &member_id)
+        .unwrap()
+    {
         true => StatusCode::NO_CONTENT,
         false => StatusCode::NOT_FOUND,
     }
@@ -200,19 +238,25 @@ async fn get_group_offsets(
     Path(group_id): Path<String>,
 ) -> impl IntoResponse {
     if state.engine.store().get_group(&group_id).unwrap().is_none() {
-        return (StatusCode::NOT_FOUND, Json(json!({
-            "success": false,
-            "error": { "code": "GROUP_NOT_FOUND" }
-        })));
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "success": false,
+                "error": { "code": "GROUP_NOT_FOUND" }
+            })),
+        );
     }
     let offsets = state.engine.store().get_group_offsets(&group_id).unwrap();
-    (StatusCode::OK, Json(json!({
-        "success": true,
-        "data": offsets.into_iter().map(|o| json!({
-            "author": o.author.0,
-            "committed_sequence": o.committed_sequence
-        })).collect::<Vec<_>>()
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "success": true,
+            "data": offsets.into_iter().map(|o| json!({
+                "author": o.author.0,
+                "committed_sequence": o.committed_sequence
+            })).collect::<Vec<_>>()
+        })),
+    )
 }
 
 async fn commit_offset(
@@ -223,18 +267,28 @@ async fn commit_offset(
     use egregore::identity::PublicId;
     let author = PublicId(req.author);
     let committed_by = PublicId(req.committed_by);
-    match state.engine.store().commit_offset(&group_id, &author, req.sequence, &committed_by) {
-        Ok(offset) => (StatusCode::OK, Json(json!({
-            "success": true,
-            "data": {
-                "author": offset.author.0,
-                "committed_sequence": offset.committed_sequence
-            }
-        }))),
-        Err(e) => (StatusCode::FORBIDDEN, Json(json!({
-            "success": false,
-            "error": { "message": e.to_string() }
-        }))),
+    match state
+        .engine
+        .store()
+        .commit_offset(&group_id, &author, req.sequence, &committed_by)
+    {
+        Ok(offset) => (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "data": {
+                    "author": offset.author.0,
+                    "committed_sequence": offset.committed_sequence
+                }
+            })),
+        ),
+        Err(e) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": { "message": e.to_string() }
+            })),
+        ),
     }
 }
 
@@ -263,7 +317,11 @@ async fn unsubscribe_topic(
     if !topics.contains(&topic) {
         return StatusCode::NOT_FOUND;
     }
-    state.engine.store().remove_topic_subscription(&topic).unwrap();
+    state
+        .engine
+        .store()
+        .remove_topic_subscription(&topic)
+        .unwrap();
     StatusCode::NO_CONTENT
 }
 

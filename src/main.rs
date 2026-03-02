@@ -1,7 +1,7 @@
 //! Egregore node — daemon for a single agent's signed feed.
 //!
 //! Startup: load/generate identity → open SQLite → optionally start HTTP API
-//! (127.0.0.1) → start gossip server (0.0.0.0) → start gossip sync loop →
+//! (127.0.0.1) → start gossip server (default: 127.0.0.1) → start gossip sync loop →
 //! optionally start UDP LAN discovery.
 //!
 //! HTTP serves REST + SSE on localhost only (security boundary = loopback);
@@ -55,6 +55,10 @@ struct Cli {
     /// Gossip TCP port
     #[arg(long, default_value_t = 7655)]
     gossip_port: u16,
+
+    /// IP address to bind gossip server to (default: 127.0.0.1)
+    #[arg(long, default_value = "127.0.0.1")]
+    gossip_bind: String,
 
     /// Encrypt private key with passphrase
     #[arg(long)]
@@ -165,6 +169,9 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
     }
     if matches.value_source("gossip_port") == Some(ValueSource::CommandLine) {
         config.gossip_port = cli.gossip_port;
+    }
+    if matches.value_source("gossip_bind") == Some(ValueSource::CommandLine) {
+        config.gossip_bind = cli.gossip_bind.clone();
     }
     if matches.value_source("network_key") == Some(ValueSource::CommandLine) {
         config.network_key = cli.network_key.clone();
@@ -332,19 +339,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Warn if using the default (public) network key
-    if config.is_default_network_key() {
-        tracing::warn!(
-            network_key = %config.network_key,
-            "using default network key - this is PUBLIC and shared across all default deployments. \
-             For production, set a unique network_key in your config file."
-        );
-    }
-
-    // Validate security configuration (blocks insecure default key + external bind)
-    let gossip_bind = format!("0.0.0.0:{}", config.gossip_port);
-    if let Err(msg) = config.validate_security(&gossip_bind) {
-        eprintln!("{}", msg);
-        std::process::exit(1);
+    if let Some(warning) = config.security_warning() {
+        tracing::warn!("{}", warning.trim());
     }
 
     // Init feed store
@@ -450,7 +446,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Start gossip server
-    let gossip_bind = format!("0.0.0.0:{}", config.gossip_port);
+    let gossip_bind = format!("{}:{}", config.gossip_bind, config.gossip_port);
+    tracing::info!(bind = %gossip_bind, "gossip server starting");
     let gossip_net_key = config.network_key_bytes();
     let gossip_identity = identity.clone();
     let gossip_engine = engine.clone();

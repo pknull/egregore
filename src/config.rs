@@ -142,16 +142,12 @@ pub struct Config {
     /// How long to keep tombstones in seconds (default: 604800 = 7 days).
     #[serde(default = "default_tombstone_max_age_secs")]
     pub tombstone_max_age_secs: u64,
-    /// Allow insecure default configurations (default: false).
+    /// IP address to bind gossip server to (default: 127.0.0.1).
     ///
-    /// When false, startup will fail if using the default network key with
-    /// gossip bound to a non-loopback address. This prevents accidental
-    /// exposure to the public default network.
-    ///
-    /// Set to true only for development/testing or if you intentionally
-    /// want to join the public default network.
-    #[serde(default)]
-    pub allow_insecure_defaults: bool,
+    /// Set to "0.0.0.0" to accept connections from external peers.
+    /// Default is loopback-only for security.
+    #[serde(default = "default_gossip_bind")]
+    pub gossip_bind: String,
 }
 
 fn default_retention_interval_secs() -> u64 {
@@ -160,6 +156,10 @@ fn default_retention_interval_secs() -> u64 {
 
 fn default_tombstone_max_age_secs() -> u64 {
     DEFAULT_TOMBSTONE_MAX_AGE_SECS
+}
+
+fn default_gossip_bind() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_mdns_service() -> String {
@@ -225,7 +225,7 @@ impl Default for Config {
             retention_enabled: false,
             retention_interval_secs: DEFAULT_RETENTION_INTERVAL_SECS,
             tombstone_max_age_secs: DEFAULT_TOMBSTONE_MAX_AGE_SECS,
-            allow_insecure_defaults: false,
+            gossip_bind: default_gossip_bind(),
         }
     }
 }
@@ -401,56 +401,28 @@ impl Config {
         self.network_key == DEFAULT_NETWORK_KEY
     }
 
-    /// Validate startup security configuration.
+    /// Check for security warnings at startup.
     ///
-    /// Returns an error if the configuration is insecure and `allow_insecure_defaults` is false.
-    /// Specifically, blocks: default network key + gossip on non-loopback address.
-    ///
-    /// This prevents users from accidentally exposing their node to the public default network.
-    pub fn validate_security(&self, gossip_bind: &str) -> Result<(), String> {
-        if self.allow_insecure_defaults {
-            return Ok(());
-        }
-
+    /// Returns a warning message if using the default network key.
+    /// Does not block startup - this is informational only.
+    pub fn security_warning(&self) -> Option<String> {
         if !self.is_default_network_key() {
-            return Ok(());
+            return None;
         }
 
-        // Check if gossip bind is externally reachable
-        let is_loopback = gossip_bind.starts_with("127.")
-            || gossip_bind.starts_with("localhost")
-            || gossip_bind.starts_with("[::1]");
+        Some(format!(
+            r#"WARNING: Using default network key.
 
-        let is_wildcard = gossip_bind.starts_with("0.0.0.0")
-            || gossip_bind.starts_with("[::]")
-            || gossip_bind.starts_with("::");
+Your node is using the default network key ("egregore-network-v1").
+Any peer using this key can connect and replicate with your node.
 
-        if is_wildcard || !is_loopback {
-            return Err(format!(
-                r#"SECURITY ERROR: Insecure default configuration detected.
+For isolated networks, set a unique network_key in your config:
+  network_key: "my-network-{}"
 
-You are using the default network key with gossip bound to an external address ({}).
-This would expose your node to the PUBLIC default network shared by all Egregore instances.
-
-To fix this, choose ONE of:
-
-1. Set a unique network key (RECOMMENDED for production):
-   network_key: "my-private-network-{}"
-
-2. Bind gossip to localhost only (for local-only testing):
-   [CLI] --gossip-port 127.0.0.1:7655
-
-3. Explicitly allow insecure defaults (NOT recommended):
-   allow_insecure_defaults: true
-
-For more information, see: https://github.com/pknull/egregore#security
+This warning will not appear once you set a custom key.
 "#,
-                gossip_bind,
-                chrono::Utc::now().format("%Y%m%d")
-            ));
-        }
-
-        Ok(())
+            chrono::Utc::now().format("%Y%m%d")
+        ))
     }
 
     /// 8-byte discriminator derived from the network key.
@@ -623,43 +595,25 @@ mod tests {
     }
 
     #[test]
-    fn security_blocks_default_key_with_external_bind() {
+    fn security_warning_on_default_key() {
         let config = Config::default();
-        // Default key + 0.0.0.0 should fail
-        assert!(config.validate_security("0.0.0.0:7655").is_err());
-        // Default key + [::] should fail
-        assert!(config.validate_security("[::]:7655").is_err());
-        // Default key + external IP should fail
-        assert!(config.validate_security("192.168.1.1:7655").is_err());
+        // Default key should produce a warning
+        assert!(config.security_warning().is_some());
     }
 
     #[test]
-    fn security_allows_default_key_with_loopback() {
-        let config = Config::default();
-        // Default key + loopback is OK (local testing)
-        assert!(config.validate_security("127.0.0.1:7655").is_ok());
-        assert!(config.validate_security("localhost:7655").is_ok());
-        assert!(config.validate_security("[::1]:7655").is_ok());
-    }
-
-    #[test]
-    fn security_allows_custom_key_with_any_bind() {
+    fn no_security_warning_with_custom_key() {
         let config = Config {
             network_key: "my-private-network".to_string(),
             ..Config::default()
         };
-        // Custom key + any bind is OK
-        assert!(config.validate_security("0.0.0.0:7655").is_ok());
-        assert!(config.validate_security("192.168.1.1:7655").is_ok());
+        // Custom key should not produce a warning
+        assert!(config.security_warning().is_none());
     }
 
     #[test]
-    fn security_allows_insecure_override() {
-        let config = Config {
-            allow_insecure_defaults: true,
-            ..Config::default()
-        };
-        // With override, default key + 0.0.0.0 is allowed
-        assert!(config.validate_security("0.0.0.0:7655").is_ok());
+    fn default_gossip_bind_is_loopback() {
+        let config = Config::default();
+        assert_eq!(config.gossip_bind, "127.0.0.1");
     }
 }

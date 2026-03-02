@@ -4,6 +4,13 @@
 //! processes can access the API — there is no authentication on the HTTP layer.
 //! The security boundary is the loopback interface itself.
 //!
+//! ## CSRF Protection
+//!
+//! Mutating endpoints (POST, PUT, DELETE, PATCH) require `Content-Type: application/json`.
+//! This blocks simple CSRF attacks from HTML forms, which can only send
+//! `application/x-www-form-urlencoded` or `multipart/form-data`. JavaScript fetch()
+//! with custom headers triggers CORS preflight, which fails cross-origin to localhost.
+//!
 //! Routes include feed queries, publish, peer management, follows, consumer
 //! groups, identity, status, and SSE at GET /v1/events. MCP is enabled
 //! conditionally.
@@ -27,7 +34,11 @@ pub mod routes_topics;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
+use axum::http::{header, Method, Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 
@@ -44,6 +55,44 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub started_at: Instant,
     pub mcp_registry: SharedRegistry,
+}
+
+/// CSRF protection middleware.
+///
+/// Requires `Content-Type: application/json` for mutating HTTP methods (POST, PUT, DELETE, PATCH).
+/// This prevents simple CSRF attacks from HTML forms which cannot set custom Content-Type headers.
+///
+/// Returns 415 Unsupported Media Type if the Content-Type is missing or not application/json.
+async fn require_json_content_type(req: Request<Body>, next: Next) -> Response {
+    // Only check mutating methods
+    let is_mutating = matches!(
+        *req.method(),
+        Method::POST | Method::PUT | Method::DELETE | Method::PATCH
+    );
+
+    if is_mutating {
+        let content_type = req
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+
+        match content_type {
+            Some(ct) if ct.starts_with("application/json") => {
+                // Valid JSON content type, proceed
+            }
+            _ => {
+                // Missing or invalid Content-Type
+                return response::err::<()>(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "UNSUPPORTED_MEDIA_TYPE",
+                    "Content-Type must be application/json for mutating requests",
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    next.run(req).await
 }
 
 pub fn router(state: AppState) -> Router {
@@ -125,6 +174,121 @@ pub fn router_with_mcp(state: AppState, mcp_enabled: bool) -> Router {
         router
     };
     router
+        .layer(middleware::from_fn(require_json_content_type))
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+    use crate::feed::engine::FeedEngine;
+    use crate::feed::store::FeedStore;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn test_state() -> AppState {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new(store);
+
+        AppState {
+            identity: Identity::generate(),
+            engine: Arc::new(engine),
+            config: Arc::new(Config::default()),
+            started_at: Instant::now(),
+            mcp_registry: mcp_registry::create_registry(),
+        }
+    }
+
+    /// Test that POST requests without Content-Type are rejected (CSRF protection).
+    #[tokio::test]
+    async fn csrf_rejects_post_without_content_type() {
+        let state = test_state();
+        let app = router(state);
+
+        // POST without Content-Type header (simulates HTML form CSRF)
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/publish")
+            .body(Body::from(r#"{"content":{"type":"message","text":"pwned"}}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "UNSUPPORTED_MEDIA_TYPE");
+    }
+
+    /// Test that POST requests with wrong Content-Type are rejected.
+    #[tokio::test]
+    async fn csrf_rejects_post_with_form_content_type() {
+        let state = test_state();
+        let app = router(state);
+
+        // POST with form content type (what HTML forms send)
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/publish")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("content=%7B%22type%22%3A%22message%22%7D"))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    /// Test that POST requests with correct Content-Type are allowed.
+    #[tokio::test]
+    async fn csrf_allows_post_with_json_content_type() {
+        let state = test_state();
+        let app = router(state);
+
+        // POST with JSON content type - should be allowed through to handler
+        // (handler may still reject for other reasons, but not 415)
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"content":{"type":"message","text":"test"}}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Should not be 415 - the middleware passed it through
+        assert_ne!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    /// Test that GET requests don't require Content-Type.
+    #[tokio::test]
+    async fn csrf_allows_get_without_content_type() {
+        let state = test_state();
+        let app = router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/status")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Test that DELETE requests require Content-Type.
+    #[tokio::test]
+    async fn csrf_rejects_delete_without_content_type() {
+        let state = test_state();
+        let app = router(state);
+
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/v1/peers/127.0.0.1:7655")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
 }

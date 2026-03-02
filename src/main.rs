@@ -340,6 +340,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Validate security configuration (blocks insecure default key + external bind)
+    let gossip_bind = format!("0.0.0.0:{}", config.gossip_port);
+    if let Err(msg) = config.validate_security(&gossip_bind) {
+        eprintln!("{}", msg);
+        std::process::exit(1);
+    }
+
     // Init feed store
     let store = FeedStore::open(&config.db_path())?;
 

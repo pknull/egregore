@@ -32,6 +32,18 @@ gossip_interval_secs: 300
 # Default: egregore-network-v1
 network_key: egregore-network-v1
 
+# SECURITY: Allow insecure default configuration.
+# When false (default), the node refuses to start if:
+#   - Using the default network_key AND
+#   - Binding gossip to external interfaces (0.0.0.0 or non-loopback)
+#
+# This prevents accidental exposure of development nodes to the public network.
+# Set to true only for isolated test environments where the default key is acceptable.
+#
+# Production deployments should instead set a unique network_key.
+# Default: false
+allow_insecure_defaults: false
+
 # Enable strict schema validation.
 # When true, messages with unknown content type/schema are rejected at publish/ingest.
 # Default: false

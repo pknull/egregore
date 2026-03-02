@@ -1,12 +1,12 @@
-//! HTTP API — localhost-only REST + MCP JSON-RPC + SSE streaming.
+//! HTTP API — localhost-only REST + SSE streaming + optional MCP JSON-RPC.
 //!
 //! All endpoints bind to 127.0.0.1 (binding happens in main.rs). Only local
 //! processes can access the API — there is no authentication on the HTTP layer.
 //! The security boundary is the loopback interface itself.
 //!
-//! Routes: feed queries, publish, peer management, follows, consumer groups,
-//! identity, status, the MCP JSON-RPC 2.0 endpoint at POST /mcp, and SSE
-//! streaming at GET /v1/events.
+//! Routes include feed queries, publish, peer management, follows, consumer
+//! groups, identity, status, and SSE at GET /v1/events. MCP is enabled
+//! conditionally.
 
 pub mod mcp;
 pub mod mcp_registry;
@@ -47,7 +47,11 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    router_with_mcp(state, true)
+}
+
+pub fn router_with_mcp(state: AppState, mcp_enabled: bool) -> Router {
+    let router = Router::new()
         .route("/v1/identity", get(routes_identity::get_identity))
         .route("/v1/publish", post(routes_publish::publish))
         .route("/v1/feed", get(routes_feed::get_feed))
@@ -59,10 +63,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/peers",
             get(routes_peers::get_peers).post(routes_peers::add_peer),
         )
-        .route(
-            "/v1/peers/:address",
-            delete(routes_peers::delete_peer),
-        )
+        .route("/v1/peers/:address", delete(routes_peers::delete_peer))
         .route("/v1/status", get(routes_peers::get_status))
         .route("/v1/mesh", get(routes_mesh::get_mesh))
         .route(
@@ -72,7 +73,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/follows", get(routes_follows::get_follows))
         .route(
             "/v1/topics/:topic",
-            post(routes_topics::add_topic_subscription).delete(routes_topics::remove_topic_subscription),
+            post(routes_topics::add_topic_subscription)
+                .delete(routes_topics::remove_topic_subscription),
         )
         .route("/v1/topics", get(routes_topics::get_topic_subscriptions))
         .route("/v1/topics/known", get(routes_topics::get_known_topics))
@@ -84,7 +86,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/groups/:id",
             get(routes_groups::get_group).delete(routes_groups::delete_group),
         )
-        .route("/v1/groups/:id/members", get(routes_groups::get_group_members))
+        .route(
+            "/v1/groups/:id/members",
+            get(routes_groups::get_group_members),
+        )
         .route("/v1/groups/:id/join", post(routes_groups::join_group))
         .route("/v1/groups/:id/leave", post(routes_groups::leave_group))
         .route(
@@ -96,7 +101,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/schemas",
             get(routes_schema::list_schemas).post(routes_schema::register_schema),
         )
-        .route("/v1/schemas/validate", post(routes_schema::validate_content))
+        .route(
+            "/v1/schemas/validate",
+            post(routes_schema::validate_content),
+        )
         .route("/v1/schemas/*schema_id", get(routes_schema::get_schema))
         .route(
             "/v1/retention/policies",
@@ -105,13 +113,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/retention/policies/:id",
             delete(routes_retention::delete_policy),
-        )
-        .route(
+        );
+    let router = if mcp_enabled {
+        router.route(
             "/mcp",
             post(mcp::mcp_handler)
                 .get(mcp::mcp_method_not_allowed)
                 .delete(mcp::mcp_method_not_allowed),
         )
+    } else {
+        router
+    };
+    router
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
         .with_state(state)
 }

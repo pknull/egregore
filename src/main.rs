@@ -1,10 +1,11 @@
 //! Egregore node — daemon for a single agent's signed feed.
 //!
-//! Startup: load/generate identity → open SQLite → start HTTP API (127.0.0.1)
-//! → start gossip server (0.0.0.0) → start gossip sync loop → optionally
-//! start UDP LAN discovery.
+//! Startup: load/generate identity → open SQLite → optionally start HTTP API
+//! (127.0.0.1) → start gossip server (0.0.0.0) → start gossip sync loop →
+//! optionally start UDP LAN discovery.
 //!
-//! HTTP serves REST + MCP on localhost only (security boundary = loopback).
+//! HTTP serves REST + SSE on localhost only (security boundary = loopback);
+//! MCP endpoint is optional.
 //! Gossip uses SHS + Box Stream — only peers with the same network key connect.
 
 mod api;
@@ -23,7 +24,11 @@ use egregore::hooks::HookExecutor;
 use egregore::identity::Identity;
 
 #[derive(Parser)]
-#[command(name = "egregore", version, about = "SSB-inspired LLM knowledge sharing")]
+#[command(
+    name = "egregore",
+    version,
+    about = "SSB-inspired LLM knowledge sharing"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -40,6 +45,14 @@ struct Cli {
     #[arg(long, default_value_t = 7654)]
     port: u16,
 
+    /// Disable HTTP API server (disables REST, SSE, and MCP)
+    #[arg(long)]
+    no_api: bool,
+
+    /// Disable MCP endpoint (/mcp) on the HTTP API
+    #[arg(long)]
+    no_mcp: bool,
+
     /// Gossip TCP port
     #[arg(long, default_value_t = 7655)]
     gossip_port: u16,
@@ -51,6 +64,10 @@ struct Cli {
     /// Network key for network isolation
     #[arg(long, default_value = "egregore-network-v1")]
     network_key: String,
+
+    /// Enable strict schema validation (reject unknown content types/schemas)
+    #[arg(long)]
+    schema_strict: bool,
 
     /// Peer addresses (host:port). Repeatable. Appends to config file peers.
     #[arg(long)]
@@ -115,7 +132,9 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
     let data_dir = cli.data_dir.clone();
 
     // Phase 2: Load YAML config if it exists
-    let config_path = cli.config.clone()
+    let config_path = cli
+        .config
+        .clone()
         .unwrap_or_else(|| Config::config_file_path(&data_dir));
 
     let mut config = match Config::load_from_file(&config_path)? {
@@ -139,11 +158,20 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
     if matches.value_source("port") == Some(ValueSource::CommandLine) {
         config.port = cli.port;
     }
+    if cli.no_api {
+        config.api_enabled = false;
+    }
+    if cli.no_mcp {
+        config.mcp_enabled = false;
+    }
     if matches.value_source("gossip_port") == Some(ValueSource::CommandLine) {
         config.gossip_port = cli.gossip_port;
     }
     if matches.value_source("network_key") == Some(ValueSource::CommandLine) {
         config.network_key = cli.network_key.clone();
+    }
+    if matches.value_source("schema_strict") == Some(ValueSource::CommandLine) {
+        config.schema_strict = cli.schema_strict;
     }
     if matches.value_source("discovery_port") == Some(ValueSource::CommandLine) {
         config.discovery_port = cli.discovery_port;
@@ -215,7 +243,10 @@ fn handle_update(check_only: bool) -> anyhow::Result<()> {
         if let Some(latest) = releases.first() {
             let latest_version = latest.version.trim_start_matches('v');
             if latest_version != current_version {
-                println!("New version available: {} -> {}", current_version, latest_version);
+                println!(
+                    "New version available: {} -> {}",
+                    current_version, latest_version
+                );
                 println!("Run `egregore update` to install");
             } else {
                 println!("Already up to date");
@@ -319,7 +350,12 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::warn!(error = %e, "failed to increment generation counter"),
     }
 
-    let engine = Arc::new(FeedEngine::new(store));
+    let engine = if config.schema_strict {
+        tracing::info!("strict schema validation enabled");
+        Arc::new(FeedEngine::new_strict(store))
+    } else {
+        Arc::new(FeedEngine::new(store))
+    };
 
     // Start hook executor if configured
     if let Some(executor) = HookExecutor::new(config.hooks.clone()) {
@@ -341,7 +377,10 @@ async fn main() -> anyhow::Result<()> {
                 match hook_rx.recv().await {
                     Ok(msg) => executor.execute(&msg).await,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "hook receiver lagged, some messages were not processed");
+                        tracing::warn!(
+                            skipped = n,
+                            "hook receiver lagged, some messages were not processed"
+                        );
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -349,20 +388,37 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Build API
-    let state = api::AppState {
-        identity: identity.clone(),
-        engine: engine.clone(),
-        config: Arc::new(config.clone()),
-        started_at: std::time::Instant::now(),
-        mcp_registry: api::mcp_registry::create_registry(),
-    };
-    let app = api::router(state);
+    // Build and optionally start API server.
+    let api_server = if config.api_enabled {
+        let state = api::AppState {
+            identity: identity.clone(),
+            engine: engine.clone(),
+            config: Arc::new(config.clone()),
+            started_at: std::time::Instant::now(),
+            mcp_registry: api::mcp_registry::create_registry(),
+        };
+        let app = if config.mcp_enabled {
+            api::router(state)
+        } else {
+            api::router_with_mcp(state, false)
+        };
 
-    // Start HTTP server (localhost only)
-    let addr = format!("127.0.0.1:{}", config.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!(addr = %addr, "HTTP API listening");
+        // Start HTTP server (localhost only)
+        let addr = format!("127.0.0.1:{}", config.port);
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        tracing::info!(
+            addr = %addr,
+            mcp_enabled = config.mcp_enabled,
+            "HTTP API listening"
+        );
+        Some((listener, app))
+    } else {
+        tracing::info!("HTTP API disabled (--no-api or api_enabled=false)");
+        if config.mcp_enabled {
+            tracing::warn!("mcp_enabled=true ignored because API is disabled");
+        }
+        None
+    };
 
     // Create connection registry for push-based replication
     let registry = if config.push_enabled {
@@ -401,12 +457,9 @@ async fn main() -> anyhow::Result<()> {
             push_enabled: server_push_enabled,
             max_persistent_connections: server_max_conns,
         };
-        if let Err(e) = gossip::server::run_server_with_push(
-            server_config,
-            gossip_engine,
-            server_registry,
-        )
-        .await
+        if let Err(e) =
+            gossip::server::run_server_with_push(server_config, gossip_engine, server_registry)
+                .await
         {
             tracing::error!(error = %e, "gossip server failed");
         }
@@ -506,24 +559,32 @@ async fn main() -> anyhow::Result<()> {
     // Clone registry for shutdown handler
     let shutdown_registry = registry.clone();
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tokio::signal::ctrl_c().await.ok();
-            tracing::info!("shutting down");
+    if let Some((listener, app)) = api_server {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                tokio::signal::ctrl_c().await.ok();
+                tracing::info!("shutting down");
 
-            // Gracefully close all persistent connections
-            if let Some(ref reg) = shutdown_registry {
-                reg.close_all().await;
-            }
-        })
-        .await?;
+                // Gracefully close all persistent connections
+                if let Some(ref reg) = shutdown_registry {
+                    reg.close_all().await;
+                }
+            })
+            .await?;
+    } else {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("shutting down");
+        if let Some(ref reg) = shutdown_registry {
+            reg.close_all().await;
+        }
+    }
 
     Ok(())
 }
 
 fn load_encrypted_identity(identity_dir: &std::path::Path) -> anyhow::Result<Identity> {
-    use egregore::identity::encryption;
     use ed25519_dalek::SigningKey;
+    use egregore::identity::encryption;
 
     let encrypted_path = identity_dir.join("secret.key.enc");
 

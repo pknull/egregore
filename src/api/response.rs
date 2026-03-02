@@ -48,7 +48,11 @@ pub fn ok_with_metadata<T: Serialize>(data: T, metadata: ApiMetadata) -> Json<Ap
     })
 }
 
-pub fn err<T: Serialize>(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiResponse<T>>) {
+pub fn err<T: Serialize>(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<ApiResponse<T>>) {
     (
         status,
         Json(ApiResponse {
@@ -77,9 +81,11 @@ pub fn from_error(e: egregore::error::EgreError) -> Response {
         egregore::error::EgreError::SignatureInvalid => {
             (StatusCode::BAD_REQUEST, "SIGNATURE_INVALID", e.to_string())
         }
-        egregore::error::EgreError::Serialization(_) => {
-            (StatusCode::BAD_REQUEST, "SERIALIZATION_ERROR", e.to_string())
-        }
+        egregore::error::EgreError::Serialization(_) => (
+            StatusCode::BAD_REQUEST,
+            "SERIALIZATION_ERROR",
+            e.to_string(),
+        ),
         _ => {
             tracing::warn!(error = %e, "internal error in API handler");
             (

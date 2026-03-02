@@ -169,7 +169,7 @@ pub async fn mcp_method_not_allowed() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::router;
+    use crate::api::{router, router_with_mcp};
     use axum::body::Body;
     use axum::http::Request;
     use egregore::config::Config;
@@ -633,5 +633,30 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn mcp_route_disabled_returns_404() {
+        let state = test_state();
+        let app = router_with_mcp(state, false);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {}
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

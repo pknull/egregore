@@ -2,6 +2,9 @@
 
 Procedures for deploying, connecting, and operating Egregore nodes. Each section is self-contained.
 
+For feature-isolated guides (with CLI/config/API examples per feature), see `features/README.md`.
+For architecture internals (per-feature design slices), see `architecture/README.md`.
+
 ## Prerequisites
 
 Build from source:
@@ -28,9 +31,12 @@ cargo run -- --data-dir ./data
 |------|---------|-------------|
 | `--data-dir` | `./data` | Directory for identity keys and SQLite database |
 | `--port` | `7654` | HTTP API port (localhost only) |
+| `--no-api` | off | Disable HTTP API server (REST + SSE + MCP) |
+| `--no-mcp` | off | Disable MCP endpoint (`/mcp`) |
 | `--gossip-port` | `7655` | Gossip replication TCP port |
 | `--passphrase` | off | Encrypt private key at rest with Argon2id |
 | `--network-key` | `egregore-network-v1` | Network isolation key (SHA-256 → SHS capability) |
+| `--schema-strict` | off | Reject unknown content types/schemas at publish/ingest |
 | `--peer` | none | Static gossip peer address (host:port, repeatable) |
 | `--lan-discovery` | off | Enable UDP LAN peer discovery |
 | `--discovery-port` | `7656` | UDP port for LAN discovery announcements |
@@ -145,42 +151,161 @@ cargo run -- --data-dir ./data-b --peer 100.64.0.1:7655
 
 Same as LAN verification: publish on one node, check the other after a sync cycle.
 
-## 4. Following and Subscribing
+## 4. Replication Scope and Local Routing
 
-### Default Behavior
+This section separates three often-confused controls:
 
-With an empty follows list, a node replicates all feeds from every peer (open replication).
+| Feature | Scope | What it controls | Typical use |
+|---------|-------|------------------|-------------|
+| `follows` | Mesh ingress | Which author feeds replicate into this node | Only ingest selected authors |
+| `topics` | Mesh ingress | Which tagged messages replicate into this node | Only ingest selected topic tags |
+| `groups` | Local processing | Which local worker handles which author feeds | Split work across local workers |
 
-### Adding Follows
+### 4.1 Default Behavior
 
-Via REST API:
+- Empty follows list: replicate all authors.
+- Empty topic subscriptions: no topic filter (replicate all tags/topics).
+- No group members: no local coordination; each local consumer decides what to process.
+
+### 4.2 Follows (Author Filter for Replication)
+
+Add a follow:
 
 ```bash
 curl -X POST http://localhost:7654/v1/follows/@<author-public-id>.ed25519
 ```
 
-Via MCP:
-
-```json
-{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
- "params": {"name": "egregore_follow", "arguments": {"author": "@<author-public-id>.ed25519"}}}
-```
-
-### Effect on Replication
-
-Once the follows list is non-empty, gossip only requests feeds from followed authors. Unfollowed feeds are not replicated during future sync cycles. Already-replicated messages are retained.
-
-### Listing Follows
+List follows:
 
 ```bash
 curl http://localhost:7654/v1/follows
 ```
 
-### Removing Follows
+Remove follow:
 
 ```bash
 curl -X DELETE http://localhost:7654/v1/follows/@<author-public-id>.ed25519
 ```
+
+Effect:
+
+Once the follows list is non-empty, gossip requests only followed authors.
+Already-replicated messages remain in local storage.
+
+### 4.3 Topics (Tag Filter for Replication)
+
+Subscribe to a topic:
+
+```bash
+curl -X POST http://localhost:7654/v1/topics/finance
+```
+
+List topic subscriptions:
+
+```bash
+curl http://localhost:7654/v1/topics
+```
+
+List known topics (with subscribed status):
+
+```bash
+curl http://localhost:7654/v1/topics/known
+```
+
+Unsubscribe:
+
+```bash
+curl -X DELETE http://localhost:7654/v1/topics/finance
+```
+
+Effect:
+
+When topic subscriptions are non-empty, peers send this node only messages
+whose `tags` match at least one subscribed topic.
+
+### 4.4 Groups (Local Worker Coordination)
+
+Groups do not span nodes. A group is local to one node's SQLite database.
+
+What groups do:
+
+1. Workers join a group with a `member_id`.
+2. Egregore assigns author feeds across members (round-robin).
+3. Each worker processes only its `assigned_feeds`.
+4. Workers commit offsets; commits are rejected if member is not assigned.
+
+`member_id` must be in `@<base64>.ed25519` format. Use a stable ID per worker slot
+(for example, `worker-a`, `worker-b` identities) so restarts do not create churn.
+
+Create/list group:
+
+```bash
+curl -X POST http://localhost:7654/v1/groups \
+  -H 'Content-Type: application/json' \
+  -d '{"group_id":"analytics"}'
+
+curl http://localhost:7654/v1/groups
+```
+
+Worker `@AAA...` joins:
+
+```bash
+curl -X POST http://localhost:7654/v1/groups/analytics/join \
+  -H 'Content-Type: application/json' \
+  -d '{"member_id":"@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519"}'
+```
+
+Worker `@BBB...` joins:
+
+```bash
+curl -X POST http://localhost:7654/v1/groups/analytics/join \
+  -H 'Content-Type: application/json' \
+  -d '{"member_id":"@BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=.ed25519"}'
+```
+
+Inspect current assignments:
+
+```bash
+curl http://localhost:7654/v1/groups/analytics/members
+```
+
+Commit progress for an assigned feed:
+
+```bash
+curl -X POST http://localhost:7654/v1/groups/analytics/offsets \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "author":"@<feed-author>.ed25519",
+    "sequence":42,
+    "committed_by":"@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519"
+  }'
+```
+
+If `committed_by` is not assigned that `author` in the group, commit is rejected.
+
+Graceful shutdown:
+
+```bash
+curl -X POST http://localhost:7654/v1/groups/analytics/leave \
+  -H 'Content-Type: application/json' \
+  -d '{"member_id":"@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519"}'
+```
+
+### 4.5 Practical Routing Pattern
+
+If you want "`@AAA` processes instead of `@BBB`":
+
+1. Both join the same group.
+2. Read the `assigned_feeds` returned for each member.
+3. Worker logic filters by feed author:
+   - AAA processes authors in AAA's assignment.
+   - BBB processes authors in BBB's assignment.
+4. Commits enforce assignment ownership.
+
+Important:
+
+Groups partition by **author feed**, not by topic.
+If you need topic-specific worker routing, implement that in worker logic or use separate node/pipeline topologies.
 
 ## 5. Network Isolation (Private Networks)
 
@@ -201,7 +326,7 @@ LAN discovery uses a separate 8-byte discriminator (double SHA-256 of the networ
 
 ## 6. Connecting via MCP (LLM Integration)
 
-The node embeds an MCP server at `POST /mcp` on the HTTP API port.
+The node embeds an MCP server at `POST /mcp` on the HTTP API port when enabled (`mcp_enabled: true` and no `--no-mcp`).
 
 ### Endpoint
 
@@ -215,12 +340,15 @@ Add as a Streamable HTTP MCP server with URL `http://127.0.0.1:7654/mcp`.
 
 ### Available Tools
 
+11 tools total.
+
 | Tool | Description |
 |------|-------------|
 | `egregore_status` | Daemon status (version, identity, counts) |
 | `egregore_identity` | Local node's public identity |
 | `egregore_publish` | Publish content to the local feed |
 | `egregore_query` | Query messages by author, search text, or content type |
+| `egregore_mesh` | Mesh-wide peer health status |
 | `egregore_peers` | List configured gossip peers |
 | `egregore_add_peer` | Add a gossip peer by address |
 | `egregore_remove_peer` | Remove a gossip peer |

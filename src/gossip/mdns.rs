@@ -56,9 +56,12 @@ pub async fn run_mdns_discovery(
 
     // Create service info for advertising
     let instance_name = format!("egregore-{}", &our_public_id_short);
-    let host_name = format!("{}.local.", hostname::get()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "egregore".to_string()));
+    let host_name = format!(
+        "{}.local.",
+        hostname::get()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "egregore".to_string())
+    );
 
     let mut properties = HashMap::new();
     properties.insert("id".to_string(), our_public_id_short.clone());
@@ -69,17 +72,19 @@ pub async fn run_mdns_discovery(
         service_type,
         &instance_name,
         &host_name,
-        "",  // Let mdns-sd determine our IP
+        "", // Let mdns-sd determine our IP
         config.gossip_port,
         properties,
-    ).map_err(|e| crate::error::EgreError::Config {
+    )
+    .map_err(|e| crate::error::EgreError::Config {
         reason: format!("failed to create mDNS service info: {e}"),
     })?;
 
     // Register our service
-    mdns.register(service_info).map_err(|e| crate::error::EgreError::Config {
-        reason: format!("failed to register mDNS service: {e}"),
-    })?;
+    mdns.register(service_info)
+        .map_err(|e| crate::error::EgreError::Config {
+            reason: format!("failed to register mDNS service: {e}"),
+        })?;
 
     tracing::info!(
         service_type = %service_type,
@@ -89,9 +94,11 @@ pub async fn run_mdns_discovery(
     );
 
     // Browse for peers
-    let receiver = mdns.browse(service_type).map_err(|e| crate::error::EgreError::Config {
-        reason: format!("failed to browse mDNS services: {e}"),
-    })?;
+    let receiver = mdns
+        .browse(service_type)
+        .map_err(|e| crate::error::EgreError::Config {
+            reason: format!("failed to browse mDNS services: {e}"),
+        })?;
 
     // Process discovery events
     let network_key = config.network_key_bytes();
@@ -102,7 +109,8 @@ pub async fn run_mdns_discovery(
         engine,
         network_key,
         identity,
-    ).await;
+    )
+    .await;
 
     // Keep the daemon alive (it runs in background threads)
     // This function should not return under normal operation
@@ -114,9 +122,7 @@ pub async fn run_mdns_discovery(
 /// Truncate a public ID for display/instance naming.
 fn truncate_id(id: &str, max_len: usize) -> String {
     // Remove @ prefix and .ed25519 suffix, then truncate
-    let clean = id
-        .trim_start_matches('@')
-        .trim_end_matches(".ed25519");
+    let clean = id.trim_start_matches('@').trim_end_matches(".ed25519");
     if clean.len() <= max_len {
         clean.to_string()
     } else {
@@ -137,31 +143,30 @@ async fn process_mdns_events(
 
     loop {
         match receiver.recv_async().await {
-            Ok(event) => {
-                match event {
-                    ServiceEvent::ServiceResolved(info) => {
-                        handle_resolved_service(
-                            &info,
-                            &our_discriminator_hex,
-                            &our_public_id,
-                            &engine,
-                            &network_key,
-                            &identity,
-                            &mut recent_peers,
-                        ).await;
-                    }
-                    ServiceEvent::ServiceRemoved(_, full_name) => {
-                        tracing::debug!(service = %full_name, "mDNS peer removed");
-                    }
-                    ServiceEvent::SearchStarted(_) => {
-                        tracing::debug!("mDNS search started");
-                    }
-                    ServiceEvent::SearchStopped(_) => {
-                        tracing::debug!("mDNS search stopped");
-                    }
-                    _ => {}
+            Ok(event) => match event {
+                ServiceEvent::ServiceResolved(info) => {
+                    handle_resolved_service(
+                        &info,
+                        &our_discriminator_hex,
+                        &our_public_id,
+                        &engine,
+                        &network_key,
+                        &identity,
+                        &mut recent_peers,
+                    )
+                    .await;
                 }
-            }
+                ServiceEvent::ServiceRemoved(_, full_name) => {
+                    tracing::debug!(service = %full_name, "mDNS peer removed");
+                }
+                ServiceEvent::SearchStarted(_) => {
+                    tracing::debug!("mDNS search started");
+                }
+                ServiceEvent::SearchStopped(_) => {
+                    tracing::debug!("mDNS search stopped");
+                }
+                _ => {}
+            },
             Err(e) => {
                 tracing::warn!(error = %e, "mDNS receiver error");
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -233,16 +238,17 @@ fn parse_peer_info<'a>(
         return None;
     }
 
-    Some(PeerInfo { peer_id, port, addresses: addresses.clone() })
+    Some(PeerInfo {
+        peer_id,
+        port,
+        addresses: addresses.clone(),
+    })
 }
 
 /// Check if we should verify this peer address (rate limiting).
 ///
 /// Returns true if verification should proceed, false to skip.
-fn should_verify_peer(
-    peer_addr: &str,
-    recent_peers: &mut HashMap<String, Instant>,
-) -> bool {
+fn should_verify_peer(peer_addr: &str, recent_peers: &mut HashMap<String, Instant>) -> bool {
     let now = Instant::now();
 
     // Check cooldown
@@ -313,7 +319,8 @@ async fn handle_resolved_service(
         let handshake_result = tokio::time::timeout(
             HANDSHAKE_VERIFY_TIMEOUT,
             verify_peer_handshake(parsed_addr, *network_key, identity.clone()),
-        ).await;
+        )
+        .await;
 
         match handshake_result {
             Ok(Ok(())) => {
@@ -329,7 +336,8 @@ async fn handle_resolved_service(
                     if let Err(e) = eng.store().insert_address_peer(&addr_clone) {
                         tracing::warn!(error = %e, "failed to persist mDNS peer");
                     }
-                }).await;
+                })
+                .await;
 
                 // Only need one working address per service
                 break;

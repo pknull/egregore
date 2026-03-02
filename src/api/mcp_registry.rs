@@ -168,6 +168,9 @@ mod tests {
 
         let result = registry.validate("egregore_publish", &serde_json::json!({}));
         let err = result.unwrap_err();
-        assert!(err.message.contains("content"), "Should mention missing field");
+        assert!(
+            err.message.contains("content"),
+            "Should mention missing field"
+        );
     }
 }

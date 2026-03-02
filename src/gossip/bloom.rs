@@ -568,12 +568,18 @@ mod tests {
 
         assert_eq!(summaries.len(), 2);
 
-        let alice = summaries.iter().find(|s| s.author.0 == "@alice.ed25519").unwrap();
+        let alice = summaries
+            .iter()
+            .find(|s| s.author.0 == "@alice.ed25519")
+            .unwrap();
         assert_eq!(alice.latest_sequence, 3);
         assert!(alice.filter.might_contain("hash_a1"));
         assert!(alice.filter.might_contain("hash_a2"));
 
-        let bob = summaries.iter().find(|s| s.author.0 == "@bob.ed25519").unwrap();
+        let bob = summaries
+            .iter()
+            .find(|s| s.author.0 == "@bob.ed25519")
+            .unwrap();
         assert_eq!(bob.latest_sequence, 1);
         assert!(bob.filter.might_contain("hash_b1"));
     }

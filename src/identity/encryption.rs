@@ -34,13 +34,17 @@ pub fn encrypt_key(secret_bytes: &[u8; 32], passphrase: &str) -> Result<Encrypte
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
 
     let derived = derive_key(passphrase, &salt)?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&derived)
-        .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+    let cipher = ChaCha20Poly1305::new_from_slice(&derived).map_err(|e| EgreError::Crypto {
+        reason: e.to_string(),
+    })?;
 
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(nonce, secret_bytes.as_ref())
-        .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+    let ciphertext =
+        cipher
+            .encrypt(nonce, secret_bytes.as_ref())
+            .map_err(|e| EgreError::Crypto {
+                reason: e.to_string(),
+            })?;
 
     Ok(EncryptedKey {
         salt: salt.to_vec(),
@@ -52,8 +56,9 @@ pub fn encrypt_key(secret_bytes: &[u8; 32], passphrase: &str) -> Result<Encrypte
 /// Decrypt a secret key from encrypted form using a passphrase.
 pub fn decrypt_key(encrypted: &EncryptedKey, passphrase: &str) -> Result<[u8; 32]> {
     let derived = derive_key(passphrase, &encrypted.salt)?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&derived)
-        .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+    let cipher = ChaCha20Poly1305::new_from_slice(&derived).map_err(|e| EgreError::Crypto {
+        reason: e.to_string(),
+    })?;
 
     let nonce = Nonce::from_slice(&encrypted.nonce);
     let plaintext = cipher

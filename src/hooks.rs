@@ -45,14 +45,9 @@ const MIN_CLEANUP_DURATION: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookState {
     /// Hook execution is in progress.
-    Processing {
-        started_at: Instant,
-        attempt: u32,
-    },
+    Processing { started_at: Instant, attempt: u32 },
     /// Hook completed successfully.
-    Completed {
-        completed_at: Instant,
-    },
+    Completed { completed_at: Instant },
     /// Hook failed (may be retried).
     Failed {
         failed_at: Instant,
@@ -107,21 +102,18 @@ impl IdempotencyTracker {
 
     /// Check if hook should be executed. Returns Ok(attempt_number) if should execute,
     /// Err(reason) if should skip.
-    pub fn should_execute(
-        &self,
-        message_hash: &str,
-        hook: &HookEntry,
-    ) -> Result<u32, String> {
+    pub fn should_execute(&self, message_hash: &str, hook: &HookEntry) -> Result<u32, String> {
         let key = Self::key(message_hash, &hook.unique_id());
 
         match self.state.get(&key) {
             Some(entry) => {
                 let state = entry.value();
                 match state {
-                    HookState::Completed { .. } => {
-                        Err("already completed".to_string())
-                    }
-                    HookState::Processing { started_at, attempt } => {
+                    HookState::Completed { .. } => Err("already completed".to_string()),
+                    HookState::Processing {
+                        started_at,
+                        attempt,
+                    } => {
                         // Check for stale processing state (hook might have crashed)
                         let timeout_secs = hook.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
                         let stale_threshold = Duration::from_secs(timeout_secs * 2);
@@ -193,7 +185,10 @@ impl IdempotencyTracker {
 
     /// Get all states (for debugging/metrics).
     pub fn all_states(&self) -> HashMap<(String, String), HookState> {
-        self.state.iter().map(|e| (e.key().clone(), e.value().clone())).collect()
+        self.state
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect()
     }
 
     /// Count of tracked entries.
@@ -290,7 +285,9 @@ impl HookExecutor {
 
     /// Execute all configured hooks for a message in parallel.
     pub async fn execute(&self, msg: &Message) {
-        let futures: Vec<_> = self.hooks.iter()
+        let futures: Vec<_> = self
+            .hooks
+            .iter()
             .map(|hook| self.execute_one(hook, msg))
             .collect();
         futures::future::join_all(futures).await;
@@ -323,14 +320,20 @@ impl HookExecutor {
 
         // Execute subprocess if configured
         let subprocess_result = if let Some(ref path) = hook.on_message {
-            Some(self.execute_subprocess(msg, path.clone(), hook.timeout_secs, &hook.name).await)
+            Some(
+                self.execute_subprocess(msg, path.clone(), hook.timeout_secs, &hook.name)
+                    .await,
+            )
         } else {
             None
         };
 
         // Execute webhook if configured
         let webhook_result = if let Some(ref url) = hook.webhook_url {
-            Some(self.execute_webhook(msg, url, hook.timeout_secs, &hook.name).await)
+            Some(
+                self.execute_webhook(msg, url, hook.timeout_secs, &hook.name)
+                    .await,
+            )
         } else {
             None
         };
@@ -356,7 +359,8 @@ impl HookExecutor {
                     (_, Some(HookResult::Timeout)) => "webhook timeout".to_string(),
                     _ => "unknown error".to_string(),
                 };
-                self.tracker.mark_failed(&msg.hash, &hook_id, attempt, &error);
+                self.tracker
+                    .mark_failed(&msg.hash, &hook_id, attempt, &error);
                 tracing::warn!(
                     hook_name = ?hook.name,
                     message_hash = %msg.hash,
@@ -711,7 +715,13 @@ mod tests {
     fn hook_result_is_success() {
         assert!(HookResult::Success.is_success());
         assert!(!HookResult::Timeout.is_success());
-        assert!(!HookResult::Failed { error: "test".to_string() }.is_success());
-        assert!(!HookResult::Skipped { reason: "test".to_string() }.is_success());
+        assert!(!HookResult::Failed {
+            error: "test".to_string()
+        }
+        .is_success());
+        assert!(!HookResult::Skipped {
+            reason: "test".to_string()
+        }
+        .is_success());
     }
 }

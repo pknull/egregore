@@ -12,9 +12,7 @@ pub struct IdentityInfo {
     pub x25519_public: String,
 }
 
-pub async fn get_identity(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<IdentityInfo>> {
+pub async fn get_identity(State(state): State<AppState>) -> Json<ApiResponse<IdentityInfo>> {
     let identity = state.identity.clone();
     let pub_id = identity.public_id();
     let x25519 = identity.to_x25519_public_key();

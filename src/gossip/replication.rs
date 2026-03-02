@@ -47,7 +47,10 @@ pub enum GossipMessage {
     /// Request to establish a persistent connection
     Subscribe { mode: SubscriptionMode },
     /// Response to Subscribe request
-    SubscribeAck { accepted: bool, mode: SubscriptionMode },
+    SubscribeAck {
+        accepted: bool,
+        mode: SubscriptionMode,
+    },
     /// Grant credits for flow control (receiver has capacity)
     #[serde(rename = "credit_grant")]
     CreditGrant {
@@ -236,8 +239,7 @@ pub async fn replicate_as_server(
 
     // Extract peer's subscribed topics before processing
     let peer_topics: Vec<String> = if let GossipMessage::Have {
-        subscribed_topics,
-        ..
+        subscribed_topics, ..
     } = &client_have
     {
         subscribed_topics.clone()
@@ -536,10 +538,7 @@ async fn build_want_requests(
 }
 
 /// Receive messages from peer until Done, with per-frame and per-session limits.
-async fn receive_messages(
-    conn: &mut SecureConnection,
-    engine: &Arc<FeedEngine>,
-) -> Result<()> {
+async fn receive_messages(conn: &mut SecureConnection, engine: &Arc<FeedEngine>) -> Result<()> {
     tracing::debug!("waiting for messages from peer");
     let mut total_received: usize = 0;
     while let Some(data) = conn.recv().await? {
@@ -628,8 +627,12 @@ async fn handle_peer_wants(
                         if topics_clone.is_empty() {
                             eng.store().get_messages_after(&author, seq, BATCH_SIZE)
                         } else {
-                            eng.store()
-                                .get_messages_after_with_topics(&author, seq, BATCH_SIZE, &topics_clone)
+                            eng.store().get_messages_after_with_topics(
+                                &author,
+                                seq,
+                                BATCH_SIZE,
+                                &topics_clone,
+                            )
                         }
                     })
                     .await
@@ -700,7 +703,8 @@ async fn handle_peer_wants(
         } else {
             tracing::warn!(msg_type = ?msg, "expected Want but got something else");
         }
-        conn.send(&serde_json::to_vec(&GossipMessage::Done)?).await?;
+        conn.send(&serde_json::to_vec(&GossipMessage::Done)?)
+            .await?;
     } else {
         tracing::debug!("no Want message received");
     }
@@ -711,9 +715,7 @@ async fn handle_peer_wants(
 ///
 /// After replication completes, sends Subscribe request and waits for ack.
 /// Returns `true` if peer accepted persistent mode, `false` otherwise.
-pub async fn negotiate_persistent_mode_client(
-    conn: &mut SecureConnection,
-) -> Result<bool> {
+pub async fn negotiate_persistent_mode_client(conn: &mut SecureConnection) -> Result<bool> {
     tracing::debug!("requesting persistent mode");
     let subscribe = GossipMessage::Subscribe {
         mode: SubscriptionMode::Persistent,
@@ -721,35 +723,30 @@ pub async fn negotiate_persistent_mode_client(
     conn.send(&serde_json::to_vec(&subscribe)?).await?;
 
     // Wait for ack with timeout
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        conn.recv(),
-    ).await {
-        Ok(Ok(Some(data))) => {
-            match serde_json::from_slice::<GossipMessage>(&data) {
-                Ok(GossipMessage::SubscribeAck { accepted, mode }) => {
-                    if accepted && mode == SubscriptionMode::Persistent {
-                        tracing::info!("persistent mode accepted by peer");
-                        Ok(true)
-                    } else {
-                        tracing::debug!(
-                            accepted = accepted,
-                            mode = ?mode,
-                            "peer declined persistent mode"
-                        );
-                        Ok(false)
-                    }
-                }
-                Ok(other) => {
-                    tracing::warn!(msg = ?other, "unexpected response to Subscribe");
-                    Ok(false)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to parse Subscribe response");
+    match tokio::time::timeout(std::time::Duration::from_secs(5), conn.recv()).await {
+        Ok(Ok(Some(data))) => match serde_json::from_slice::<GossipMessage>(&data) {
+            Ok(GossipMessage::SubscribeAck { accepted, mode }) => {
+                if accepted && mode == SubscriptionMode::Persistent {
+                    tracing::info!("persistent mode accepted by peer");
+                    Ok(true)
+                } else {
+                    tracing::debug!(
+                        accepted = accepted,
+                        mode = ?mode,
+                        "peer declined persistent mode"
+                    );
                     Ok(false)
                 }
             }
-        }
+            Ok(other) => {
+                tracing::warn!(msg = ?other, "unexpected response to Subscribe");
+                Ok(false)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse Subscribe response");
+                Ok(false)
+            }
+        },
         Ok(Ok(None)) => {
             tracing::debug!("connection closed during Subscribe negotiation");
             Ok(false)
@@ -775,20 +772,20 @@ pub async fn negotiate_persistent_mode_server(
     at_capacity: bool,
 ) -> Result<bool> {
     // Check for Subscribe message with short timeout
-    match tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        conn.recv(),
-    ).await {
+    match tokio::time::timeout(std::time::Duration::from_millis(500), conn.recv()).await {
         Ok(Ok(Some(data))) => {
             match serde_json::from_slice::<GossipMessage>(&data) {
                 Ok(GossipMessage::Subscribe { mode }) => {
-                    let accept = push_enabled
-                        && !at_capacity
-                        && mode == SubscriptionMode::Persistent;
+                    let accept =
+                        push_enabled && !at_capacity && mode == SubscriptionMode::Persistent;
 
                     let ack = GossipMessage::SubscribeAck {
                         accepted: accept,
-                        mode: if accept { SubscriptionMode::Persistent } else { SubscriptionMode::PullOnly },
+                        mode: if accept {
+                            SubscriptionMode::Persistent
+                        } else {
+                            SubscriptionMode::PullOnly
+                        },
                     };
                     conn.send(&serde_json::to_vec(&ack)?).await?;
 

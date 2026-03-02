@@ -75,8 +75,8 @@ impl ClientHandshake {
     /// Step 1: Client sends ephemeral public key + HMAC.
     /// Returns 64 bytes: [ephemeral_pk(32) | hmac(32)]
     pub fn step1_hello(&self) -> [u8; 64] {
-        let mut mac =
-            <HmacSha256 as Mac>::new_from_slice(&self.network_key).expect("HMAC key length is valid");
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.network_key)
+            .expect("HMAC key length is valid");
         mac.update(self.ephemeral_public.as_bytes());
         let tag = mac.finalize().into_bytes();
 
@@ -99,8 +99,8 @@ impl ClientHandshake {
             X25519Public::from(pk_bytes)
         };
 
-        let mut mac =
-            <HmacSha256 as Mac>::new_from_slice(&self.network_key).expect("HMAC key length is valid");
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.network_key)
+            .expect("HMAC key length is valid");
         mac.update(server_eph_pk.as_bytes());
         mac.verify_slice(&server_hello[32..])
             .map_err(|_| EgreError::HandshakeFailed {
@@ -172,11 +172,12 @@ impl ClientHandshakeStep3 {
         let sig_bytes: [u8; 64] = payload[..64].try_into().unwrap();
         let server_pk_bytes: [u8; 32] = payload[64..96].try_into().unwrap();
 
-        let server_vk = ed25519_dalek::VerifyingKey::from_bytes(&server_pk_bytes).map_err(
-            |_| EgreError::HandshakeFailed {
-                reason: "invalid server public key".into(),
-            },
-        )?;
+        let server_vk =
+            ed25519_dalek::VerifyingKey::from_bytes(&server_pk_bytes).map_err(|_| {
+                EgreError::HandshakeFailed {
+                    reason: "invalid server public key".into(),
+                }
+            })?;
 
         // Verify server's signature: sign(network_key | client_eph_pk | hash(ab))
         let ab_hash = sha256(self.shared_ab.as_bytes());
@@ -225,10 +226,7 @@ impl ServerHandshake {
 
     /// Step 2: Server verifies client hello and sends its own hello.
     /// Returns 64 bytes: [server_eph_pk(32) | hmac(32)]
-    pub fn step2_hello(
-        self,
-        client_hello: &[u8; 64],
-    ) -> Result<(ServerHandshakeStep2, [u8; 64])> {
+    pub fn step2_hello(self, client_hello: &[u8; 64]) -> Result<(ServerHandshakeStep2, [u8; 64])> {
         // Parse and verify client ephemeral pk
         let client_eph_pk = {
             let mut pk_bytes = [0u8; 32];
@@ -236,8 +234,8 @@ impl ServerHandshake {
             X25519Public::from(pk_bytes)
         };
 
-        let mut mac =
-            <HmacSha256 as Mac>::new_from_slice(&self.network_key).expect("HMAC key length is valid");
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.network_key)
+            .expect("HMAC key length is valid");
         mac.update(client_eph_pk.as_bytes());
         mac.verify_slice(&client_hello[32..])
             .map_err(|_| EgreError::HandshakeFailed {
@@ -249,8 +247,8 @@ impl ServerHandshake {
         let shared_secret = derive_shared_key(&self.network_key, shared_ab.as_bytes());
 
         // Build server hello
-        let mut server_mac =
-            <HmacSha256 as Mac>::new_from_slice(&self.network_key).expect("HMAC key length is valid");
+        let mut server_mac = <HmacSha256 as Mac>::new_from_slice(&self.network_key)
+            .expect("HMAC key length is valid");
         server_mac.update(self.ephemeral_public.as_bytes());
         let tag = server_mac.finalize().into_bytes();
 
@@ -283,7 +281,10 @@ pub struct ServerHandshakeStep2 {
 
 impl ServerHandshakeStep2 {
     /// Step 3+4 (server side): Verify client auth, send server auth.
-    pub fn step3_verify_and_respond(self, client_auth: &[u8]) -> Result<(HandshakeOutcome, Vec<u8>)> {
+    pub fn step3_verify_and_respond(
+        self,
+        client_auth: &[u8],
+    ) -> Result<(HandshakeOutcome, Vec<u8>)> {
         // Decrypt client's auth
         let payload = decrypt_payload(&self.shared_secret, client_auth)?;
         if payload.len() != 96 {
@@ -295,11 +296,12 @@ impl ServerHandshakeStep2 {
         let sig_bytes: [u8; 64] = payload[..64].try_into().unwrap();
         let client_pk_bytes: [u8; 32] = payload[64..96].try_into().unwrap();
 
-        let client_vk = ed25519_dalek::VerifyingKey::from_bytes(&client_pk_bytes).map_err(
-            |_| EgreError::HandshakeFailed {
-                reason: "invalid client public key".into(),
-            },
-        )?;
+        let client_vk =
+            ed25519_dalek::VerifyingKey::from_bytes(&client_pk_bytes).map_err(|_| {
+                EgreError::HandshakeFailed {
+                    reason: "invalid client public key".into(),
+                }
+            })?;
 
         // Verify client's signature
         let ab_hash = sha256(self.shared_ab.as_bytes());
@@ -368,17 +370,21 @@ fn derive_shared_key(network_key: &[u8; 32], shared_secret: &[u8]) -> [u8; 32] {
 }
 
 fn encrypt_payload(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
-    let cipher = ChaCha20Poly1305::new_from_slice(key)
-        .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|e| EgreError::Crypto {
+        reason: e.to_string(),
+    })?;
     let nonce = Nonce::from([0u8; 12]); // Single-use key, zero nonce is safe
     cipher
         .encrypt(&nonce, plaintext)
-        .map_err(|e| EgreError::Crypto { reason: e.to_string() })
+        .map_err(|e| EgreError::Crypto {
+            reason: e.to_string(),
+        })
 }
 
 fn decrypt_payload(key: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>> {
-    let cipher = ChaCha20Poly1305::new_from_slice(key)
-        .map_err(|e| EgreError::Crypto { reason: e.to_string() })?;
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|e| EgreError::Crypto {
+        reason: e.to_string(),
+    })?;
     let nonce = Nonce::from([0u8; 12]);
     cipher
         .decrypt(&nonce, ciphertext)

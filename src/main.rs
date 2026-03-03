@@ -343,6 +343,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("{}", warning.trim());
     }
 
+    // Warn if discovery is enabled but gossip bound to loopback
+    if let Some(warning) = config.discovery_warning() {
+        tracing::warn!("{}", warning.trim());
+    }
+
     // Init feed store
     let store = FeedStore::open(&config.db_path())?;
 

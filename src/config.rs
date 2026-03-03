@@ -425,6 +425,47 @@ This warning will not appear once you set a custom key.
         ))
     }
 
+    /// Check if gossip_bind is a loopback address.
+    fn is_loopback_bind(&self) -> bool {
+        self.gossip_bind.starts_with("127.")
+            || self.gossip_bind == "localhost"
+            || self.gossip_bind.starts_with("::1")
+            || self.gossip_bind == "[::1]"
+    }
+
+    /// Check for configuration warnings at startup.
+    ///
+    /// Returns a warning if discovery is enabled but gossip_bind is loopback.
+    /// Discovered peers won't be able to connect back.
+    pub fn discovery_warning(&self) -> Option<String> {
+        let discovery_enabled = self.lan_discovery || self.mdns_discovery;
+
+        if !discovery_enabled || !self.is_loopback_bind() {
+            return None;
+        }
+
+        let methods: Vec<&str> = [
+            self.lan_discovery.then_some("lan_discovery"),
+            self.mdns_discovery.then_some("mdns_discovery"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        Some(format!(
+            r#"WARNING: Discovery enabled but gossip bound to loopback.
+
+You have enabled {} but gossip_bind is "{}".
+Discovered peers will not be able to connect to your node.
+
+To accept external connections, set:
+  gossip_bind: "0.0.0.0"
+"#,
+            methods.join(" and "),
+            self.gossip_bind
+        ))
+    }
+
     /// 8-byte discriminator derived from the network key.
     /// Double-hashed (SHA-256 of SHA-256) so broadcasting it doesn't
     /// reveal the SHS network key itself.
@@ -615,5 +656,51 @@ mod tests {
     fn default_gossip_bind_is_loopback() {
         let config = Config::default();
         assert_eq!(config.gossip_bind, "127.0.0.1");
+    }
+
+    #[test]
+    fn discovery_warning_when_lan_discovery_with_loopback() {
+        let config = Config {
+            lan_discovery: true,
+            gossip_bind: "127.0.0.1".to_string(),
+            ..Config::default()
+        };
+        let warning = config.discovery_warning();
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("lan_discovery"));
+    }
+
+    #[test]
+    fn discovery_warning_when_mdns_discovery_with_loopback() {
+        let config = Config {
+            mdns_discovery: true,
+            gossip_bind: "127.0.0.1".to_string(),
+            ..Config::default()
+        };
+        let warning = config.discovery_warning();
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("mdns_discovery"));
+    }
+
+    #[test]
+    fn no_discovery_warning_with_external_bind() {
+        let config = Config {
+            lan_discovery: true,
+            mdns_discovery: true,
+            gossip_bind: "0.0.0.0".to_string(),
+            ..Config::default()
+        };
+        assert!(config.discovery_warning().is_none());
+    }
+
+    #[test]
+    fn no_discovery_warning_when_discovery_disabled() {
+        let config = Config {
+            lan_discovery: false,
+            mdns_discovery: false,
+            gossip_bind: "127.0.0.1".to_string(),
+            ..Config::default()
+        };
+        assert!(config.discovery_warning().is_none());
     }
 }

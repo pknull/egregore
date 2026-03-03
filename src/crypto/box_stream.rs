@@ -334,8 +334,8 @@ mod tests {
         let mut seen_frames: HashSet<Vec<u8>> = HashSet::new();
         let plaintext = b"repeated payload";
 
-        // Encrypt 1000 identical messages
-        for i in 0..1000 {
+        // Encrypt 100,000 identical messages to prove nonce uniqueness at scale
+        for i in 0..100_000 {
             let frame = writer.encrypt_frame(plaintext).unwrap();
             assert!(
                 seen_frames.insert(frame),

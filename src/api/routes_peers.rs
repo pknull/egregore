@@ -278,3 +278,72 @@ pub async fn build_status(state: &AppState) -> StatusInfo {
 pub async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
     response::ok(build_status(&state).await).into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subsystem_health_is_healthy() {
+        assert!(SubsystemHealth::Healthy.is_healthy());
+        assert!(!SubsystemHealth::Degraded {
+            error: "test".to_string()
+        }
+        .is_healthy());
+    }
+
+    #[test]
+    fn healthy_status_omits_health_field() {
+        let status = StatusInfo {
+            version: "1.0.0".to_string(),
+            identity: "@test.ed25519".to_string(),
+            port: 7654,
+            gossip_port: 7655,
+            peer_count: 0,
+            message_count: 0,
+            feed_count: 0,
+            follow_count: 0,
+            uptime_secs: 0,
+            health: None,
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert!(json.get("health").is_none(), "healthy status should omit health field");
+    }
+
+    #[test]
+    fn degraded_status_includes_health_field() {
+        let status = StatusInfo {
+            version: "1.0.0".to_string(),
+            identity: "@test.ed25519".to_string(),
+            port: 7654,
+            gossip_port: 7655,
+            peer_count: 0,
+            message_count: 0,
+            feed_count: 0,
+            follow_count: 0,
+            uptime_secs: 0,
+            health: Some(HealthIndicators {
+                healthy: false,
+                store: SubsystemHealth::Degraded {
+                    error: "db locked".to_string(),
+                },
+            }),
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        let health = json.get("health").expect("degraded status should include health field");
+        assert_eq!(health["healthy"], false);
+        assert_eq!(health["store"]["degraded"]["error"], "db locked");
+    }
+
+    #[test]
+    fn subsystem_health_serialization() {
+        let healthy = serde_json::to_value(SubsystemHealth::Healthy).unwrap();
+        assert_eq!(healthy, "healthy");
+
+        let degraded = serde_json::to_value(SubsystemHealth::Degraded {
+            error: "test error".to_string(),
+        })
+        .unwrap();
+        assert_eq!(degraded["degraded"]["error"], "test error");
+    }
+}

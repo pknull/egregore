@@ -10,7 +10,7 @@ use serde::Serialize;
 use egregore::gossip::health::{PeerHealthStatus, DIRECT_OBSERVATION_MARKER};
 
 use super::response;
-use super::routes_peers::{build_status, StatusInfo};
+use super::routes_peers::{build_status, HealthIndicators, StatusInfo, SubsystemHealth};
 use super::AppState;
 
 /// Mesh-wide health response combining local status with peer observations.
@@ -18,6 +18,9 @@ use super::AppState;
 pub struct MeshHealthResponse {
     pub local: StatusInfo,
     pub peers: Vec<MeshPeerInfo>,
+    /// Health indicators for mesh query. Absent means healthy (backward compat).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<HealthIndicators>,
 }
 
 /// Individual peer health info in mesh view.
@@ -41,9 +44,29 @@ pub async fn build_mesh_health(state: &AppState) -> MeshHealthResponse {
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || engine.store().get_all_peer_health()).await;
 
-    let health_records = result
-        .unwrap_or_else(|_| Ok(Vec::new()))
-        .unwrap_or_default();
+    // Track errors for health reporting instead of silently flattening
+    let (health_records, store_health) = match result {
+        Ok(Ok(records)) => (records, SubsystemHealth::Healthy),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "mesh health query failed: store error");
+            (
+                Vec::new(),
+                SubsystemHealth::Degraded {
+                    error: format!("peer_health: {}", e),
+                },
+            )
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "mesh health query failed: task join error");
+            (
+                Vec::new(),
+                SubsystemHealth::Degraded {
+                    error: format!("task_join: {}", e),
+                },
+            )
+        }
+    };
+
     let now = Utc::now();
 
     // Group by peer_id, pick best observation per peer
@@ -85,12 +108,87 @@ pub async fn build_mesh_health(state: &AppState) -> MeshHealthResponse {
 
     let peers: Vec<MeshPeerInfo> = peer_map.into_values().collect();
 
+    // Only include health field when degraded (backward compat)
+    let health = if store_health.is_healthy() {
+        None
+    } else {
+        Some(HealthIndicators {
+            healthy: false,
+            store: store_health,
+        })
+    };
+
     MeshHealthResponse {
         local: local_status,
         peers,
+        health,
     }
 }
 
 pub async fn get_mesh(State(state): State<AppState>) -> impl IntoResponse {
     response::ok(build_mesh_health(&state).await).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn healthy_mesh_response_omits_health_field() {
+        let response = MeshHealthResponse {
+            local: StatusInfo {
+                version: "1.0.0".to_string(),
+                identity: "@test.ed25519".to_string(),
+                port: 7654,
+                gossip_port: 7655,
+                peer_count: 0,
+                message_count: 0,
+                feed_count: 0,
+                follow_count: 0,
+                uptime_secs: 0,
+                health: None,
+            },
+            peers: vec![],
+            health: None,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(
+            json.get("health").is_none(),
+            "healthy mesh should omit health field"
+        );
+    }
+
+    #[test]
+    fn degraded_mesh_response_includes_health_field() {
+        let response = MeshHealthResponse {
+            local: StatusInfo {
+                version: "1.0.0".to_string(),
+                identity: "@test.ed25519".to_string(),
+                port: 7654,
+                gossip_port: 7655,
+                peer_count: 0,
+                message_count: 0,
+                feed_count: 0,
+                follow_count: 0,
+                uptime_secs: 0,
+                health: None,
+            },
+            peers: vec![],
+            health: Some(HealthIndicators {
+                healthy: false,
+                store: SubsystemHealth::Degraded {
+                    error: "peer_health: connection refused".to_string(),
+                },
+            }),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        let health = json
+            .get("health")
+            .expect("degraded mesh should include health field");
+        assert_eq!(health["healthy"], false);
+        assert_eq!(
+            health["store"]["degraded"]["error"],
+            "peer_health: connection refused"
+        );
+    }
 }

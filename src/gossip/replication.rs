@@ -111,7 +111,7 @@ pub struct ReplicationConfig {
 
 impl ReplicationConfig {
     /// Check if we want messages from this author.
-    fn wants_author(&self, author: &PublicId) -> bool {
+    pub(crate) fn wants_author(&self, author: &PublicId) -> bool {
         match &self.follows {
             Some(follows) => follows.contains(author),
             None => true,

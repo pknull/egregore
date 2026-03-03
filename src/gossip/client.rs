@@ -271,12 +271,29 @@ pub(crate) async fn build_replication_config(engine: &Arc<FeedEngine>) -> Replic
             }
         }
         Ok((Err(e), _)) => {
-            tracing::warn!(error = %e, "failed to read follows, replicating all feeds");
-            ReplicationConfig::default()
+            // FAIL-CLOSED: Don't widen scope on error. Use empty follows set.
+            // This prevents unintended broad replication when storage fails.
+            tracing::error!(
+                error = %e,
+                "failed to read follows, using fail-closed policy (no replication)"
+            );
+            ReplicationConfig {
+                follows: Some(std::collections::HashSet::new()), // Empty = replicate no one
+                topics: None,
+                bloom_config: BloomConfig::default(),
+            }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "config task failed, replicating all feeds");
-            ReplicationConfig::default()
+            // FAIL-CLOSED: Task panic should not expand scope.
+            tracing::error!(
+                error = %e,
+                "replication config task failed, using fail-closed policy (no replication)"
+            );
+            ReplicationConfig {
+                follows: Some(std::collections::HashSet::new()), // Empty = replicate no one
+                topics: None,
+                bloom_config: BloomConfig::default(),
+            }
         }
     }
 }
@@ -429,5 +446,76 @@ async fn update_peer_health(engine: &Arc<FeedEngine>, peer_addr: &str, remote_id
     .await
     {
         tracing::warn!(error = %e, "peer sync update task failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::PublicId;
+
+    /// Verify that a ReplicationConfig with empty follows set rejects all authors.
+    /// This is the fail-closed behavior - replicate no one.
+    #[test]
+    fn fail_closed_config_rejects_all_authors() {
+        let config = ReplicationConfig {
+            follows: Some(std::collections::HashSet::new()), // Empty = no one
+            topics: None,
+            bloom_config: BloomConfig::default(),
+        };
+
+        // Should reject any author since follows is empty
+        let test_author = PublicId("@TEST123.ed25519".to_string());
+        assert!(
+            !config.wants_author(&test_author),
+            "fail-closed config should reject all authors"
+        );
+    }
+
+    /// Verify that default config (None follows) accepts all authors.
+    /// This is fail-open behavior we want to avoid on errors.
+    #[test]
+    fn default_config_accepts_all_authors() {
+        let config = ReplicationConfig::default();
+
+        // Should accept any author since follows is None
+        let test_author = PublicId("@TEST123.ed25519".to_string());
+        assert!(
+            config.wants_author(&test_author),
+            "default config should accept all authors"
+        );
+    }
+
+    /// Verify distinction between None (all) and Some(empty) (none).
+    #[test]
+    fn none_vs_empty_follows_semantics() {
+        let test_author = PublicId("@TEST123.ed25519".to_string());
+
+        // None means "replicate all" (no filter)
+        let all_config = ReplicationConfig {
+            follows: None,
+            topics: None,
+            bloom_config: BloomConfig::default(),
+        };
+        assert!(all_config.wants_author(&test_author));
+
+        // Some(empty) means "replicate none" (filter, but empty list)
+        let none_config = ReplicationConfig {
+            follows: Some(std::collections::HashSet::new()),
+            topics: None,
+            bloom_config: BloomConfig::default(),
+        };
+        assert!(!none_config.wants_author(&test_author));
+
+        // Some with entries means "replicate only these"
+        let mut follows = std::collections::HashSet::new();
+        follows.insert(test_author.clone());
+        let selective_config = ReplicationConfig {
+            follows: Some(follows),
+            topics: None,
+            bloom_config: BloomConfig::default(),
+        };
+        assert!(selective_config.wants_author(&test_author));
+        assert!(!selective_config.wants_author(&PublicId("@OTHER.ed25519".to_string())));
     }
 }

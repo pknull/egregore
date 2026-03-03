@@ -32,6 +32,14 @@ gossip_interval_secs: 300
 # Default: egregore-network-v1
 network_key: egregore-network-v1
 
+# IP address to bind gossip server to.
+# Default: 127.0.0.1 (loopback only - secure by default)
+#
+# Set to 0.0.0.0 to accept connections from external peers.
+# When accepting external connections, set a unique network_key
+# to avoid joining the public default network.
+gossip_bind: "127.0.0.1"
+
 # Enable strict schema validation.
 # When true, messages with unknown content type/schema are rejected at publish/ingest.
 # Default: false

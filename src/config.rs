@@ -148,6 +148,16 @@ pub struct Config {
     /// Default is loopback-only for security.
     #[serde(default = "default_gossip_bind")]
     pub gossip_bind: String,
+    /// Allow startup with insecure default combinations.
+    ///
+    /// When false (default), startup fails if using the default network key
+    /// with an externally reachable gossip bind. This prevents accidental
+    /// exposure to the public mesh.
+    ///
+    /// Set to true only if you intentionally want to join the public
+    /// egregore mesh using the default network key.
+    #[serde(default)]
+    pub allow_insecure_defaults: bool,
 }
 
 fn default_retention_interval_secs() -> u64 {
@@ -226,6 +236,7 @@ impl Default for Config {
             retention_interval_secs: DEFAULT_RETENTION_INTERVAL_SECS,
             tombstone_max_age_secs: DEFAULT_TOMBSTONE_MAX_AGE_SECS,
             gossip_bind: default_gossip_bind(),
+            allow_insecure_defaults: false,
         }
     }
 }
@@ -466,6 +477,61 @@ To accept external connections, set:
         ))
     }
 
+    /// Validate security configuration at startup.
+    ///
+    /// Returns an error if using an insecure configuration without explicit override:
+    /// - Default network key with externally reachable gossip bind
+    ///
+    /// This prevents accidental exposure to the public mesh.
+    pub fn validate_security(&self) -> Result<(), String> {
+        // Safe if using custom network key
+        if !self.is_default_network_key() {
+            return Ok(());
+        }
+
+        // Safe if binding to loopback only
+        if self.is_loopback_bind() {
+            return Ok(());
+        }
+
+        // Unsafe combination: default key + external bind
+        // Allow if explicitly overridden
+        if self.allow_insecure_defaults {
+            return Ok(());
+        }
+
+        Err(format!(
+            r#"ERROR: Insecure configuration detected.
+
+Your node is configured to:
+  - Use the default network key ("egregore-network-v1")
+  - Bind gossip to external interface ("{}")
+
+This exposes your node to the public egregore mesh where any
+peer using the default key can connect and replicate data.
+
+To fix this, choose ONE of the following:
+
+OPTION 1: Use a private network key (recommended)
+  Add to your config.yaml:
+    network_key: "my-private-network-{}"
+
+OPTION 2: Keep loopback-only binding (recommended for dev)
+  Add to your config.yaml:
+    gossip_bind: "127.0.0.1"
+
+OPTION 3: Explicitly allow public mesh (not recommended)
+  Add to your config.yaml:
+    allow_insecure_defaults: true
+
+  WARNING: This joins the public mesh. Only use if you
+  intentionally want to federate with unknown peers.
+"#,
+            self.gossip_bind,
+            chrono::Utc::now().format("%Y%m%d")
+        ))
+    }
+
     /// 8-byte discriminator derived from the network key.
     /// Double-hashed (SHA-256 of SHA-256) so broadcasting it doesn't
     /// reveal the SHS network key itself.
@@ -702,5 +768,64 @@ mod tests {
             ..Config::default()
         };
         assert!(config.discovery_warning().is_none());
+    }
+
+    // ============ SECURITY VALIDATION TESTS ============
+
+    #[test]
+    fn validate_security_passes_with_custom_key() {
+        let config = Config {
+            network_key: "my-private-network".to_string(),
+            gossip_bind: "0.0.0.0".to_string(), // External bind is OK with custom key
+            ..Config::default()
+        };
+        assert!(config.validate_security().is_ok());
+    }
+
+    #[test]
+    fn validate_security_passes_with_loopback_bind() {
+        let config = Config::default(); // Uses default key + loopback bind
+        assert!(config.validate_security().is_ok());
+    }
+
+    #[test]
+    fn validate_security_fails_with_default_key_and_external_bind() {
+        let config = Config {
+            gossip_bind: "0.0.0.0".to_string(),
+            ..Config::default()
+        };
+        let result = config.validate_security();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Insecure configuration"));
+        assert!(err.contains("network_key"));
+        assert!(err.contains("gossip_bind"));
+    }
+
+    #[test]
+    fn validate_security_passes_with_explicit_override() {
+        let config = Config {
+            gossip_bind: "0.0.0.0".to_string(),
+            allow_insecure_defaults: true,
+            ..Config::default()
+        };
+        assert!(config.validate_security().is_ok());
+    }
+
+    #[test]
+    fn validate_security_error_contains_remediation_steps() {
+        let config = Config {
+            gossip_bind: "0.0.0.0".to_string(),
+            ..Config::default()
+        };
+        let err = config.validate_security().unwrap_err();
+        // Should contain all three options
+        assert!(err.contains("OPTION 1"));
+        assert!(err.contains("OPTION 2"));
+        assert!(err.contains("OPTION 3"));
+        // Should contain specific config examples
+        assert!(err.contains("network_key:"));
+        assert!(err.contains("gossip_bind:"));
+        assert!(err.contains("allow_insecure_defaults:"));
     }
 }

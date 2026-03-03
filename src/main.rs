@@ -338,7 +338,13 @@ async fn main() -> anyhow::Result<()> {
         "egregore starting"
     );
 
-    // Warn if using the default (public) network key
+    // Validate security configuration (fails fast on insecure defaults)
+    if let Err(err) = config.validate_security() {
+        tracing::error!("{}", err.trim());
+        return Err(anyhow::anyhow!("startup blocked by insecure configuration"));
+    }
+
+    // Warn if using the default (public) network key (informational only)
     if let Some(warning) = config.security_warning() {
         tracing::warn!("{}", warning.trim());
     }

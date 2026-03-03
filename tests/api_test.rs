@@ -562,3 +562,169 @@ async fn test_csrf_rejects_form_content_type() {
 
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
+
+// ============ PUBLISH TESTS ============
+
+#[tokio::test]
+async fn test_publish_message() {
+    let (_engine, app) = create_test_app();
+
+    // Publish a simple message
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/publish")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "content": {
+                            "type": "message",
+                            "text": "Hello, mesh!"
+                        }
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let json = json_body(response).await;
+    assert!(json["success"].as_bool().unwrap());
+    assert!(json["data"]["hash"].as_str().is_some());
+    assert!(json["data"]["author"].as_str().is_some());
+    assert_eq!(json["data"]["sequence"], 1);
+}
+
+#[tokio::test]
+async fn test_publish_with_tags_and_relates() {
+    let (engine, app) = create_test_app();
+
+    // First publish a message to get a hash for relating
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/publish")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"content": {"type": "message", "text": "First message"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let first_json = json_body(response).await;
+    let first_hash = first_json["data"]["hash"].as_str().unwrap();
+
+    // Publish a reply with tags and relates
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/publish")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{
+                        "content": {{"type": "message", "text": "Reply message"}},
+                        "relates": "{}",
+                        "tags": ["reply", "test"]
+                    }}"#,
+                    first_hash
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let json = json_body(response).await;
+    assert!(json["success"].as_bool().unwrap());
+    assert_eq!(json["data"]["sequence"], 2);
+
+    // Verify the messages are in the feed
+    let query = egregore::feed::models::FeedQuery::default();
+    let messages = engine.store().query_messages(&query).unwrap();
+    assert_eq!(messages.len(), 2);
+}
+
+#[tokio::test]
+async fn test_publish_invalid_json_returns_error() {
+    let (_engine, app) = create_test_app();
+
+    // Invalid JSON body
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/publish")
+                .header("content-type", "application/json")
+                .body(Body::from("not valid json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should return 422 Unprocessable Entity or 400 Bad Request
+    assert!(
+        response.status() == StatusCode::UNPROCESSABLE_ENTITY
+            || response.status() == StatusCode::BAD_REQUEST
+    );
+}
+
+// ============ EVENTS (SSE) TESTS ============
+
+#[tokio::test]
+async fn test_events_endpoint_returns_sse_content_type() {
+    let (_engine, app) = create_test_app();
+
+    // Request the events endpoint
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Check content-type is text/event-stream
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap_or(""));
+    assert!(
+        content_type.map(|ct| ct.contains("text/event-stream")).unwrap_or(false),
+        "Expected text/event-stream content-type, got: {:?}",
+        content_type
+    );
+}
+
+#[tokio::test]
+async fn test_events_endpoint_accepts_query_params() {
+    let (_engine, app) = create_test_app();
+
+    // Request with filter parameters
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/events?content_type=query&author=@test.ed25519")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should successfully connect even with filters
+    assert_eq!(response.status(), StatusCode::OK);
+}

@@ -31,9 +31,9 @@ use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 use axum::Router;
 
-use egregore::config::Config;
-use egregore::feed::engine::FeedEngine;
-use egregore::identity::Identity;
+use crate::config::Config;
+use crate::feed::engine::FeedEngine;
+use crate::identity::Identity;
 
 use mcp_registry::SharedRegistry;
 

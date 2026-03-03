@@ -172,10 +172,10 @@ mod tests {
     use crate::api::{router, router_with_mcp};
     use axum::body::Body;
     use axum::http::Request;
-    use egregore::config::Config;
-    use egregore::feed::engine::FeedEngine;
-    use egregore::feed::store::FeedStore;
-    use egregore::identity::Identity;
+    use crate::config::Config;
+    use crate::feed::engine::FeedEngine;
+    use crate::feed::store::FeedStore;
+    use crate::identity::Identity;
     use http_body_util::BodyExt;
     use std::sync::Arc;
     use std::time::Instant;

@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use egregore::gossip::health::{PeerHealthStatus, DIRECT_OBSERVATION_MARKER};
+use crate::gossip::health::{PeerHealthStatus, DIRECT_OBSERVATION_MARKER};
 
 use super::response;
 use super::routes_peers::{build_status, StatusInfo};

@@ -52,7 +52,7 @@ pub async fn publish(
         )
     })
     .await
-    .map_err(|e| egregore::error::EgreError::Config {
+    .map_err(|e| crate::error::EgreError::Config {
         reason: format!("task join error: {e}"),
     });
 

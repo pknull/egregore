@@ -142,6 +142,22 @@ pub struct Config {
     /// How long to keep tombstones in seconds (default: 604800 = 7 days).
     #[serde(default = "default_tombstone_max_age_secs")]
     pub tombstone_max_age_secs: u64,
+    /// IP address to bind gossip server to (default: 127.0.0.1).
+    ///
+    /// Set to "0.0.0.0" to accept connections from external peers.
+    /// Default is loopback-only for security.
+    #[serde(default = "default_gossip_bind")]
+    pub gossip_bind: String,
+    /// Allow startup with insecure default combinations.
+    ///
+    /// When false (default), startup fails if using the default network key
+    /// with an externally reachable gossip bind. This prevents accidental
+    /// exposure to the public mesh.
+    ///
+    /// Set to true only if you intentionally want to join the public
+    /// egregore mesh using the default network key.
+    #[serde(default)]
+    pub allow_insecure_defaults: bool,
 }
 
 fn default_retention_interval_secs() -> u64 {
@@ -150,6 +166,10 @@ fn default_retention_interval_secs() -> u64 {
 
 fn default_tombstone_max_age_secs() -> u64 {
     DEFAULT_TOMBSTONE_MAX_AGE_SECS
+}
+
+fn default_gossip_bind() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_mdns_service() -> String {
@@ -215,6 +235,8 @@ impl Default for Config {
             retention_enabled: false,
             retention_interval_secs: DEFAULT_RETENTION_INTERVAL_SECS,
             tombstone_max_age_secs: DEFAULT_TOMBSTONE_MAX_AGE_SECS,
+            gossip_bind: default_gossip_bind(),
+            allow_insecure_defaults: false,
         }
     }
 }
@@ -390,6 +412,126 @@ impl Config {
         self.network_key == DEFAULT_NETWORK_KEY
     }
 
+    /// Check for security warnings at startup.
+    ///
+    /// Returns a warning message if using the default network key.
+    /// Does not block startup - this is informational only.
+    pub fn security_warning(&self) -> Option<String> {
+        if !self.is_default_network_key() {
+            return None;
+        }
+
+        Some(format!(
+            r#"WARNING: Using default network key.
+
+Your node is using the default network key ("egregore-network-v1").
+Any peer using this key can connect and replicate with your node.
+
+For isolated networks, set a unique network_key in your config:
+  network_key: "my-network-{}"
+
+This warning will not appear once you set a custom key.
+"#,
+            chrono::Utc::now().format("%Y%m%d")
+        ))
+    }
+
+    /// Check if gossip_bind is a loopback address.
+    fn is_loopback_bind(&self) -> bool {
+        self.gossip_bind.starts_with("127.")
+            || self.gossip_bind == "localhost"
+            || self.gossip_bind.starts_with("::1")
+            || self.gossip_bind == "[::1]"
+    }
+
+    /// Check for configuration warnings at startup.
+    ///
+    /// Returns a warning if discovery is enabled but gossip_bind is loopback.
+    /// Discovered peers won't be able to connect back.
+    pub fn discovery_warning(&self) -> Option<String> {
+        let discovery_enabled = self.lan_discovery || self.mdns_discovery;
+
+        if !discovery_enabled || !self.is_loopback_bind() {
+            return None;
+        }
+
+        let methods: Vec<&str> = [
+            self.lan_discovery.then_some("lan_discovery"),
+            self.mdns_discovery.then_some("mdns_discovery"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        Some(format!(
+            r#"WARNING: Discovery enabled but gossip bound to loopback.
+
+You have enabled {} but gossip_bind is "{}".
+Discovered peers will not be able to connect to your node.
+
+To accept external connections, set:
+  gossip_bind: "0.0.0.0"
+"#,
+            methods.join(" and "),
+            self.gossip_bind
+        ))
+    }
+
+    /// Validate security configuration at startup.
+    ///
+    /// Returns an error if using an insecure configuration without explicit override:
+    /// - Default network key with externally reachable gossip bind
+    ///
+    /// This prevents accidental exposure to the public mesh.
+    pub fn validate_security(&self) -> Result<(), String> {
+        // Safe if using custom network key
+        if !self.is_default_network_key() {
+            return Ok(());
+        }
+
+        // Safe if binding to loopback only
+        if self.is_loopback_bind() {
+            return Ok(());
+        }
+
+        // Unsafe combination: default key + external bind
+        // Allow if explicitly overridden
+        if self.allow_insecure_defaults {
+            return Ok(());
+        }
+
+        Err(format!(
+            r#"ERROR: Insecure configuration detected.
+
+Your node is configured to:
+  - Use the default network key ("egregore-network-v1")
+  - Bind gossip to external interface ("{}")
+
+This exposes your node to the public egregore mesh where any
+peer using the default key can connect and replicate data.
+
+To fix this, choose ONE of the following:
+
+OPTION 1: Use a private network key (recommended)
+  Add to your config.yaml:
+    network_key: "my-private-network-{}"
+
+OPTION 2: Keep loopback-only binding (recommended for dev)
+  Add to your config.yaml:
+    gossip_bind: "127.0.0.1"
+
+OPTION 3: Explicitly allow public mesh (not recommended)
+  Add to your config.yaml:
+    allow_insecure_defaults: true
+
+  WARNING: This joins the public mesh. Only use if you
+  intentionally want to federate with unknown peers.
+"#,
+            self.gossip_bind,
+            chrono::Utc::now().format("%Y%m%d")
+        ))
+    }
+
     /// 8-byte discriminator derived from the network key.
     /// Double-hashed (SHA-256 of SHA-256) so broadcasting it doesn't
     /// reveal the SHS network key itself.
@@ -557,5 +699,133 @@ mod tests {
             ..Config::default()
         };
         assert!(!custom_config.is_default_network_key());
+    }
+
+    #[test]
+    fn security_warning_on_default_key() {
+        let config = Config::default();
+        // Default key should produce a warning
+        assert!(config.security_warning().is_some());
+    }
+
+    #[test]
+    fn no_security_warning_with_custom_key() {
+        let config = Config {
+            network_key: "my-private-network".to_string(),
+            ..Config::default()
+        };
+        // Custom key should not produce a warning
+        assert!(config.security_warning().is_none());
+    }
+
+    #[test]
+    fn default_gossip_bind_is_loopback() {
+        let config = Config::default();
+        assert_eq!(config.gossip_bind, "127.0.0.1");
+    }
+
+    #[test]
+    fn discovery_warning_when_lan_discovery_with_loopback() {
+        let config = Config {
+            lan_discovery: true,
+            gossip_bind: "127.0.0.1".to_string(),
+            ..Config::default()
+        };
+        let warning = config.discovery_warning();
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("lan_discovery"));
+    }
+
+    #[test]
+    fn discovery_warning_when_mdns_discovery_with_loopback() {
+        let config = Config {
+            mdns_discovery: true,
+            gossip_bind: "127.0.0.1".to_string(),
+            ..Config::default()
+        };
+        let warning = config.discovery_warning();
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("mdns_discovery"));
+    }
+
+    #[test]
+    fn no_discovery_warning_with_external_bind() {
+        let config = Config {
+            lan_discovery: true,
+            mdns_discovery: true,
+            gossip_bind: "0.0.0.0".to_string(),
+            ..Config::default()
+        };
+        assert!(config.discovery_warning().is_none());
+    }
+
+    #[test]
+    fn no_discovery_warning_when_discovery_disabled() {
+        let config = Config {
+            lan_discovery: false,
+            mdns_discovery: false,
+            gossip_bind: "127.0.0.1".to_string(),
+            ..Config::default()
+        };
+        assert!(config.discovery_warning().is_none());
+    }
+
+    // ============ SECURITY VALIDATION TESTS ============
+
+    #[test]
+    fn validate_security_passes_with_custom_key() {
+        let config = Config {
+            network_key: "my-private-network".to_string(),
+            gossip_bind: "0.0.0.0".to_string(), // External bind is OK with custom key
+            ..Config::default()
+        };
+        assert!(config.validate_security().is_ok());
+    }
+
+    #[test]
+    fn validate_security_passes_with_loopback_bind() {
+        let config = Config::default(); // Uses default key + loopback bind
+        assert!(config.validate_security().is_ok());
+    }
+
+    #[test]
+    fn validate_security_fails_with_default_key_and_external_bind() {
+        let config = Config {
+            gossip_bind: "0.0.0.0".to_string(),
+            ..Config::default()
+        };
+        let result = config.validate_security();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Insecure configuration"));
+        assert!(err.contains("network_key"));
+        assert!(err.contains("gossip_bind"));
+    }
+
+    #[test]
+    fn validate_security_passes_with_explicit_override() {
+        let config = Config {
+            gossip_bind: "0.0.0.0".to_string(),
+            allow_insecure_defaults: true,
+            ..Config::default()
+        };
+        assert!(config.validate_security().is_ok());
+    }
+
+    #[test]
+    fn validate_security_error_contains_remediation_steps() {
+        let config = Config {
+            gossip_bind: "0.0.0.0".to_string(),
+            ..Config::default()
+        };
+        let err = config.validate_security().unwrap_err();
+        // Should contain all three options
+        assert!(err.contains("OPTION 1"));
+        assert!(err.contains("OPTION 2"));
+        assert!(err.contains("OPTION 3"));
+        // Should contain specific config examples
+        assert!(err.contains("network_key:"));
+        assert!(err.contains("gossip_bind:"));
+        assert!(err.contains("allow_insecure_defaults:"));
     }
 }

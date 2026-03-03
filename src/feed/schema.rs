@@ -19,7 +19,9 @@ use crate::error::{EgreError, Result};
 /// Default schemas written when schemas directory is empty.
 /// All schemas are file-based - nothing is compiled in.
 const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
-    ("message.v1.json", r#"{
+    (
+        "message.v1.json",
+        r#"{
   "content_type": "message",
   "version": 1,
   "description": "Simple text message with optional title and metadata",
@@ -38,8 +40,11 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
     },
     "additionalProperties": false
   }
-}"#),
-    ("insight.v1.json", r#"{
+}"#,
+    ),
+    (
+        "insight.v1.json",
+        r#"{
   "content_type": "insight",
   "version": 1,
   "description": "Observation with optional evidence and guidance",
@@ -61,8 +66,11 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
     },
     "additionalProperties": false
   }
-}"#),
-    ("endorsement.v1.json", r#"{
+}"#,
+    ),
+    (
+        "endorsement.v1.json",
+        r#"{
   "content_type": "endorsement",
   "version": 1,
   "description": "Endorsement of another message",
@@ -79,8 +87,11 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
     },
     "additionalProperties": false
   }
-}"#),
-    ("dispute.v1.json", r#"{
+}"#,
+    ),
+    (
+        "dispute.v1.json",
+        r#"{
   "content_type": "dispute",
   "version": 1,
   "description": "Dispute of another message with reason",
@@ -98,8 +109,11 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
     },
     "additionalProperties": false
   }
-}"#),
-    ("query.v1.json", r#"{
+}"#,
+    ),
+    (
+        "query.v1.json",
+        r#"{
   "content_type": "query",
   "version": 1,
   "description": "Question to the mesh",
@@ -117,8 +131,11 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
     },
     "additionalProperties": false
   }
-}"#),
-    ("response.v1.json", r#"{
+}"#,
+    ),
+    (
+        "response.v1.json",
+        r#"{
   "content_type": "response",
   "version": 1,
   "description": "Response to a query",
@@ -137,8 +154,11 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
     },
     "additionalProperties": false
   }
-}"#),
-    ("profile.v1.json", r#"{
+}"#,
+    ),
+    (
+        "profile.v1.json",
+        r#"{
   "content_type": "profile",
   "version": 1,
   "description": "Agent profile information",
@@ -156,7 +176,8 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
     },
     "additionalProperties": false
   }
-}"#),
+}"#,
+    ),
 ];
 
 /// Codec format for message serialization.
@@ -394,7 +415,7 @@ impl SchemaRegistry {
         let mut paths: Vec<_> = entries
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().map_or(false, |ext| ext == "json"))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
             .collect();
         paths.sort();
 
@@ -1054,7 +1075,8 @@ mod tests {
 
     #[test]
     fn load_schemas_from_dir_with_custom_schema() {
-        let temp_dir = std::env::temp_dir().join(format!("egregore_test_custom_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("egregore_test_custom_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 

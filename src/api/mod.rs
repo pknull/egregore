@@ -87,7 +87,7 @@ async fn require_json_content_type(req: Request<Body>, next: Next) -> Response {
                     "UNSUPPORTED_MEDIA_TYPE",
                     "Content-Type must be application/json for mutating requests",
                 )
-                    .into_response();
+                .into_response();
             }
         }
     }
@@ -182,9 +182,9 @@ pub fn router_with_mcp(state: AppState, mcp_enabled: bool) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::Request;
     use crate::feed::engine::FeedEngine;
     use crate::feed::store::FeedStore;
+    use axum::http::Request;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -211,7 +211,9 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("/v1/publish")
-            .body(Body::from(r#"{"content":{"type":"message","text":"pwned"}}"#))
+            .body(Body::from(
+                r#"{"content":{"type":"message","text":"pwned"}}"#,
+            ))
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
@@ -252,7 +254,9 @@ mod tests {
             .method("POST")
             .uri("/v1/publish")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"content":{"type":"message","text":"test"}}"#))
+            .body(Body::from(
+                r#"{"content":{"type":"message","text":"test"}}"#,
+            ))
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();

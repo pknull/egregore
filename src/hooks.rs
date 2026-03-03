@@ -765,10 +765,7 @@ mod tests {
         let pid = child.id().expect("no pid");
 
         // Wait briefly then timeout (100ms, not 60 seconds)
-        let result = tokio::time::timeout(
-            Duration::from_millis(100),
-            child.wait()
-        ).await;
+        let result = tokio::time::timeout(Duration::from_millis(100), child.wait()).await;
 
         // Should have timed out
         assert!(result.is_err(), "wait should have timed out");
@@ -787,14 +784,16 @@ mod tests {
         // kill -0 should fail because process is dead
         assert!(
             status.is_err() || !status.unwrap().success(),
-            "process {} should be dead after kill", pid
+            "process {} should be dead after kill",
+            pid
         );
 
         let elapsed = start.elapsed();
         // Should have completed quickly, not waited 60 seconds
         assert!(
             elapsed < Duration::from_secs(5),
-            "execution took {:?}, expected < 5s", elapsed
+            "execution took {:?}, expected < 5s",
+            elapsed
         );
     }
 
@@ -826,7 +825,8 @@ mod tests {
 
         assert!(
             status.is_err() || !status.unwrap().success(),
-            "process {} should be dead after drop", pid
+            "process {} should be dead after drop",
+            pid
         );
     }
 }

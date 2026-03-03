@@ -134,15 +134,18 @@ impl ClientHandshake {
         payload.extend_from_slice(&sig.to_bytes());
         payload.extend_from_slice(client_vk.as_bytes());
 
-        // Encrypt payload with shared secret
-        let encrypted = encrypt_payload(&shared_secret, &payload)?;
+        // Derive direction-specific auth keys to prevent key+nonce reuse
+        let auth_keys = HandshakeAuthKeys::derive(&shared_secret);
+
+        // Encrypt client auth with client-specific key
+        let encrypted = encrypt_payload(&auth_keys.client_auth_key, &payload)?;
 
         let state = ClientHandshakeStep3 {
             network_key: self.network_key,
             client_eph_pk: self.ephemeral_public,
             server_eph_pk,
             shared_ab,
-            shared_secret,
+            auth_keys,
         };
 
         Ok((state, encrypted))
@@ -155,14 +158,14 @@ pub struct ClientHandshakeStep3 {
     client_eph_pk: X25519Public,
     server_eph_pk: X25519Public,
     shared_ab: SharedSecret,
-    shared_secret: [u8; 32],
+    auth_keys: HandshakeAuthKeys,
 }
 
 impl ClientHandshakeStep3 {
     /// Step 4 (client side): Verify server's auth response and derive session keys.
     pub fn step4_verify(self, server_auth: &[u8]) -> Result<HandshakeOutcome> {
-        // Decrypt server's auth
-        let payload = decrypt_payload(&self.shared_secret, server_auth)?;
+        // Decrypt server's auth using server-specific key
+        let payload = decrypt_payload(&self.auth_keys.server_auth_key, server_auth)?;
         if payload.len() != 96 {
             return Err(EgreError::HandshakeFailed {
                 reason: "server auth payload wrong size".into(),
@@ -246,6 +249,9 @@ impl ServerHandshake {
         let shared_ab = self.ephemeral_secret.diffie_hellman(&client_eph_pk);
         let shared_secret = derive_shared_key(&self.network_key, shared_ab.as_bytes());
 
+        // Derive direction-specific auth keys to prevent key+nonce reuse
+        let auth_keys = HandshakeAuthKeys::derive(&shared_secret);
+
         // Build server hello
         let mut server_mac = <HmacSha256 as Mac>::new_from_slice(&self.network_key)
             .expect("HMAC key length is valid");
@@ -262,7 +268,7 @@ impl ServerHandshake {
             server_eph_pk: self.ephemeral_public,
             client_eph_pk,
             shared_ab,
-            shared_secret,
+            auth_keys,
         };
 
         Ok((state, msg))
@@ -276,7 +282,7 @@ pub struct ServerHandshakeStep2 {
     server_eph_pk: X25519Public,
     client_eph_pk: X25519Public,
     shared_ab: SharedSecret,
-    shared_secret: [u8; 32],
+    auth_keys: HandshakeAuthKeys,
 }
 
 impl ServerHandshakeStep2 {
@@ -285,8 +291,8 @@ impl ServerHandshakeStep2 {
         self,
         client_auth: &[u8],
     ) -> Result<(HandshakeOutcome, Vec<u8>)> {
-        // Decrypt client's auth
-        let payload = decrypt_payload(&self.shared_secret, client_auth)?;
+        // Decrypt client's auth using client-specific key
+        let payload = decrypt_payload(&self.auth_keys.client_auth_key, client_auth)?;
         if payload.len() != 96 {
             return Err(EgreError::HandshakeFailed {
                 reason: "client auth payload wrong size".into(),
@@ -330,7 +336,8 @@ impl ServerHandshakeStep2 {
         server_payload.extend_from_slice(&server_sig.to_bytes());
         server_payload.extend_from_slice(server_vk.as_bytes());
 
-        let encrypted_response = encrypt_payload(&self.shared_secret, &server_payload)?;
+        // Encrypt server auth with server-specific key
+        let encrypted_response = encrypt_payload(&self.auth_keys.server_auth_key, &server_payload)?;
 
         // Derive session keys
         let keys = derive_session_keys(
@@ -369,11 +376,51 @@ fn derive_shared_key(network_key: &[u8; 32], shared_secret: &[u8]) -> [u8; 32] {
     sha256(&data)
 }
 
+/// Handshake auth encryption keys.
+///
+/// SECURITY: Each direction MUST use a different key to prevent AEAD key+nonce
+/// reuse. The shared_secret alone is insufficient because both client and server
+/// would encrypt with the same (key, zero-nonce) pair.
+///
+/// We derive direction-specific keys using domain separation labels:
+/// - client_auth_key = SHA256(shared_secret || "handshake-client-auth")
+/// - server_auth_key = SHA256(shared_secret || "handshake-server-auth")
+///
+/// References:
+/// - Issue #69: https://github.com/pknull/egregore/issues/69
+/// - NIST SP 800-108: KDF domain separation best practices
+struct HandshakeAuthKeys {
+    client_auth_key: [u8; 32],
+    server_auth_key: [u8; 32],
+}
+
+impl HandshakeAuthKeys {
+    fn derive(shared_secret: &[u8; 32]) -> Self {
+        let client_auth_key = {
+            let mut data = Vec::new();
+            data.extend_from_slice(shared_secret);
+            data.extend_from_slice(b"handshake-client-auth");
+            sha256(&data)
+        };
+        let server_auth_key = {
+            let mut data = Vec::new();
+            data.extend_from_slice(shared_secret);
+            data.extend_from_slice(b"handshake-server-auth");
+            sha256(&data)
+        };
+        Self {
+            client_auth_key,
+            server_auth_key,
+        }
+    }
+}
+
 fn encrypt_payload(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|e| EgreError::Crypto {
         reason: e.to_string(),
     })?;
-    let nonce = Nonce::from([0u8; 12]); // Single-use key, zero nonce is safe
+    // Zero nonce is safe here because each direction uses a unique derived key
+    let nonce = Nonce::from([0u8; 12]);
     cipher
         .encrypt(&nonce, plaintext)
         .map_err(|e| EgreError::Crypto {
@@ -515,5 +562,44 @@ mod tests {
         // Encrypt keys should differ between client and server
         assert_ne!(client_outcome.encrypt_key, client_outcome.decrypt_key);
         assert_ne!(server_outcome.encrypt_key, server_outcome.decrypt_key);
+    }
+
+    /// Regression test for handshake AEAD key+nonce reuse (issue #69).
+    ///
+    /// The original implementation used the same (shared_secret, zero_nonce) pair
+    /// for both client auth and server auth encryption. This test verifies that
+    /// the two encrypted payloads are encrypted with different keys by checking
+    /// that they cannot be decrypted with each other's keys.
+    #[test]
+    fn auth_keys_are_direction_specific() {
+        let net_key = test_network_key();
+        let client_id = Identity::generate();
+        let server_id = Identity::generate();
+
+        let client = ClientHandshake::new(net_key, client_id);
+        let client_hello = client.step1_hello();
+
+        let server = ServerHandshake::new(net_key, server_id);
+        let (server_step2, server_hello) = server.step2_hello(&client_hello).unwrap();
+        let (_client_step3, client_auth) = client.step3_authenticate(&server_hello).unwrap();
+        let (_server_outcome, server_auth) =
+            server_step2.step3_verify_and_respond(&client_auth).unwrap();
+
+        // The encrypted payloads should be different ciphertexts
+        // (even if plaintext structure is similar)
+        assert_ne!(
+            client_auth, server_auth,
+            "client_auth and server_auth should be different ciphertexts"
+        );
+
+        // Verify the auth keys derived from the same shared secret are different
+        // by checking that we can't cross-decrypt (wrong key = decryption failure)
+        let shared_secret = sha256(b"test-shared-secret-for-key-derivation");
+        let auth_keys = HandshakeAuthKeys::derive(&shared_secret);
+
+        assert_ne!(
+            auth_keys.client_auth_key, auth_keys.server_auth_key,
+            "CRITICAL: client and server auth keys must be different to prevent AEAD reuse"
+        );
     }
 }

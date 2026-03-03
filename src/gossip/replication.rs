@@ -111,7 +111,7 @@ pub struct ReplicationConfig {
 
 impl ReplicationConfig {
     /// Check if we want messages from this author.
-    fn wants_author(&self, author: &PublicId) -> bool {
+    pub(crate) fn wants_author(&self, author: &PublicId) -> bool {
         match &self.follows {
             Some(follows) => follows.contains(author),
             None => true,
@@ -322,7 +322,7 @@ async fn build_have_message(
         Ok::<_, EgreError>((feeds, observations, summaries))
     })
     .await
-    .map_err(|e| EgreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+    .map_err(|e| EgreError::Io(std::io::Error::other(e)))??;
 
     let feed_states: Vec<FeedState> = feeds
         .into_iter()
@@ -534,7 +534,7 @@ async fn build_want_requests(
         Ok(requests)
     })
     .await
-    .map_err(|e| EgreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+    .map_err(|e| EgreError::Io(std::io::Error::other(e)))?
 }
 
 /// Receive messages from peer until Done, with per-frame and per-session limits.
@@ -636,9 +636,7 @@ async fn handle_peer_wants(
                         }
                     })
                     .await
-                    .map_err(|e| {
-                        EgreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-                    })??;
+                    .map_err(|e| EgreError::Io(std::io::Error::other(e)))??;
 
                     let batch_len = messages.len();
                     tracing::debug!(

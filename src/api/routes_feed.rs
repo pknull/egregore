@@ -13,8 +13,8 @@ use serde::Deserialize;
 
 use crate::api::response;
 use crate::api::AppState;
-use egregore::feed::models::FeedQuery;
-use egregore::identity::PublicId;
+use crate::feed::models::FeedQuery;
+use crate::identity::PublicId;
 
 #[derive(Deserialize, Default)]
 pub struct FeedParams {

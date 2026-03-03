@@ -33,8 +33,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::response;
 use crate::api::AppState;
-use egregore::feed::store::{ConsumerGroup, GroupMember, GroupOffset, JoinGroupResult};
-use egregore::identity::PublicId;
+use crate::feed::store::{ConsumerGroup, GroupMember, GroupOffset, JoinGroupResult};
+use crate::identity::PublicId;
 
 /// Response for group listing.
 #[derive(Debug, Serialize)]
@@ -224,7 +224,7 @@ pub async fn list_groups(State(state): State<AppState>) -> impl IntoResponse {
                 updated_at: group.updated_at.to_rfc3339(),
             });
         }
-        Ok::<_, egregore::error::EgreError>(infos)
+        Ok::<_, crate::error::EgreError>(infos)
     })
     .await;
 

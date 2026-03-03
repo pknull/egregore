@@ -183,18 +183,13 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
 ];
 
 /// Codec format for message serialization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Codec {
+    #[default]
     Json,
     Protobuf,
     Cbor,
-}
-
-impl Default for Codec {
-    fn default() -> Self {
-        Self::Json
-    }
 }
 
 impl std::fmt::Display for Codec {
@@ -223,10 +218,11 @@ impl std::str::FromStr for Codec {
 }
 
 /// Compatibility mode for schema evolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityMode {
     /// New schema can read data written by old schema.
+    #[default]
     Backward,
     /// Old schema can read data written by new schema.
     Forward,
@@ -234,12 +230,6 @@ pub enum CompatibilityMode {
     Full,
     /// No compatibility guarantees.
     None,
-}
-
-impl Default for CompatibilityMode {
-    fn default() -> Self {
-        Self::Backward
-    }
 }
 
 /// Schema definition as stored in a file (without computed schema_id).

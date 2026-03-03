@@ -569,6 +569,17 @@ cargo test       # all tests
 cargo clippy     # lint
 ```
 
+### Pre-commit checklist
+
+Run these checks locally before submitting PRs (CI enforces all):
+
+```bash
+cargo fmt --check                        # formatting
+cargo clippy --all-targets -- -D warnings  # lints
+cargo test                               # tests
+cargo build --release                    # build
+```
+
 ## Documentation
 
 - `docs/architecture/README.md` — Architecture slices by feature (with shared maps)

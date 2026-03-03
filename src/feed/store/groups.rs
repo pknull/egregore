@@ -93,17 +93,12 @@ pub struct JoinGroupResult {
 }
 
 /// Assignment strategy for distributing feeds among group members.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AssignmentStrategy {
     /// Simple round-robin assignment by feed author.
+    #[default]
     RoundRobin,
-}
-
-impl Default for AssignmentStrategy {
-    fn default() -> Self {
-        Self::RoundRobin
-    }
 }
 
 impl FeedStore {

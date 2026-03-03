@@ -307,7 +307,10 @@ mod tests {
             health: None,
         };
         let json = serde_json::to_value(&status).unwrap();
-        assert!(json.get("health").is_none(), "healthy status should omit health field");
+        assert!(
+            json.get("health").is_none(),
+            "healthy status should omit health field"
+        );
     }
 
     #[test]
@@ -330,7 +333,9 @@ mod tests {
             }),
         };
         let json = serde_json::to_value(&status).unwrap();
-        let health = json.get("health").expect("degraded status should include health field");
+        let health = json
+            .get("health")
+            .expect("degraded status should include health field");
         assert_eq!(health["healthy"], false);
         assert_eq!(health["store"]["degraded"]["error"], "db locked");
     }

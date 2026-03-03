@@ -23,13 +23,14 @@
 //! - FAILED → PROCESSING (retry attempt)
 
 use std::collections::HashMap;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use reqwest::Client;
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::config::HookEntry;
@@ -374,6 +375,10 @@ impl HookExecutor {
     }
 
     /// Execute subprocess hook with message JSON on stdin.
+    ///
+    /// Uses `tokio::process::Command` for async process handling with proper
+    /// timeout semantics. When timeout fires, the child process is killed
+    /// and reaped to prevent zombie processes.
     async fn execute_subprocess(
         &self,
         msg: &Message,
@@ -393,43 +398,54 @@ impl HookExecutor {
 
         let timeout_secs = timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
         let hook_timeout = Duration::from_secs(timeout_secs);
-        let hook_path = path.clone();
 
-        // Clone trace context for the blocking task
-        let trace_id = msg.trace_id.clone();
-        let span_id = msg.span_id.clone();
+        // Build command with environment
+        let mut cmd = Command::new(&path);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // Kill child processes when the parent exits (Linux only, no-op elsewhere)
+            .kill_on_drop(true);
 
-        let result = timeout(hook_timeout, async {
-            tokio::task::spawn_blocking(move || {
-                let mut cmd = Command::new(&hook_path);
-                cmd.stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
+        // Propagate trace context as environment variables
+        if let Some(ref tid) = msg.trace_id {
+            cmd.env("EGREGORE_TRACE_ID", tid);
+        }
+        if let Some(ref sid) = msg.span_id {
+            cmd.env("EGREGORE_SPAN_ID", sid);
+        }
 
-                // Propagate trace context as environment variables
-                if let Some(ref tid) = trace_id {
-                    cmd.env("EGREGORE_TRACE_ID", tid);
-                }
-                if let Some(ref sid) = span_id {
-                    cmd.env("EGREGORE_SPAN_ID", sid);
-                }
+        // Spawn the child process
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(hook_name = ?name, hook = ?path, error = %e, "failed to spawn hook");
+                return HookResult::Failed {
+                    error: format!("spawn failed: {}", e),
+                };
+            }
+        };
 
-                let mut child = cmd.spawn()?;
+        // Write JSON to stdin
+        if let Some(ref mut stdin) = child.stdin {
+            if let Err(e) = stdin.write_all(json.as_bytes()).await {
+                tracing::warn!(hook_name = ?name, hook = ?path, error = %e, "failed to write to hook stdin");
+                // Still try to kill and reap the child
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return HookResult::Failed {
+                    error: format!("stdin write failed: {}", e),
+                };
+            }
+        }
+        // Close stdin so the child knows input is complete
+        drop(child.stdin.take());
 
-                if let Some(ref mut stdin) = child.stdin {
-                    stdin.write_all(json.as_bytes())?;
-                }
-                // Close stdin so the child knows input is complete
-                drop(child.stdin.take());
-
-                child.wait()
-            })
-            .await
-        })
-        .await;
+        // Wait for child with timeout
+        let result = timeout(hook_timeout, child.wait()).await;
 
         match result {
-            Ok(Ok(Ok(status))) => {
+            Ok(Ok(status)) => {
                 if status.success() {
                     tracing::debug!(hook_name = ?name, hook = ?path, "hook completed successfully");
                     HookResult::Success
@@ -439,20 +455,22 @@ impl HookExecutor {
                     HookResult::Failed { error }
                 }
             }
-            Ok(Ok(Err(e))) => {
-                tracing::warn!(hook_name = ?name, hook = ?path, error = %e, "hook execution failed");
+            Ok(Err(e)) => {
+                tracing::warn!(hook_name = ?name, hook = ?path, error = %e, "hook wait failed");
                 HookResult::Failed {
                     error: e.to_string(),
                 }
             }
-            Ok(Err(e)) => {
-                tracing::warn!(hook_name = ?name, hook = ?path, error = %e, "hook task panicked");
-                HookResult::Failed {
-                    error: format!("task panicked: {}", e),
-                }
-            }
             Err(_) => {
-                tracing::warn!(hook_name = ?name, hook = ?path, timeout_secs, "hook timed out");
+                // Timeout fired - kill and reap the child process
+                tracing::warn!(hook_name = ?name, hook = ?path, timeout_secs, "hook timed out, killing process");
+                if let Err(e) = child.kill().await {
+                    tracing::warn!(hook_name = ?name, error = %e, "failed to kill timed-out hook");
+                }
+                // Reap the child to prevent zombie
+                if let Err(e) = child.wait().await {
+                    tracing::warn!(hook_name = ?name, error = %e, "failed to reap timed-out hook");
+                }
                 HookResult::Timeout
             }
         }
@@ -723,5 +741,92 @@ mod tests {
             reason: "test".to_string()
         }
         .is_success());
+    }
+
+    /// Test that timed-out subprocesses are actually killed.
+    ///
+    /// This test spawns a process that sleeps for 60 seconds, uses a short
+    /// timeout, then verifies the process was killed and reaped properly.
+    #[tokio::test]
+    async fn subprocess_timeout_kills_process() {
+        use std::time::Instant;
+
+        let start = Instant::now();
+
+        // Spawn a process that will sleep for 60 seconds
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+
+        let mut child = cmd.spawn().expect("failed to spawn sleep");
+        let pid = child.id().expect("no pid");
+
+        // Wait briefly then timeout (100ms, not 60 seconds)
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            child.wait()
+        ).await;
+
+        // Should have timed out
+        assert!(result.is_err(), "wait should have timed out");
+
+        // Kill the process (simulating what execute_subprocess does on timeout)
+        child.kill().await.expect("failed to kill");
+        child.wait().await.expect("failed to wait/reap");
+
+        // Verify the process is gone (no zombie)
+        // kill -0 checks if process exists without sending a signal
+        let status = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status();
+
+        // kill -0 should fail because process is dead
+        assert!(
+            status.is_err() || !status.unwrap().success(),
+            "process {} should be dead after kill", pid
+        );
+
+        let elapsed = start.elapsed();
+        // Should have completed quickly, not waited 60 seconds
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "execution took {:?}, expected < 5s", elapsed
+        );
+    }
+
+    /// Test that kill_on_drop prevents zombie processes when child handle is dropped.
+    #[tokio::test]
+    async fn kill_on_drop_prevents_zombies() {
+        // Spawn a long-running process with kill_on_drop
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+
+        let child = cmd.spawn().expect("failed to spawn");
+        let pid = child.id().expect("no pid");
+
+        // Drop the child handle - kill_on_drop should terminate the process
+        drop(child);
+
+        // Give the OS a moment to clean up
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify the process is gone
+        let status = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status();
+
+        assert!(
+            status.is_err() || !status.unwrap().success(),
+            "process {} should be dead after drop", pid
+        );
     }
 }

@@ -14,6 +14,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use tracing;
+
 use crate::error::{EgreError, Result};
 
 /// Default schemas written when schemas directory is empty.
@@ -398,7 +400,7 @@ impl SchemaRegistry {
         // Create directory if it doesn't exist
         if !dir.exists() {
             if let Err(e) = fs::create_dir_all(dir) {
-                eprintln!("Failed to create schemas directory {:?}: {}", dir, e);
+                tracing::warn!(dir = ?dir, error = %e, "failed to create schemas directory");
                 return;
             }
         }
@@ -406,7 +408,7 @@ impl SchemaRegistry {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(e) => {
-                eprintln!("Failed to read schemas directory {:?}: {}", dir, e);
+                tracing::warn!(dir = ?dir, error = %e, "failed to read schemas directory");
                 return;
             }
         };
@@ -424,7 +426,7 @@ impl SchemaRegistry {
             for (filename, content) in DEFAULT_SCHEMAS {
                 let schema_path = dir.join(filename);
                 if let Err(e) = fs::write(&schema_path, content) {
-                    eprintln!("Failed to write default schema {:?}: {}", schema_path, e);
+                    tracing::warn!(path = ?schema_path, error = %e, "failed to write default schema");
                 } else {
                     paths.push(schema_path);
                 }
@@ -433,7 +435,7 @@ impl SchemaRegistry {
 
         for path in paths {
             if let Err(e) = self.load_schema_file(&path) {
-                eprintln!("Failed to load schema from {:?}: {}", path, e);
+                tracing::warn!(path = ?path, error = %e, "failed to load schema");
             }
         }
     }

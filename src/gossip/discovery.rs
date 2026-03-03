@@ -85,7 +85,7 @@ pub async fn run_discovery(
     // Announce loop
     let broadcast_addr: SocketAddr = format!("255.255.255.255:{}", config.discovery_port)
         .parse()
-        .unwrap();
+        .expect("broadcast address with valid port should always parse");
 
     let announcement = Announcement {
         magic: *MAGIC,

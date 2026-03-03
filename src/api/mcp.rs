@@ -170,12 +170,12 @@ pub async fn mcp_method_not_allowed() -> impl IntoResponse {
 mod tests {
     use super::*;
     use crate::api::{router, router_with_mcp};
-    use axum::body::Body;
-    use axum::http::Request;
     use crate::config::Config;
     use crate::feed::engine::FeedEngine;
     use crate::feed::store::FeedStore;
     use crate::identity::Identity;
+    use axum::body::Body;
+    use axum::http::Request;
     use http_body_util::BodyExt;
     use std::sync::Arc;
     use std::time::Instant;

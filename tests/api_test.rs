@@ -703,7 +703,9 @@ async fn test_events_endpoint_returns_sse_content_type() {
         .get("content-type")
         .map(|v| v.to_str().unwrap_or(""));
     assert!(
-        content_type.map(|ct| ct.contains("text/event-stream")).unwrap_or(false),
+        content_type
+            .map(|ct| ct.contains("text/event-stream"))
+            .unwrap_or(false),
         "Expected text/event-stream content-type, got: {:?}",
         content_type
     );

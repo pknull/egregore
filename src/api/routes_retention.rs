@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::response;
 use crate::api::AppState;
-use egregore::feed::store::retention::{RetentionPolicy, RetentionScope};
+use crate::feed::store::retention::{RetentionPolicy, RetentionScope};
 
 /// API request for creating a retention policy.
 #[derive(Debug, Deserialize)]

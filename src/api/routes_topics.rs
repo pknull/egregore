@@ -129,7 +129,7 @@ pub async fn get_known_topics(State(state): State<AppState>) -> impl IntoRespons
                 topic,
             })
             .collect();
-        Ok::<_, egregore::error::EgreError>(infos)
+        Ok::<_, crate::error::EgreError>(infos)
     })
     .await;
 

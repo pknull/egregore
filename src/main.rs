@@ -8,14 +8,13 @@
 //! MCP endpoint is optional.
 //! Gossip uses SHS + Box Stream — only peers with the same network key connect.
 
-mod api;
-
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::path::PathBuf;
 
+use egregore::api;
 use egregore::config::{Config, HookEntry};
 use egregore::feed::engine::FeedEngine;
 use egregore::feed::store::FeedStore;

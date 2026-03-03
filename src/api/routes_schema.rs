@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::response;
 use crate::api::AppState;
 
-use egregore::feed::schema::{Codec, CompatibilityMode, SchemaDefinition};
+use crate::feed::schema::{Codec, CompatibilityMode, SchemaDefinition};
 
 /// Response for schema listing.
 #[derive(Serialize)]

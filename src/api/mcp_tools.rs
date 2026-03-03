@@ -10,8 +10,8 @@ use serde_json::Value;
 use super::routes_mesh;
 use super::routes_peers;
 use super::AppState;
-use egregore::feed::models::FeedQuery;
-use egregore::identity::PublicId;
+use crate::feed::models::FeedQuery;
+use crate::identity::PublicId;
 
 #[derive(Debug, Serialize)]
 pub struct ToolDefinition {
@@ -58,7 +58,7 @@ impl ToolCallResult {
 
     /// Map a spawn_blocking result, collapsing both JoinError and app errors to generic "internal error".
     fn from_blocking<T>(
-        result: std::result::Result<egregore::error::Result<T>, tokio::task::JoinError>,
+        result: std::result::Result<crate::error::Result<T>, tokio::task::JoinError>,
         on_ok: impl FnOnce(T) -> Self,
     ) -> Self {
         match result {

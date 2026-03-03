@@ -67,21 +67,21 @@ pub fn err<T: Serialize>(
     )
 }
 
-pub fn from_error(e: egregore::error::EgreError) -> Response {
+pub fn from_error(e: crate::error::EgreError) -> Response {
     let (status, code, message) = match &e {
-        egregore::error::EgreError::IdentityNotFound { .. } => {
+        crate::error::EgreError::IdentityNotFound { .. } => {
             (StatusCode::NOT_FOUND, "IDENTITY_NOT_FOUND", e.to_string())
         }
-        egregore::error::EgreError::FeedIntegrity { .. } => {
+        crate::error::EgreError::FeedIntegrity { .. } => {
             (StatusCode::BAD_REQUEST, "FEED_INTEGRITY", e.to_string())
         }
-        egregore::error::EgreError::DuplicateMessage { .. } => {
+        crate::error::EgreError::DuplicateMessage { .. } => {
             (StatusCode::CONFLICT, "DUPLICATE_MESSAGE", e.to_string())
         }
-        egregore::error::EgreError::SignatureInvalid => {
+        crate::error::EgreError::SignatureInvalid => {
             (StatusCode::BAD_REQUEST, "SIGNATURE_INVALID", e.to_string())
         }
-        egregore::error::EgreError::Serialization(_) => (
+        crate::error::EgreError::Serialization(_) => (
             StatusCode::BAD_REQUEST,
             "SERIALIZATION_ERROR",
             e.to_string(),

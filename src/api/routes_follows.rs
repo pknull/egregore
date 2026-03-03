@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::api::response;
 use crate::api::AppState;
-use egregore::identity::PublicId;
+use crate::identity::PublicId;
 
 #[derive(Serialize)]
 pub struct FollowInfo {

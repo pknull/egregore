@@ -29,15 +29,18 @@ gossip_port: 7655
 gossip_interval_secs: 300
 
 # Network key for isolation. Nodes with different keys cannot communicate.
-# Default: egregore-network-v1
-network_key: egregore-network-v1
+# REQUIRED: You must change this value before the node will start.
+#
+# Examples:
+#   network_key: "my-home-lab"           # Private network
+#   network_key: "acme-corp-internal"    # Team/org network
+#   network_key: "egregore-public-v1"    # Join public federation
+network_key: CHANGE_ME
 
 # IP address to bind gossip server to.
-# Default: 127.0.0.1 (loopback only - secure by default)
+# Default: 127.0.0.1 (loopback only - local development)
 #
 # Set to 0.0.0.0 to accept connections from external peers.
-# When accepting external connections, set a unique network_key
-# to avoid joining the public default network.
 gossip_bind: "127.0.0.1"
 
 # Enable strict schema validation.

@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "egregore"
-version = "1.2.3"
+version = "1.2.4"
 edition = "2021"
 description = "SSB-inspired decentralized knowledge sharing for LLMs"
 license = "MIT"

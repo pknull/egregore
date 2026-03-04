@@ -471,7 +471,8 @@ Choose a key that identifies your network:
 
 Nodes with the same network_key can discover and replicate with each other.
 Nodes with different keys are completely isolated.
-"#.to_string())
+"#
+        .to_string())
     }
 
     /// 8-byte discriminator derived from the network key.

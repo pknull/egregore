@@ -4,6 +4,7 @@
 //! was verified at ingest time. False means the predecessor was missing (gap).
 //! Backfill promotes the flag when the missing predecessor arrives.
 
+use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 use crate::error::{EgreError, Result};
@@ -427,6 +428,34 @@ impl FeedStore {
             .collect()
     }
 
+    /// Count messages published since a timestamp, split into incoming and outgoing.
+    pub fn message_flow_counts_since(
+        &self,
+        since: &DateTime<Utc>,
+        local_author: &PublicId,
+    ) -> Result<(u64, u64)> {
+        let conn = self.conn();
+        let since_str = since.to_rfc3339();
+
+        let incoming: u64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE timestamp >= ?1 AND author != ?2",
+                params![since_str, local_author.0],
+                |row| row.get(0),
+            )
+            .map_err(EgreError::from)?;
+
+        let outgoing: u64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE timestamp >= ?1 AND author = ?2",
+                params![since.to_rfc3339(), local_author.0],
+                |row| row.get(0),
+            )
+            .map_err(EgreError::from)?;
+
+        Ok((incoming, outgoing))
+    }
+
     /// Get all message hashes for a feed (for bloom filter construction).
     pub fn get_message_hashes(&self, author: &PublicId) -> Result<Vec<String>> {
         let conn = self.conn();
@@ -770,5 +799,28 @@ mod tests {
             .get_message_hashes(&PublicId("@unknown.ed25519".to_string()))
             .unwrap();
         assert!(unknown_hashes.is_empty());
+    }
+
+    #[test]
+    fn message_flow_counts_since_splits_incoming_and_outgoing() {
+        let store = FeedStore::open_memory().unwrap();
+
+        let mut local_msg = make_test_message("@local.ed25519", 1, None);
+        local_msg.timestamp = Utc::now();
+        store.insert_message(&local_msg, true).unwrap();
+
+        let mut remote_msg = make_test_message("@remote.ed25519", 1, None);
+        remote_msg.timestamp = Utc::now();
+        store.insert_message(&remote_msg, true).unwrap();
+
+        let (incoming, outgoing) = store
+            .message_flow_counts_since(
+                &(Utc::now() - chrono::Duration::minutes(5)),
+                &PublicId("@local.ed25519".to_string()),
+            )
+            .unwrap();
+
+        assert_eq!(incoming, 1);
+        assert_eq!(outgoing, 1);
     }
 }

@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::path::PathBuf;
@@ -21,6 +22,7 @@ use egregore::feed::store::FeedStore;
 use egregore::gossip;
 use egregore::hooks::HookExecutor;
 use egregore::identity::Identity;
+use egregore::status::build_node_status;
 
 #[derive(Parser)]
 #[command(
@@ -484,6 +486,8 @@ async fn main() -> anyhow::Result<()> {
         "egregore starting"
     );
 
+    let started_at = Instant::now();
+
     // Validate security configuration (fails fast on insecure defaults)
     if let Err(err) = config.validate_security() {
         tracing::error!("{}", err.trim());
@@ -555,7 +559,7 @@ async fn main() -> anyhow::Result<()> {
             identity: identity.clone(),
             engine: engine.clone(),
             config: Arc::new(config.clone()),
-            started_at: std::time::Instant::now(),
+            started_at,
             mcp_registry: api::mcp_registry::create_registry(),
         };
         let app = if config.mcp_enabled {
@@ -721,6 +725,26 @@ async fn main() -> anyhow::Result<()> {
     // Clone registry for shutdown handler
     let shutdown_registry = registry.clone();
 
+    if config.node_status_enabled {
+        // Publish node_status periodically and when peer connectivity changes.
+        let status_engine = engine.clone();
+        let status_identity = identity.clone();
+        let status_config = config.clone();
+        let status_registry = registry.clone();
+        tokio::spawn(async move {
+            run_node_status_publisher(
+                status_engine,
+                status_identity,
+                status_config,
+                status_registry,
+                started_at,
+            )
+            .await;
+        });
+    } else {
+        tracing::info!("node_status publisher disabled (node_status_enabled=false)");
+    }
+
     if let Some((listener, app)) = api_server {
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -742,6 +766,81 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_node_status_publisher(
+    engine: Arc<FeedEngine>,
+    identity: Identity,
+    config: Config,
+    registry: Option<Arc<gossip::registry::ConnectionRegistry>>,
+    started_at: Instant,
+) {
+    let hourly_interval = std::time::Duration::from_secs(3600);
+    let poll_interval = std::time::Duration::from_secs(30);
+    let mut last_published_at = Instant::now()
+        .checked_sub(hourly_interval)
+        .unwrap_or_else(Instant::now);
+    let mut last_connected_peers: HashSet<String> = HashSet::new();
+
+    loop {
+        let connected_peers: HashSet<String> = registry
+            .as_ref()
+            .map(|reg| {
+                reg.connected_peers()
+                    .into_iter()
+                    .map(|peer| peer.0)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let connectivity_changed = connected_peers != last_connected_peers;
+
+        if connectivity_changed || last_published_at.elapsed() >= hourly_interval {
+            let status_engine = engine.clone();
+            let status_identity = identity.clone();
+            let status_config = config.clone();
+            let status_registry = registry.clone();
+
+            let publish_result = tokio::task::spawn_blocking(move || {
+                let status = build_node_status(
+                    &status_identity,
+                    &status_config,
+                    &status_engine,
+                    status_registry.as_deref(),
+                    started_at,
+                )?;
+                let status_json = serde_json::to_value(&status)?;
+                status_engine.publish_with_schema(
+                    &status_identity,
+                    status_json,
+                    Some("node_status/v1".to_string()),
+                    None,
+                    vec!["node_status".to_string()],
+                )
+            })
+            .await;
+
+            match publish_result {
+                Ok(Ok(message)) => {
+                    tracing::debug!(
+                        hash = %message.hash,
+                        connected_peers = connected_peers.len(),
+                        connectivity_changed,
+                        "published node_status"
+                    );
+                    last_published_at = Instant::now();
+                    last_connected_peers = connected_peers;
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "failed to publish node_status");
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "node_status task failed");
+                }
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 fn load_encrypted_identity(identity_dir: &std::path::Path) -> anyhow::Result<Identity> {

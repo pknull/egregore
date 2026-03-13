@@ -15,6 +15,15 @@ port: 7654
 # Default: true
 api_enabled: true
 
+# Require Bearer token auth for mutating REST endpoints under /v1.
+# Read-only routes remain accessible without auth.
+# Compatibility default: false
+api_auth_enabled: false
+
+# Bearer token required when api_auth_enabled is true.
+# Example: "change-me-local-api-token"
+# api_auth_token: "change-me-local-api-token"
+
 # Enable MCP endpoint at POST /mcp on the HTTP API port.
 # Ignored if api_enabled is false.
 # Default: true

@@ -164,6 +164,10 @@ flow_rate_limit_per_second: 100
 # Default: false
 retention_enabled: false
 
+# Publish periodic node_status messages with peer/storage/throughput metrics.
+# Default: false
+node_status_enabled: false
+
 # Interval in seconds between retention cleanup runs.
 # Default: 3600 (1 hour)
 retention_interval_secs: 3600

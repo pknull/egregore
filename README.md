@@ -190,7 +190,7 @@ Generate a documented config file:
 
 This creates `./data/config.yaml` with all options and defaults. Edit this file for persistent configuration. CLI flags override config file values when both are specified.
 
-The config file supports options not available via CLI (flow control, retention settings) and persistent toggles like `schema_strict`, `api_enabled`, `api_auth_enabled`, and `mcp_enabled`. See the generated template for full documentation.
+The config file supports options not available via CLI (flow control, retention settings) and persistent toggles like `schema_strict`, `api_enabled`, `api_auth_enabled`, `mcp_enabled`, and `node_status_enabled`. See the generated template for full documentation.
 
 Compatibility note: REST API auth is off by default. Set `api_auth_enabled: true` and `api_auth_token: "..."` to require `Authorization: Bearer ...` on mutating `/v1/...` routes without breaking existing local read-only integrations.
 

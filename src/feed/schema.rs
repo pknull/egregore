@@ -202,6 +202,70 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
   }
 }"#,
     ),
+    (
+        "node_status.v1.json",
+        r#"{
+  "content_type": "node_status",
+  "version": 1,
+  "description": "Operational status published by an egregore node",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "node", "ts", "version", "uptime_secs", "peers", "storage", "throughput"],
+    "properties": {
+      "type": { "const": "node_status" },
+      "node": { "type": "string", "minLength": 1 },
+      "ts": { "type": "string", "format": "date-time" },
+      "version": { "type": "string", "minLength": 1 },
+      "uptime_secs": { "type": "integer", "minimum": 0 },
+      "peers": {
+        "type": "object",
+        "required": ["connected", "known", "health"],
+        "properties": {
+          "connected": { "type": "integer", "minimum": 0 },
+          "known": { "type": "integer", "minimum": 0 },
+          "health": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["peer", "status", "lag_msgs"],
+              "properties": {
+                "peer": { "type": "string", "minLength": 1 },
+                "status": { "type": "string", "minLength": 1 },
+                "lag_msgs": { "type": "integer", "minimum": 0 }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "storage": {
+        "type": "object",
+        "required": ["bytes", "message_count", "feed_count"],
+        "properties": {
+          "bytes": { "type": "integer", "minimum": 0 },
+          "message_count": { "type": "integer", "minimum": 0 },
+          "feed_count": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      },
+      "throughput": {
+        "type": "object",
+        "required": ["msgs_in_last_hour", "msgs_out_last_hour"],
+        "properties": {
+          "msgs_in_last_hour": { "type": "integer", "minimum": 0 },
+          "msgs_out_last_hour": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  }
+}"#,
+    ),
 ];
 
 /// Codec format for message serialization.
@@ -770,6 +834,7 @@ mod tests {
         assert!(registry.get("response/v1").is_some());
         assert!(registry.get("profile/v1").is_some());
         assert!(registry.get("message/v1").is_some());
+        assert!(registry.get("node_status/v1").is_some());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

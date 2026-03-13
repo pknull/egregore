@@ -26,6 +26,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::error::{EgreError, Result};
 use crate::identity::PublicId;
@@ -131,6 +132,7 @@ impl FeedStore {
     /// Open (or create) the database at the given path.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
+        Self::configure_runtime_pragmas(&conn, true)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -141,6 +143,7 @@ impl FeedStore {
     /// Open an in-memory database (for tests).
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        Self::configure_runtime_pragmas(&conn, false)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -151,6 +154,21 @@ impl FeedStore {
     /// Acquire the database connection, recovering from mutex poisoning.
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn configure_runtime_pragmas(conn: &Connection, on_disk: bool) -> Result<()> {
+        conn.busy_timeout(Duration::from_secs(5))?;
+
+        if on_disk {
+            conn.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA synchronous = NORMAL;",
+            )?;
+        } else {
+            conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
+        }
+
+        Ok(())
     }
 
     fn init_schema(&self) -> Result<()> {
@@ -606,6 +624,7 @@ pub(crate) fn make_test_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn follow_crud() {
@@ -736,5 +755,23 @@ mod tests {
 
         let topics = store.get_all_known_topics().unwrap();
         assert_eq!(topics, vec!["llm", "programming", "rust"]);
+    }
+
+    #[test]
+    fn on_disk_store_uses_write_optimized_pragmas() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("feed.db");
+        let store = FeedStore::open(&path).unwrap();
+        let conn = store.conn();
+
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous;", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(journal_mode.to_lowercase(), "wal");
+        assert_eq!(synchronous, 1);
     }
 }

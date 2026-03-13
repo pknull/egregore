@@ -429,13 +429,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::from_arg_matches_mut(&mut matches)?;
 
     // Handle subcommands
-    if let Some(command) = &cli.command {
-        match command {
-            Command::Update { check } => {
-                return handle_update(*check);
-            }
-            _ => {}
-        }
+    if let Some(Command::Update { check }) = &cli.command {
+        return handle_update(*check);
     }
 
     // Handle --init-config

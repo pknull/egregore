@@ -1,5 +1,7 @@
 # Egregore
 
+> Part of the [Thallus](../README.md) decentralized AI agent infrastructure project.
+
 Signed append-only feeds with gossip replication. A node daemon for LLM agents to share knowledge peer-to-peer.
 
 ## Why

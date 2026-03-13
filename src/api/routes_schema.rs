@@ -3,6 +3,7 @@
 //! Provides endpoints for listing registered schemas, getting schema details,
 //! and registering custom schemas.
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -120,9 +121,45 @@ pub async fn get_schema(
 /// POST /v1/schemas - Register a new schema.
 pub async fn register_schema(
     State(state): State<AppState>,
-    Json(req): Json<RegisterSchemaRequest>,
+    payload: Result<Json<RegisterSchemaRequest>, JsonRejection>,
 ) -> impl IntoResponse {
-    let mut schema = SchemaDefinition::new(req.content_type, req.version, req.json_schema);
+    let Json(req) = match payload {
+        Ok(req) => req,
+        Err(rejection) => return response::json_rejection::<SchemaInfo>(rejection).into_response(),
+    };
+
+    let content_type = req.content_type.trim();
+    if content_type.is_empty() {
+        return response::err_with_detail::<SchemaInfo>(
+            StatusCode::BAD_REQUEST,
+            "INVALID_CONTENT_TYPE",
+            "content_type must be a non-empty string",
+            response::validation_detail("content_type", "must be a non-empty string"),
+        )
+        .into_response();
+    }
+
+    if req.version == 0 {
+        return response::err_with_detail::<SchemaInfo>(
+            StatusCode::BAD_REQUEST,
+            "INVALID_VERSION",
+            "version must be greater than 0",
+            response::validation_detail("version", "must be greater than 0"),
+        )
+        .into_response();
+    }
+
+    if !req.json_schema.is_object() {
+        return response::err_with_detail::<SchemaInfo>(
+            StatusCode::BAD_REQUEST,
+            "INVALID_JSON_SCHEMA",
+            "json_schema must be a JSON object",
+            response::validation_detail("json_schema", "must be a JSON object"),
+        )
+        .into_response();
+    }
+
+    let mut schema = SchemaDefinition::new(content_type.to_string(), req.version, req.json_schema);
 
     if let Some(codec) = req.codec {
         schema = schema.with_codec(codec);
@@ -143,8 +180,30 @@ pub async fn register_schema(
 /// POST /v1/schemas/validate - Validate content against a schema.
 pub async fn validate_content(
     State(state): State<AppState>,
-    Json(req): Json<ValidateRequest>,
+    payload: Result<Json<ValidateRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(req) = match payload {
+        Ok(req) => req,
+        Err(rejection) => {
+            return response::json_rejection::<ValidateResponse>(rejection).into_response();
+        }
+    };
+
+    if let Some(schema_id) = req.schema_id.as_deref() {
+        if schema_id.trim().is_empty() {
+            return response::err_with_detail::<ValidateResponse>(
+                StatusCode::BAD_REQUEST,
+                "INVALID_SCHEMA_ID",
+                "schema_id must be a non-empty string when provided",
+                response::validation_detail(
+                    "schema_id",
+                    "must be a non-empty string when provided",
+                ),
+            )
+            .into_response();
+        }
+    }
+
     let registry = state.engine.schema_registry();
 
     // Determine effective schema_id

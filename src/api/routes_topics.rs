@@ -32,10 +32,11 @@ pub async fn add_topic_subscription(
 ) -> impl IntoResponse {
     let trimmed = topic.trim();
     if trimmed.is_empty() || trimmed.len() > 256 {
-        return response::err::<TopicInfo>(
+        return response::err_with_detail::<TopicInfo>(
             StatusCode::BAD_REQUEST,
             "INVALID_TOPIC",
             "topic must be 1-256 characters",
+            response::validation_detail("topic", "must be 1-256 characters"),
         )
         .into_response();
     }
@@ -70,10 +71,23 @@ pub async fn remove_topic_subscription(
     State(state): State<AppState>,
     Path(topic): Path<String>,
 ) -> impl IntoResponse {
+    let trimmed = topic.trim();
+    if trimmed.is_empty() || trimmed.len() > 256 {
+        return response::err_with_detail::<()>(
+            StatusCode::BAD_REQUEST,
+            "INVALID_TOPIC",
+            "topic must be 1-256 characters",
+            response::validation_detail("topic", "must be 1-256 characters"),
+        )
+        .into_response();
+    }
+
     let engine = state.engine.clone();
+    let topic_owned = trimmed.to_string();
 
     let result =
-        tokio::task::spawn_blocking(move || engine.store().remove_topic_subscription(&topic)).await;
+        tokio::task::spawn_blocking(move || engine.store().remove_topic_subscription(&topic_owned))
+            .await;
 
     match result {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),

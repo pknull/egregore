@@ -1,5 +1,6 @@
 //! Retention policy API routes.
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -145,16 +146,68 @@ pub async fn list_policies(State(state): State<AppState>) -> impl IntoResponse {
 /// Create a retention policy.
 pub async fn create_policy(
     State(state): State<AppState>,
-    Json(req): Json<CreatePolicyRequest>,
+    payload: Result<Json<CreatePolicyRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(req) = match payload {
+        Ok(req) => req,
+        Err(rejection) => {
+            return response::json_rejection::<PolicyResponse>(rejection).into_response()
+        }
+    };
+
     // Validate scope
     let scope = match req.scope.to_retention_scope() {
         Ok(s) => s,
         Err(msg) => {
-            return response::err::<()>(StatusCode::BAD_REQUEST, "INVALID_SCOPE", msg)
-                .into_response()
+            return response::err_with_detail::<PolicyResponse>(
+                StatusCode::BAD_REQUEST,
+                "INVALID_SCOPE",
+                msg,
+                response::validation_detail("scope", msg),
+            )
+            .into_response()
         }
     };
+
+    if matches!(req.max_age_secs, Some(0)) {
+        return response::err_with_detail::<PolicyResponse>(
+            StatusCode::BAD_REQUEST,
+            "INVALID_MAX_AGE_SECS",
+            "max_age_secs must be greater than 0",
+            response::validation_detail("max_age_secs", "must be greater than 0"),
+        )
+        .into_response();
+    }
+
+    if matches!(req.max_count, Some(0)) {
+        return response::err_with_detail::<PolicyResponse>(
+            StatusCode::BAD_REQUEST,
+            "INVALID_MAX_COUNT",
+            "max_count must be greater than 0",
+            response::validation_detail("max_count", "must be greater than 0"),
+        )
+        .into_response();
+    }
+
+    if matches!(req.max_bytes, Some(0)) {
+        return response::err_with_detail::<PolicyResponse>(
+            StatusCode::BAD_REQUEST,
+            "INVALID_MAX_BYTES",
+            "max_bytes must be greater than 0",
+            response::validation_detail("max_bytes", "must be greater than 0"),
+        )
+        .into_response();
+    }
+
+    if matches!(req.compact_key.as_deref(), Some(key) if key.trim().is_empty()) {
+        return response::err_with_detail::<PolicyResponse>(
+            StatusCode::BAD_REQUEST,
+            "INVALID_COMPACT_KEY",
+            "compact_key must be a non-empty string when provided",
+            response::validation_detail("compact_key", "must be a non-empty string when provided"),
+        )
+        .into_response();
+    }
 
     // Require at least one retention criterion
     if req.max_age_secs.is_none()
@@ -162,10 +215,14 @@ pub async fn create_policy(
         && req.max_bytes.is_none()
         && req.compact_key.is_none()
     {
-        return response::err::<()>(
+        return response::err_with_detail::<PolicyResponse>(
             StatusCode::BAD_REQUEST,
             "MISSING_CRITERION",
             "policy must have at least one of: max_age_secs, max_count, max_bytes, compact_key",
+            response::validation_detail(
+                "policy",
+                "must include at least one of: max_age_secs, max_count, max_bytes, compact_key",
+            ),
         )
         .into_response();
     }

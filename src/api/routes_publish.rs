@@ -4,6 +4,7 @@
 //! the node's Ed25519 key, chains to the previous message, and stores it.
 //! The message propagates to peers on the next gossip cycle.
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -35,8 +36,13 @@ pub struct PublishRequest {
 
 pub async fn publish(
     State(state): State<AppState>,
-    Json(req): Json<PublishRequest>,
+    payload: Result<Json<PublishRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(req) = match payload {
+        Ok(req) => req,
+        Err(rejection) => return response::json_rejection::<()>(rejection).into_response(),
+    };
+
     let identity = state.identity.clone();
     let engine = state.engine.clone();
 

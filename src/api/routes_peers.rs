@@ -1,3 +1,4 @@
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -125,13 +126,19 @@ pub async fn get_peers(State(state): State<AppState>) -> impl IntoResponse {
 
 pub async fn add_peer(
     State(state): State<AppState>,
-    Json(req): Json<AddPeerRequest>,
+    payload: Result<Json<AddPeerRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(req) = match payload {
+        Ok(req) => req,
+        Err(rejection) => return response::json_rejection::<PeerInfo>(rejection).into_response(),
+    };
+
     if !is_valid_peer_address(&req.address) {
-        return response::err::<PeerInfo>(
+        return response::err_with_detail::<PeerInfo>(
             StatusCode::BAD_REQUEST,
             "INVALID_ADDRESS",
             "address must be in host:port format",
+            response::validation_detail("address", "must be in host:port format"),
         )
         .into_response();
     }
@@ -167,10 +174,11 @@ pub async fn delete_peer(
     Path(address): Path<String>,
 ) -> impl IntoResponse {
     if !is_valid_peer_address(&address) {
-        return response::err::<()>(
+        return response::err_with_detail::<()>(
             StatusCode::BAD_REQUEST,
             "INVALID_ADDRESS",
             "address must be in host:port format",
+            response::validation_detail("address", "must be in host:port format"),
         )
         .into_response();
     }

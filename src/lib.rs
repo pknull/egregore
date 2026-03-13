@@ -6,3 +6,4 @@ pub mod feed;
 pub mod gossip;
 pub mod hooks;
 pub mod identity;
+pub mod status;

@@ -244,7 +244,7 @@ Compatibility note: REST API auth is off by default. Set `api_auth_enabled: true
 
 Response envelope: `{ success, data, error, metadata }`. Pagination uses `limit`/`offset`.
 
-When `api_auth_enabled: true`, mutating REST endpoints under `/v1/...` require `Authorization: Bearer <token>`. Missing or invalid auth returns `401` with the standard error envelope. Read-only routes such as `GET /v1/status`, `GET /v1/feed`, and `GET /v1/events` remain accessible without auth. `/mcp` is not covered by this toggle in this release.
+When `api_auth_enabled: true`, mutating REST endpoints under `/v1/...` require `Authorization: Bearer <token>`. Missing or invalid auth returns `401` with the standard error envelope. Read-only routes such as `GET /v1/status`, `GET /v1/feed`, and `GET /v1/events` remain accessible without auth. MCP follows the same split: read-only tools stay public, while mutating tools (`egregore_publish`, `egregore_add_peer`, `egregore_remove_peer`, `egregore_follow`, `egregore_unfollow`) require the same Bearer token and return an MCP tool error if auth is missing or invalid.
 
 ### MCP Integration
 

@@ -5,7 +5,7 @@
 //! Tool definitions and handlers live in mcp_tools.rs.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use super::mcp_tools;
 use super::AppState;
+use crate::config::Config;
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
@@ -96,7 +97,32 @@ fn rpc_err(id: Value, code: i64, message: String) -> Response {
     .into_response()
 }
 
-pub async fn mcp_handler(State(state): State<AppState>, body: String) -> Response {
+fn mcp_call_auth_ok(config: &Config, headers: &HeaderMap, tool_name: &str) -> bool {
+    if !config.api_auth_enabled {
+        return true;
+    }
+
+    if mcp_tools::tool_access(tool_name) != Some(mcp_tools::ToolAccess::Mutating) {
+        return true;
+    }
+
+    let expected_token = config
+        .api_auth_token
+        .as_deref()
+        .filter(|token| !token.trim().is_empty());
+    let provided_token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+
+    expected_token.is_some() && provided_token == expected_token
+}
+
+pub async fn mcp_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let req: JsonRpcRequest = match serde_json::from_str(&body) {
         Ok(r) => r,
         Err(_) => return rpc_err(Value::Null, PARSE_ERROR, "Parse error".into()),
@@ -155,6 +181,13 @@ pub async fn mcp_handler(State(state): State<AppState>, body: String) -> Respons
                 return rpc_err(id, INVALID_PARAMS, e.to_string());
             }
 
+            if !mcp_call_auth_ok(&state.config, &headers, &name) {
+                return rpc_ok(
+                    id,
+                    serde_json::to_value(mcp_tools::ToolCallResult::unauthorized()).unwrap(),
+                );
+            }
+
             let result = mcp_tools::dispatch_tool(&name, arguments, &state).await;
             rpc_ok(id, serde_json::to_value(result).unwrap())
         }
@@ -175,7 +208,7 @@ mod tests {
     use crate::feed::store::FeedStore;
     use crate::identity::Identity;
     use axum::body::Body;
-    use axum::http::Request;
+    use axum::http::{Request, StatusCode as HttpStatusCode};
     use http_body_util::BodyExt;
     use std::sync::Arc;
     use std::time::Instant;
@@ -193,13 +226,21 @@ mod tests {
         }
     }
 
-    async fn rpc_post(app: axum::Router, body: &Value) -> (StatusCode, Option<Value>) {
-        let req = Request::builder()
+    async fn rpc_post_with_auth(
+        app: axum::Router,
+        body: &Value,
+        auth_header: Option<&str>,
+    ) -> (HttpStatusCode, Option<Value>) {
+        let mut req = Request::builder()
             .method("POST")
             .uri("/mcp")
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap();
+        if let Some(value) = auth_header {
+            req.headers_mut()
+                .insert("authorization", value.parse().unwrap());
+        }
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -208,6 +249,10 @@ mod tests {
         } else {
             (status, Some(serde_json::from_slice(&bytes).unwrap()))
         }
+    }
+
+    async fn rpc_post(app: axum::Router, body: &Value) -> (HttpStatusCode, Option<Value>) {
+        rpc_post_with_auth(app, body, None).await
     }
 
     #[tokio::test]
@@ -501,6 +546,108 @@ mod tests {
         )
         .await;
         assert_eq!(body.unwrap()["result"]["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn mutating_tool_requires_auth_when_enabled() {
+        let state = AppState {
+            config: Arc::new(Config {
+                api_auth_enabled: true,
+                api_auth_token: Some("secret-token".to_string()),
+                ..Config::default()
+            }),
+            ..test_state()
+        };
+        let app = router(state);
+        let (status, body) = rpc_post(
+            app,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 14,
+                "method": "tools/call",
+                "params": {
+                    "name": "egregore_publish",
+                    "arguments": {
+                        "content": {
+                            "type": "message",
+                            "text": "unauthorized"
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = body.unwrap();
+        assert_eq!(body["result"]["isError"], true);
+        assert_eq!(
+            body["result"]["content"][0]["text"],
+            "missing or invalid API token"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_tool_remains_public_when_auth_enabled() {
+        let state = AppState {
+            config: Arc::new(Config {
+                api_auth_enabled: true,
+                api_auth_token: Some("secret-token".to_string()),
+                ..Config::default()
+            }),
+            ..test_state()
+        };
+        let app = router(state);
+        let (status, body) = rpc_post(
+            app,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": { "name": "egregore_status" }
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = body.unwrap();
+        assert_eq!(body["result"]["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn mutating_tool_allows_valid_auth_when_enabled() {
+        let state = AppState {
+            config: Arc::new(Config {
+                api_auth_enabled: true,
+                api_auth_token: Some("secret-token".to_string()),
+                ..Config::default()
+            }),
+            ..test_state()
+        };
+        let app = router(state);
+        let (status, body) = rpc_post_with_auth(
+            app,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 16,
+                "method": "tools/call",
+                "params": {
+                    "name": "egregore_publish",
+                    "arguments": {
+                        "content": {
+                            "type": "message",
+                            "text": "authorized"
+                        }
+                    }
+                }
+            }),
+            Some("Bearer secret-token"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = body.unwrap();
+        assert_eq!(body["result"]["isError"], false);
     }
 
     #[tokio::test]

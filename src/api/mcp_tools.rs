@@ -13,6 +13,12 @@ use super::AppState;
 use crate::feed::models::FeedQuery;
 use crate::identity::PublicId;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAccess {
+    ReadOnly,
+    Mutating,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ToolDefinition {
     pub name: &'static str,
@@ -65,6 +71,23 @@ impl ToolCallResult {
             Ok(Ok(val)) => on_ok(val),
             _ => Self::error("internal error".into()),
         }
+    }
+
+    pub fn unauthorized() -> Self {
+        Self::error("missing or invalid API token".into())
+    }
+}
+
+pub fn tool_access(name: &str) -> Option<ToolAccess> {
+    match name {
+        "egregore_status" | "egregore_identity" | "egregore_query" | "egregore_peers"
+        | "egregore_follows" | "egregore_mesh" => Some(ToolAccess::ReadOnly),
+        "egregore_publish"
+        | "egregore_add_peer"
+        | "egregore_remove_peer"
+        | "egregore_follow"
+        | "egregore_unfollow" => Some(ToolAccess::Mutating),
+        _ => None,
     }
 }
 

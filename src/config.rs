@@ -140,6 +140,9 @@ pub struct Config {
     /// Enable automatic retention cleanup.
     #[serde(default)]
     pub retention_enabled: bool,
+    /// Publish periodic node_status messages to the local feed.
+    #[serde(default)]
+    pub node_status_enabled: bool,
     /// Interval in seconds between retention cleanup runs (default: 3600 = 1 hour).
     #[serde(default = "default_retention_interval_secs")]
     pub retention_interval_secs: u64,
@@ -229,6 +232,7 @@ impl Default for Config {
             mdns_discovery: false,
             mdns_service: default_mdns_service(),
             retention_enabled: false,
+            node_status_enabled: false,
             retention_interval_secs: DEFAULT_RETENTION_INTERVAL_SECS,
             tombstone_max_age_secs: DEFAULT_TOMBSTONE_MAX_AGE_SECS,
             gossip_bind: default_gossip_bind(),
@@ -588,6 +592,7 @@ mod tests {
         assert!(parsed.api_auth_enabled);
         assert_eq!(parsed.api_auth_token.as_deref(), Some("test-token"));
         assert!(!parsed.mcp_enabled);
+        assert!(!parsed.node_status_enabled);
         assert_eq!(parsed.hooks.len(), 2);
         assert_eq!(parsed.hooks[0].name.as_deref(), Some("test-hook"));
         assert_eq!(
@@ -605,6 +610,7 @@ mod tests {
         assert!(!config.api_auth_enabled);
         assert!(config.api_auth_token.is_none());
         assert!(config.mcp_enabled);
+        assert!(!config.node_status_enabled);
         assert!(config.hooks.is_empty());
     }
 

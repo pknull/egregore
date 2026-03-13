@@ -36,6 +36,14 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
+    /// Emit machine-readable JSON on supported administrative commands
+    #[arg(long, global = true)]
+    json: bool,
+
+    /// Suppress normal output on supported administrative commands
+    #[arg(long, global = true)]
+    quiet: bool,
+
     /// Data directory for identity and database
     #[arg(long, default_value = "./data", global = true)]
     data_dir: PathBuf,
@@ -117,7 +125,7 @@ struct Cli {
     mdns: bool,
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Debug)]
 enum Command {
     /// Check for updates and optionally install the latest version
     Update {
@@ -125,7 +133,127 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+
+    /// Follow a public feed author
+    Follow {
+        /// Public ID to follow
+        author: String,
+    },
+
+    /// List followed authors
+    Follows,
+
+    /// Stop following a public feed author
+    Unfollow {
+        /// Public ID to unfollow
+        author: String,
+    },
+
+    /// Manage topic subscriptions
+    Topic {
+        #[command(subcommand)]
+        command: TopicCommand,
+    },
+
+    /// Manage consumer groups
+    Group {
+        #[command(subcommand)]
+        command: GroupCommand,
+    },
+
+    /// Manage schema registry entries
+    Schema {
+        #[command(subcommand)]
+        command: SchemaCommand,
+    },
+
+    /// Manage global retention policy
+    Retention {
+        #[command(subcommand)]
+        command: RetentionCommand,
+    },
+
+    /// Manage gossip peers
+    Peer {
+        #[command(subcommand)]
+        command: PeerCommand,
+    },
+
+    /// Show local identity information
+    Identity {
+        /// Include exportable private key material
+        #[arg(long)]
+        export: bool,
+    },
 }
+
+#[derive(clap::Subcommand, Debug, Clone)]
+enum TopicCommand {
+    /// Subscribe to a topic
+    Subscribe { name: String },
+    /// List topic subscriptions
+    List,
+    /// Unsubscribe from a topic
+    Unsubscribe { name: String },
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+enum GroupCommand {
+    /// Create a consumer group
+    Create {
+        name: String,
+        /// Comma-separated member public IDs to join immediately
+        #[arg(long)]
+        members: Option<String>,
+    },
+    /// List consumer groups
+    List,
+    /// Show a consumer group with membership details
+    Show { name: String },
+    /// Delete a consumer group
+    Delete { name: String },
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+enum SchemaCommand {
+    /// Register a schema from a JSON file
+    Register {
+        content_type: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// List registered schemas
+    List,
+    /// Show a schema by schema ID or content type
+    Show { schema: String },
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+enum RetentionCommand {
+    /// Set the global retention policy
+    Set {
+        /// Maximum age such as 30d, 12h, or 1h30m
+        #[arg(long)]
+        max_age: Option<String>,
+        /// Maximum message count to keep globally
+        #[arg(long)]
+        max_messages: Option<u64>,
+    },
+    /// Show the global retention policy
+    Show,
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+enum PeerCommand {
+    /// Add a peer address
+    Add { address: String },
+    /// List configured peer addresses
+    List,
+    /// Show detailed peer status
+    Status,
+}
+
+mod cli_admin;
 
 /// Build the final Config by merging: defaults -> YAML file -> CLI overrides.
 fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config> {
@@ -306,6 +434,7 @@ async fn main() -> anyhow::Result<()> {
             Command::Update { check } => {
                 return handle_update(*check);
             }
+            _ => {}
         }
     }
 
@@ -322,6 +451,28 @@ async fn main() -> anyhow::Result<()> {
 
     // Ensure data directory exists
     std::fs::create_dir_all(&config.data_dir)?;
+
+    if let Some(command) = &cli.command {
+        let identity_dir = config.identity_dir();
+        let identity = if cli.passphrase {
+            load_encrypted_identity(&identity_dir)?
+        } else {
+            Identity::load_or_generate(&identity_dir)?
+        };
+        let store = FeedStore::open(&config.db_path())?;
+        let ctx = cli_admin::CliContext {
+            config: config.clone(),
+            store,
+            identity,
+        };
+        let output = cli_admin::OutputMode {
+            json: cli.json,
+            quiet: cli.quiet,
+        };
+        if cli_admin::handle_command(command, &ctx, output)? {
+            return Ok(());
+        }
+    }
 
     // Load or generate identity
     let identity_dir = config.identity_dir();
@@ -627,4 +778,47 @@ fn load_encrypted_identity(identity_dir: &std::path::Path) -> anyhow::Result<Ide
 
 fn prompt_passphrase(prompt: &str) -> anyhow::Result<String> {
     Ok(rpassword::prompt_password(prompt)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_parses_group_create_with_members_and_json_flag() {
+        let cli = Cli::try_parse_from([
+            "egregore",
+            "--json",
+            "--data-dir",
+            "/tmp/egregore",
+            "group",
+            "create",
+            "workers",
+            "--members",
+            "@one.ed25519,@two.ed25519",
+        ])
+        .unwrap();
+
+        assert!(cli.json);
+        match cli.command.unwrap() {
+            Command::Group {
+                command: GroupCommand::Create { name, members },
+            } => {
+                assert_eq!(name, "workers");
+                assert_eq!(members.as_deref(), Some("@one.ed25519,@two.ed25519"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_identity_export_and_quiet() {
+        let cli = Cli::try_parse_from(["egregore", "--quiet", "identity", "--export"]).unwrap();
+
+        assert!(cli.quiet);
+        match cli.command.unwrap() {
+            Command::Identity { export } => assert!(export),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 }

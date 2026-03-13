@@ -14,6 +14,8 @@ use serde::Deserialize;
 use crate::api::response;
 use crate::api::AppState;
 use crate::feed::models::FeedQuery;
+use crate::feed::models::Message;
+use crate::feed::private_box;
 use crate::identity::PublicId;
 
 #[derive(Deserialize, Default)]
@@ -40,6 +42,7 @@ pub async fn get_feed(
     Query(params): Query<FeedParams>,
 ) -> impl IntoResponse {
     let engine = state.engine.clone();
+    let identity = state.identity.clone();
     let include_self = params.include_self.unwrap_or(false);
     let self_id = state.identity.public_id();
 
@@ -59,6 +62,10 @@ pub async fn get_feed(
 
     match result {
         Ok(Ok(msgs)) => {
+            let msgs: Vec<Message> = msgs
+                .into_iter()
+                .map(|msg| decrypt_for_local_identity(&identity, msg))
+                .collect();
             let meta = response::ApiMetadata {
                 total: None,
                 limit: params.limit,
@@ -82,6 +89,7 @@ pub async fn get_feed_by_author(
     Query(params): Query<FeedParams>,
 ) -> impl IntoResponse {
     let engine = state.engine.clone();
+    let identity = state.identity.clone();
 
     let result = tokio::task::spawn_blocking(move || {
         engine.query(&FeedQuery {
@@ -95,7 +103,13 @@ pub async fn get_feed_by_author(
     .await;
 
     match result {
-        Ok(Ok(msgs)) => response::ok(msgs).into_response(),
+        Ok(Ok(msgs)) => {
+            let msgs: Vec<Message> = msgs
+                .into_iter()
+                .map(|msg| decrypt_for_local_identity(&identity, msg))
+                .collect();
+            response::ok(msgs).into_response()
+        }
         Ok(Err(e)) => response::from_error(e),
         Err(_) => response::err::<()>(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -111,6 +125,7 @@ pub async fn get_insights(
     Query(params): Query<FeedParams>,
 ) -> impl IntoResponse {
     let engine = state.engine.clone();
+    let identity = state.identity.clone();
 
     let result = tokio::task::spawn_blocking(move || {
         engine.query(&FeedQuery {
@@ -123,7 +138,13 @@ pub async fn get_insights(
     .await;
 
     match result {
-        Ok(Ok(msgs)) => response::ok(msgs).into_response(),
+        Ok(Ok(msgs)) => {
+            let msgs: Vec<Message> = msgs
+                .into_iter()
+                .map(|msg| decrypt_for_local_identity(&identity, msg))
+                .collect();
+            response::ok(msgs).into_response()
+        }
         Ok(Err(e)) => response::from_error(e),
         Err(_) => response::err::<()>(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -139,6 +160,7 @@ pub async fn search_insights(
     Query(params): Query<SearchParams>,
 ) -> impl IntoResponse {
     let engine = state.engine.clone();
+    let identity = state.identity.clone();
     let query_text = params.q.unwrap_or_default();
     let limit = params.limit.unwrap_or(20).min(200);
 
@@ -154,7 +176,13 @@ pub async fn search_insights(
     let result = tokio::task::spawn_blocking(move || engine.search(&query_text, limit)).await;
 
     match result {
-        Ok(Ok(msgs)) => response::ok(msgs).into_response(),
+        Ok(Ok(msgs)) => {
+            let msgs: Vec<Message> = msgs
+                .into_iter()
+                .map(|msg| decrypt_for_local_identity(&identity, msg))
+                .collect();
+            response::ok(msgs).into_response()
+        }
         Ok(Err(e)) => response::from_error(e),
         Err(_) => response::err::<()>(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -170,11 +198,14 @@ pub async fn get_message_by_hash(
     Path(hash): Path<String>,
 ) -> impl IntoResponse {
     let engine = state.engine.clone();
+    let identity = state.identity.clone();
 
     let result = tokio::task::spawn_blocking(move || engine.get_message(&hash)).await;
 
     match result {
-        Ok(Ok(Some(msg))) => response::ok(msg).into_response(),
+        Ok(Ok(Some(msg))) => {
+            response::ok(decrypt_for_local_identity(&identity, msg)).into_response()
+        }
         Ok(Ok(None)) => response::err::<()>(
             axum::http::StatusCode::NOT_FOUND,
             "NOT_FOUND",
@@ -188,5 +219,20 @@ pub async fn get_message_by_hash(
             "failed to retrieve message",
         )
         .into_response(),
+    }
+}
+
+fn decrypt_for_local_identity(identity: &crate::identity::Identity, message: Message) -> Message {
+    if !private_box::is_private_box_content(&message.content) {
+        return message;
+    }
+
+    match private_box::decrypt_for_identity(identity, &message) {
+        Ok(Some(decrypted)) => decrypted,
+        Ok(None) => message,
+        Err(error) => {
+            tracing::warn!(error = %error, hash = %message.hash, "failed to decrypt private box message");
+            message
+        }
     }
 }

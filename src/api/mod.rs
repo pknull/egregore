@@ -1,8 +1,9 @@
 //! HTTP API — localhost-only REST + SSE streaming + optional MCP JSON-RPC.
 //!
 //! All endpoints bind to 127.0.0.1 (binding happens in main.rs). Only local
-//! processes can access the API — there is no authentication on the HTTP layer.
-//! The security boundary is the loopback interface itself.
+//! processes can access the API. Mutating REST endpoints can optionally require
+//! a Bearer token, while read-only routes remain loopback-only without auth.
+//! MCP auth is handled separately.
 //!
 //! ## CSRF Protection
 //!
@@ -36,6 +37,7 @@ use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
+use axum::extract::State;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -57,6 +59,14 @@ pub struct AppState {
     pub mcp_registry: SharedRegistry,
 }
 
+fn is_mutating_rest_request(req: &Request<Body>) -> bool {
+    req.uri().path().starts_with("/v1/")
+        && matches!(
+            *req.method(),
+            Method::POST | Method::PUT | Method::DELETE | Method::PATCH
+        )
+}
+
 /// CSRF protection middleware.
 ///
 /// Requires `Content-Type: application/json` for mutating HTTP methods (POST, PUT, DELETE, PATCH).
@@ -65,12 +75,10 @@ pub struct AppState {
 /// Returns 415 Unsupported Media Type if the Content-Type is missing or not application/json.
 async fn require_json_content_type(req: Request<Body>, next: Next) -> Response {
     // Only check mutating methods
-    let is_mutating = matches!(
+    if matches!(
         *req.method(),
         Method::POST | Method::PUT | Method::DELETE | Method::PATCH
-    );
-
-    if is_mutating {
+    ) {
         let content_type = req
             .headers()
             .get(header::CONTENT_TYPE)
@@ -95,11 +103,47 @@ async fn require_json_content_type(req: Request<Body>, next: Next) -> Response {
     next.run(req).await
 }
 
+/// Optional Bearer token auth for mutating REST endpoints.
+///
+/// Only applies to mutating `/v1/...` routes. Read-only routes remain accessible
+/// without auth, and `/mcp` is intentionally excluded until issue #89.
+async fn require_api_auth(
+    State(config): State<Arc<Config>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if !config.api_auth_enabled || !is_mutating_rest_request(&req) {
+        return next.run(req).await;
+    }
+
+    let expected_token = config
+        .api_auth_token
+        .as_deref()
+        .filter(|token| !token.trim().is_empty());
+    let provided_token = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+
+    if expected_token.is_some() && provided_token == expected_token {
+        return next.run(req).await;
+    }
+
+    response::err::<()>(
+        StatusCode::UNAUTHORIZED,
+        "UNAUTHORIZED",
+        "missing or invalid API token",
+    )
+    .into_response()
+}
+
 pub fn router(state: AppState) -> Router {
     router_with_mcp(state, true)
 }
 
 pub fn router_with_mcp(state: AppState, mcp_enabled: bool) -> Router {
+    let auth_config = state.config.clone();
     let router = Router::new()
         .route("/v1/identity", get(routes_identity::get_identity))
         .route("/v1/publish", post(routes_publish::publish))
@@ -174,6 +218,10 @@ pub fn router_with_mcp(state: AppState, mcp_enabled: bool) -> Router {
         router
     };
     router
+        .layer(middleware::from_fn_with_state(
+            auth_config,
+            require_api_auth,
+        ))
         .layer(middleware::from_fn(require_json_content_type))
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
         .with_state(state)
@@ -189,13 +237,17 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_state() -> AppState {
+        test_state_with_config(Config::default())
+    }
+
+    fn test_state_with_config(config: Config) -> AppState {
         let store = FeedStore::open_memory().unwrap();
         let engine = FeedEngine::new(store);
 
         AppState {
             identity: Identity::generate(),
             engine: Arc::new(engine),
-            config: Arc::new(Config::default()),
+            config: Arc::new(config),
             started_at: Instant::now(),
             mcp_registry: mcp_registry::create_registry(),
         }
@@ -294,5 +346,139 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
+    async fn auth_rejects_mutating_rest_request_without_token() {
+        let state = test_state_with_config(Config {
+            api_auth_enabled: true,
+            api_auth_token: Some("secret-token".to_string()),
+            ..Config::default()
+        });
+        let app = router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"content":{"type":"message","text":"auth required"}}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["success"], false);
+        assert_eq!(body["error"]["code"], "UNAUTHORIZED");
+        assert_eq!(body["error"]["message"], "missing or invalid API token");
+    }
+
+    #[tokio::test]
+    async fn auth_rejects_mutating_rest_request_with_invalid_token() {
+        let state = test_state_with_config(Config {
+            api_auth_enabled: true,
+            api_auth_token: Some("secret-token".to_string()),
+            ..Config::default()
+        });
+        let app = router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/publish")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer wrong-token")
+            .body(Body::from(
+                r#"{"content":{"type":"message","text":"auth required"}}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_allows_mutating_rest_request_with_valid_token() {
+        let state = test_state_with_config(Config {
+            api_auth_enabled: true,
+            api_auth_token: Some("secret-token".to_string()),
+            ..Config::default()
+        });
+        let app = router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/publish")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::from(
+                r#"{"content":{"type":"message","text":"authorized"}}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_keeps_read_only_routes_public() {
+        let state = test_state_with_config(Config {
+            api_auth_enabled: true,
+            api_auth_token: Some("secret-token".to_string()),
+            ..Config::default()
+        });
+        let app = router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/status")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_does_not_change_csrf_content_type_behavior() {
+        let state = test_state_with_config(Config {
+            api_auth_enabled: true,
+            api_auth_token: Some("secret-token".to_string()),
+            ..Config::default()
+        });
+        let app = router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/publish")
+            .body(Body::from(
+                r#"{"content":{"type":"message","text":"wrong content type"}}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
+    async fn auth_does_not_gate_mcp_requests_in_this_branch() {
+        let state = test_state_with_config(Config {
+            api_auth_enabled: true,
+            api_auth_token: Some("secret-token".to_string()),
+            ..Config::default()
+        });
+        let app = router_with_mcp(state, true);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"unknown"}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

@@ -83,6 +83,13 @@ pub struct Config {
     /// Enable HTTP API server (REST + SSE + optional MCP endpoint).
     #[serde(default = "default_api_enabled")]
     pub api_enabled: bool,
+    /// Require Bearer token auth for mutating REST API endpoints under /v1.
+    /// Read-only routes remain accessible without auth.
+    #[serde(default)]
+    pub api_auth_enabled: bool,
+    /// Bearer token accepted by mutating REST API endpoints when auth is enabled.
+    #[serde(default)]
+    pub api_auth_token: Option<String>,
     /// Enable MCP endpoint (/mcp) on HTTP API.
     #[serde(default = "default_mcp_enabled")]
     pub mcp_enabled: bool,
@@ -200,6 +207,8 @@ impl Default for Config {
         Self {
             data_dir: PathBuf::from("./data"),
             api_enabled: true,
+            api_auth_enabled: false,
+            api_auth_token: None,
             mcp_enabled: true,
             port: DEFAULT_HTTP_PORT,
             gossip_port: DEFAULT_GOSSIP_PORT,
@@ -331,6 +340,12 @@ impl Config {
     /// Validate the config for obvious errors.
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.api_enabled {
+            if self.api_auth_enabled {
+                match self.api_auth_token.as_deref() {
+                    Some(token) if !token.trim().is_empty() => {}
+                    _ => anyhow::bail!("api_auth_enabled=true requires api_auth_token to be set"),
+                }
+            }
             if self.port == self.gossip_port {
                 anyhow::bail!(
                     "port and gossip_port must differ ({} == {})",
@@ -545,6 +560,8 @@ mod tests {
         let config = Config {
             peers: vec!["192.168.1.100:7655".to_string()],
             schema_strict: true,
+            api_auth_enabled: true,
+            api_auth_token: Some("test-token".to_string()),
             mcp_enabled: false,
             hooks: vec![
                 HookEntry {
@@ -568,6 +585,8 @@ mod tests {
         assert_eq!(parsed.peers.len(), 1);
         assert!(parsed.schema_strict);
         assert!(parsed.api_enabled);
+        assert!(parsed.api_auth_enabled);
+        assert_eq!(parsed.api_auth_token.as_deref(), Some("test-token"));
         assert!(!parsed.mcp_enabled);
         assert_eq!(parsed.hooks.len(), 2);
         assert_eq!(parsed.hooks[0].name.as_deref(), Some("test-hook"));
@@ -583,6 +602,8 @@ mod tests {
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(!config.schema_strict);
         assert!(config.api_enabled);
+        assert!(!config.api_auth_enabled);
+        assert!(config.api_auth_token.is_none());
         assert!(config.mcp_enabled);
         assert!(config.hooks.is_empty());
     }
@@ -603,6 +624,26 @@ mod tests {
             api_enabled: false,
             port: 7654,
             gossip_port: 7654,
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_missing_api_auth_token_when_enabled() {
+        let config = Config {
+            api_auth_enabled: true,
+            api_auth_token: None,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_api_auth_token_when_enabled() {
+        let config = Config {
+            api_auth_enabled: true,
+            api_auth_token: Some("secret-token".to_string()),
             ..Config::default()
         };
         assert!(config.validate().is_ok());

@@ -46,6 +46,39 @@ async fn json_body(response: axum::response::Response) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+fn assert_validation_error(
+    json: &Value,
+    expected_code: &str,
+    expected_field: &str,
+    expected_message_fragment: &str,
+) {
+    assert_eq!(json["success"], false);
+    assert_eq!(json["error"]["code"], expected_code);
+    assert_eq!(json["error"]["details"][0]["field"], expected_field);
+    assert!(
+        json["error"]["details"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(expected_message_fragment),
+        "expected validation message containing {:?}, got {:?}",
+        expected_message_fragment,
+        json["error"]["details"][0]["message"]
+    );
+}
+
+fn assert_validation_error_code_and_field(json: &Value, expected_code: &str, expected_field: &str) {
+    assert_eq!(json["success"], false);
+    assert_eq!(json["error"]["code"], expected_code);
+    assert_eq!(json["error"]["details"][0]["field"], expected_field);
+    assert!(
+        json["error"]["details"][0]["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "expected non-empty validation detail message, got {:?}",
+        json["error"]["details"][0]["message"]
+    );
+}
+
 // ============ GROUP TESTS ============
 
 #[tokio::test]
@@ -194,6 +227,40 @@ async fn test_join_and_leave_group() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_join_group_invalid_member_id_returns_structured_error() {
+    let (_engine, app) = create_test_app();
+
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/groups")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"group_id": "join-test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/groups/join-test/join")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"member_id":"not-a-public-id"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = json_body(response).await;
+    assert_validation_error(&json, "INVALID_MEMBER_ID", "member_id", "@<base64>.ed25519");
 }
 
 #[tokio::test]
@@ -363,6 +430,27 @@ async fn test_topic_subscription_lifecycle() {
     assert!(!topics.contains(&"rust"));
 }
 
+#[tokio::test]
+async fn test_topic_subscription_invalid_topic_returns_structured_error() {
+    let (_engine, app) = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/topics/%20")
+                .header("content-type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = json_body(response).await;
+    assert_validation_error(&json, "INVALID_TOPIC", "topic", "1-256 characters");
+}
+
 // ============ IDENTITY TESTS ============
 
 #[tokio::test]
@@ -499,6 +587,29 @@ async fn test_list_schemas() {
     assert!(json["success"].as_bool().unwrap());
 }
 
+#[tokio::test]
+async fn test_register_schema_invalid_payload_returns_structured_error() {
+    let (_engine, app) = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/schemas")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"content_type":"","version":1,"json_schema":"not-an-object"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = json_body(response).await;
+    assert_validation_error(&json, "INVALID_CONTENT_TYPE", "content_type", "non-empty");
+}
+
 // ============ RETENTION TESTS ============
 
 #[tokio::test]
@@ -519,6 +630,32 @@ async fn test_list_retention_policies() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = json_body(response).await;
     assert!(json["success"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn test_create_retention_policy_invalid_payload_returns_structured_error() {
+    let (_engine, app) = create_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/retention/policies")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"scope":"global","max_age_secs":0}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = json_body(response).await;
+    assert_validation_error(
+        &json,
+        "INVALID_MAX_AGE_SECS",
+        "max_age_secs",
+        "greater than 0",
+    );
 }
 
 // ============ CSRF PROTECTION TESTS ============
@@ -670,11 +807,13 @@ async fn test_publish_invalid_json_returns_error() {
         .await
         .unwrap();
 
-    // Should return 422 Unprocessable Entity or 400 Bad Request
     assert!(
         response.status() == StatusCode::UNPROCESSABLE_ENTITY
             || response.status() == StatusCode::BAD_REQUEST
     );
+
+    let json = json_body(response).await;
+    assert_validation_error_code_and_field(&json, "INVALID_JSON_BODY", "body");
 }
 
 // ============ EVENTS (SSE) TESTS ============

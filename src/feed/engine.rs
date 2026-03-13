@@ -8,6 +8,7 @@ use tokio::sync::broadcast;
 
 use crate::error::{EgreError, Result};
 use crate::feed::models::{FeedQuery, Message, UnsignedMessage};
+use crate::feed::private_box;
 use crate::feed::schema::SchemaRegistry;
 use crate::feed::store::FeedStore;
 use crate::identity::{sign_bytes, verify_signature, Identity};
@@ -140,9 +141,20 @@ impl FeedEngine {
         trace_id: Option<String>,
         span_id: Option<String>,
     ) -> Result<Message> {
-        // Determine effective schema_id
-        let effective_schema_id =
-            schema_id.or_else(|| self.schema_registry.infer_schema_id(&content));
+        let mut content = content;
+        let original_schema_id = schema_id
+            .clone()
+            .or_else(|| self.schema_registry.infer_schema_id(&content));
+
+        let (content, effective_schema_id) = if let Some(prepared) =
+            private_box::prepare_for_publish(identity, content.clone(), original_schema_id.clone())?
+        {
+            self.schema_registry
+                .validate(&prepared.plaintext_content, original_schema_id.as_deref())?;
+            (prepared.encrypted_content, prepared.schema_id)
+        } else {
+            (std::mem::take(&mut content), original_schema_id)
+        };
 
         // Validate content against schema
         self.schema_registry

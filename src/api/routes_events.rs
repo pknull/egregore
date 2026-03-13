@@ -13,6 +13,7 @@ use serde::Deserialize;
 use tokio::sync::broadcast;
 
 use crate::api::AppState;
+use crate::feed::private_box;
 
 /// Query parameters for event subscription.
 #[derive(Deserialize, Default)]
@@ -43,11 +44,25 @@ pub async fn subscribe(
     Query(params): Query<EventParams>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut rx = state.engine.subscribe();
+    let identity = state.identity.clone();
 
     let stream = async_stream::stream! {
         loop {
             match rx.recv().await {
                 Ok(msg) => {
+                    let msg = if private_box::is_private_box_content(&msg.content) {
+                        match private_box::decrypt_for_identity(&identity, msg.as_ref()) {
+                            Ok(Some(decrypted)) => std::sync::Arc::new(decrypted),
+                            Ok(None) => msg,
+                            Err(error) => {
+                                tracing::warn!(error = %error, hash = %msg.hash, "failed to decrypt private box SSE message");
+                                msg
+                            }
+                        }
+                    } else {
+                        msg
+                    };
+
                     // Apply content_type filter
                     if let Some(ref ct) = params.content_type {
                         let msg_type = msg

@@ -22,22 +22,28 @@ use tower::ServiceExt;
 ///
 /// Uses in-memory SQLite and generates a fresh identity for each test.
 fn create_test_app() -> (Arc<FeedEngine>, axum::Router) {
+    let (identity, engine) = create_test_engine();
+    let app = create_test_app_with_identity(identity, engine.clone());
+    (engine, app)
+}
+
+fn create_test_engine() -> (Identity, Arc<FeedEngine>) {
     let identity = Identity::generate();
     let store = FeedStore::open_memory().unwrap();
     let engine = Arc::new(FeedEngine::new(store));
+    (identity, engine)
+}
 
+fn create_test_app_with_identity(identity: Identity, engine: Arc<FeedEngine>) -> axum::Router {
     let state = AppState {
         identity,
-        engine: engine.clone(),
+        engine,
         config: Arc::new(Config::default()),
         started_at: Instant::now(),
         mcp_registry: mcp_registry::create_registry(),
     };
 
-    // Use production router without MCP to avoid endpoint conflicts in tests
-    let app = router_with_mcp(state, false);
-
-    (engine, app)
+    router_with_mcp(state, false)
 }
 
 /// Helper to parse JSON response body.
@@ -814,6 +820,107 @@ async fn test_publish_invalid_json_returns_error() {
 
     let json = json_body(response).await;
     assert_validation_error_code_and_field(&json, "INVALID_JSON_BODY", "body");
+}
+
+#[tokio::test]
+async fn test_private_box_publish_stores_ciphertext_but_decrypts_for_sender() {
+    let (sender, engine) = create_test_engine();
+    let app = create_test_app_with_identity(sender.clone(), engine.clone());
+    let recipient = Identity::generate();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/publish")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{
+                        "content": {{
+                            "type": "message",
+                            "text": "top secret",
+                            "encrypt_for": ["{}"]
+                        }}
+                    }}"#,
+                    recipient.public_id().0
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let stored = engine.query(&Default::default()).unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].content["type"], "private_box");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/feed?include_self=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = json_body(response).await;
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data[0]["content"]["type"], "message");
+    assert_eq!(data[0]["content"]["text"], "top secret");
+}
+
+#[tokio::test]
+async fn test_private_box_remains_ciphertext_for_non_recipient() {
+    let (sender, engine) = create_test_engine();
+    let sender_app = create_test_app_with_identity(sender, engine.clone());
+    let outsider_app = create_test_app_with_identity(Identity::generate(), engine.clone());
+    let recipient = Identity::generate();
+
+    let response = sender_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/publish")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{
+                        "content": {{
+                            "type": "message",
+                            "text": "top secret",
+                            "encrypt_for": ["{}"]
+                        }}
+                    }}"#,
+                    recipient.public_id().0
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = outsider_app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/feed?include_self=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = json_body(response).await;
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data[0]["content"]["type"], "private_box");
+    assert!(data[0]["content"]["box"].is_string());
 }
 
 // ============ EVENTS (SSE) TESTS ============

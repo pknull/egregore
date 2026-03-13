@@ -25,6 +25,7 @@
 //! - GET /v1/groups/:id/offsets - Get group offsets
 //! - POST /v1/groups/:id/offsets - Commit an offset
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -158,13 +159,22 @@ fn is_valid_group_id(group_id: &str) -> bool {
 /// POST /v1/groups - Create a new consumer group.
 pub async fn create_group(
     State(state): State<AppState>,
-    Json(req): Json<CreateGroupRequest>,
+    payload: Result<Json<CreateGroupRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(req) = match payload {
+        Ok(req) => req,
+        Err(rejection) => return response::json_rejection::<GroupInfo>(rejection).into_response(),
+    };
+
     if !is_valid_group_id(&req.group_id) {
-        return response::err::<GroupInfo>(
+        return response::err_with_detail::<GroupInfo>(
             StatusCode::BAD_REQUEST,
             "INVALID_GROUP_ID",
             "group_id must be 1-64 alphanumeric characters, hyphens, or underscores",
+            response::validation_detail(
+                "group_id",
+                "must be 1-64 alphanumeric characters, hyphens, or underscores",
+            ),
         )
         .into_response();
     }
@@ -353,22 +363,34 @@ pub async fn get_group_members(
 pub async fn join_group(
     State(state): State<AppState>,
     Path(group_id): Path<String>,
-    Json(req): Json<JoinGroupRequest>,
+    payload: Result<Json<JoinGroupRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(req) = match payload {
+        Ok(req) => req,
+        Err(rejection) => {
+            return response::json_rejection::<JoinGroupResponse>(rejection).into_response();
+        }
+    };
+
     if !PublicId::is_valid_format(&req.member_id) {
-        return response::err::<JoinGroupResponse>(
+        return response::err_with_detail::<JoinGroupResponse>(
             StatusCode::BAD_REQUEST,
             "INVALID_MEMBER_ID",
             "member_id must be in @<base64>.ed25519 format",
+            response::validation_detail("member_id", "must be in @<base64>.ed25519 format"),
         )
         .into_response();
     }
 
     if !is_valid_group_id(&group_id) {
-        return response::err::<JoinGroupResponse>(
+        return response::err_with_detail::<JoinGroupResponse>(
             StatusCode::BAD_REQUEST,
             "INVALID_GROUP_ID",
             "group_id must be 1-64 alphanumeric characters, hyphens, or underscores",
+            response::validation_detail(
+                "group_id",
+                "must be 1-64 alphanumeric characters, hyphens, or underscores",
+            ),
         )
         .into_response();
     }
@@ -399,13 +421,19 @@ pub async fn join_group(
 pub async fn leave_group(
     State(state): State<AppState>,
     Path(group_id): Path<String>,
-    Json(req): Json<LeaveGroupRequest>,
+    payload: Result<Json<LeaveGroupRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(req) = match payload {
+        Ok(req) => req,
+        Err(rejection) => return response::json_rejection::<()>(rejection).into_response(),
+    };
+
     if !PublicId::is_valid_format(&req.member_id) {
-        return response::err::<()>(
+        return response::err_with_detail::<()>(
             StatusCode::BAD_REQUEST,
             "INVALID_MEMBER_ID",
             "member_id must be in @<base64>.ed25519 format",
+            response::validation_detail("member_id", "must be in @<base64>.ed25519 format"),
         )
         .into_response();
     }
@@ -477,22 +505,29 @@ pub async fn get_group_offsets(
 pub async fn commit_offset(
     State(state): State<AppState>,
     Path(group_id): Path<String>,
-    Json(req): Json<CommitOffsetRequest>,
+    payload: Result<Json<CommitOffsetRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(req) = match payload {
+        Ok(req) => req,
+        Err(rejection) => return response::json_rejection::<OffsetInfo>(rejection).into_response(),
+    };
+
     if !PublicId::is_valid_format(&req.author) {
-        return response::err::<OffsetInfo>(
+        return response::err_with_detail::<OffsetInfo>(
             StatusCode::BAD_REQUEST,
             "INVALID_AUTHOR",
             "author must be in @<base64>.ed25519 format",
+            response::validation_detail("author", "must be in @<base64>.ed25519 format"),
         )
         .into_response();
     }
 
     if !PublicId::is_valid_format(&req.committed_by) {
-        return response::err::<OffsetInfo>(
+        return response::err_with_detail::<OffsetInfo>(
             StatusCode::BAD_REQUEST,
             "INVALID_COMMITTED_BY",
             "committed_by must be in @<base64>.ed25519 format",
+            response::validation_detail("committed_by", "must be in @<base64>.ed25519 format"),
         )
         .into_response();
     }

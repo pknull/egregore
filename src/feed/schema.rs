@@ -1118,11 +1118,12 @@ mod tests {
         let (registry, temp_dir) = registry_with_defaults(false);
         let all = registry.list_all();
 
-        // Should have all default schemas, including private_box.
-        assert_eq!(all.len(), 8);
+        // Should have all default schemas, including private_box and node_status.
+        assert_eq!(all.len(), 9);
 
         let schema_ids: Vec<&str> = all.iter().map(|s| s.schema_id.as_str()).collect();
         assert!(schema_ids.contains(&"insight/v1"));
+        assert!(schema_ids.contains(&"node_status/v1"));
         assert!(schema_ids.contains(&"profile/v1"));
         assert!(schema_ids.contains(&"message/v1"));
         assert!(schema_ids.contains(&"private_box/v1"));

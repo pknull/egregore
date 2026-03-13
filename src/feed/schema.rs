@@ -159,6 +159,28 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
 }"#,
     ),
     (
+        "private_box.v1.json",
+        r#"{
+  "content_type": "private_box",
+  "version": 1,
+  "description": "Encrypted multi-recipient message wrapper",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "sender", "box"],
+    "properties": {
+      "type": { "const": "private_box" },
+      "sender": { "type": "string", "pattern": "^@.+\\.ed25519$" },
+      "box": { "type": "string", "minLength": 1 },
+      "inner_schema_id": { "type": ["string", "null"] }
+    },
+    "additionalProperties": false
+  }
+}"#,
+    ),
+    (
         "profile.v1.json",
         r#"{
   "content_type": "profile",
@@ -1031,13 +1053,14 @@ mod tests {
         let (registry, temp_dir) = registry_with_defaults(false);
         let all = registry.list_all();
 
-        // Should have all 7 default schemas
-        assert_eq!(all.len(), 7);
+        // Should have all default schemas, including private_box.
+        assert_eq!(all.len(), 8);
 
         let schema_ids: Vec<&str> = all.iter().map(|s| s.schema_id.as_str()).collect();
         assert!(schema_ids.contains(&"insight/v1"));
         assert!(schema_ids.contains(&"profile/v1"));
         assert!(schema_ids.contains(&"message/v1"));
+        assert!(schema_ids.contains(&"private_box/v1"));
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 

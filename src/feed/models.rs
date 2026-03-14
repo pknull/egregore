@@ -104,6 +104,8 @@ pub struct FeedQuery {
     /// Exclude messages from this author (used for "others only" queries).
     pub exclude_author: Option<PublicId>,
     pub content_type: Option<String>,
+    /// Filter by distributed trace identifier.
+    pub trace_id: Option<String>,
     /// Filter by tag (messages must have this tag).
     pub tag: Option<String>,
     /// Filter by relates hash (messages that reference this hash).

@@ -797,6 +797,55 @@ async fn test_publish_with_tags_and_relates() {
 }
 
 #[tokio::test]
+async fn test_get_feed_filters_by_trace_id() {
+    let (_engine, app) = create_test_app();
+
+    for trace_id in ["trace-keep", "trace-skip"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/publish")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{
+                            "content": {{
+                                "type": "message",
+                                "text": "message for {trace_id}"
+                            }},
+                            "trace_id": "{trace_id}"
+                        }}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/feed?include_self=true&trace_id=trace-keep")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = json_body(response).await;
+    let data = json["data"].as_array().unwrap();
+
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["trace_id"], "trace-keep");
+    assert_eq!(data[0]["content"]["text"], "message for trace-keep");
+}
+
+#[tokio::test]
 async fn test_publish_invalid_json_returns_error() {
     let (_engine, app) = create_test_app();
 

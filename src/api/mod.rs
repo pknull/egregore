@@ -3,7 +3,8 @@
 //! All endpoints bind to 127.0.0.1 (binding happens in main.rs). Only local
 //! processes can access the API. Mutating REST endpoints can optionally require
 //! a Bearer token, while read-only routes remain loopback-only without auth.
-//! MCP auth is handled separately.
+//! MCP follows the same split: read-only tools remain public, while mutating
+//! tools enforce the configured Bearer token inside the MCP handlers.
 //!
 //! ## CSRF Protection
 //!
@@ -106,7 +107,7 @@ async fn require_json_content_type(req: Request<Body>, next: Next) -> Response {
 /// Optional Bearer token auth for mutating REST endpoints.
 ///
 /// Only applies to mutating `/v1/...` routes. Read-only routes remain accessible
-/// without auth, and `/mcp` is intentionally excluded until issue #89.
+/// without auth. MCP mutating-tool auth is enforced in the MCP dispatch layer.
 async fn require_api_auth(
     State(config): State<Arc<Config>>,
     req: Request<Body>,
@@ -463,7 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_does_not_gate_mcp_requests_in_this_branch() {
+    async fn api_auth_middleware_does_not_gate_mcp_route() {
         let state = test_state_with_config(Config {
             api_auth_enabled: true,
             api_auth_token: Some("secret-token".to_string()),

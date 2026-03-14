@@ -23,6 +23,8 @@ pub struct FeedParams {
     pub limit: Option<u32>,
     pub offset: Option<u32>,
     pub content_type: Option<String>,
+    /// Filter by distributed trace identifier.
+    pub trace_id: Option<String>,
     /// Filter by tag.
     pub tag: Option<String>,
     /// Filter by related message hash (find replies/responses).
@@ -51,6 +53,7 @@ pub async fn get_feed(
             author: None,
             exclude_author: if include_self { None } else { Some(self_id) },
             content_type: params.content_type,
+            trace_id: params.trace_id,
             tag: params.tag,
             relates: params.relates,
             limit: params.limit,
@@ -95,6 +98,7 @@ pub async fn get_feed_by_author(
         engine.query(&FeedQuery {
             author: Some(PublicId(author)),
             content_type: params.content_type,
+            trace_id: params.trace_id,
             limit: params.limit,
             offset: params.offset,
             ..Default::default()
@@ -130,6 +134,7 @@ pub async fn get_insights(
     let result = tokio::task::spawn_blocking(move || {
         engine.query(&FeedQuery {
             content_type: Some("insight".to_string()),
+            trace_id: params.trace_id,
             limit: params.limit,
             offset: params.offset,
             ..Default::default()

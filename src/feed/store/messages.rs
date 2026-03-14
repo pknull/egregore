@@ -253,6 +253,14 @@ impl FeedStore {
             param_values.push(Box::new(ct.clone()));
         }
 
+        if let Some(ref trace_id) = query.trace_id {
+            sql.push_str(&format!(
+                " AND json_extract(m.raw_json, '$.trace_id') = ?{}",
+                param_values.len() + 1
+            ));
+            param_values.push(Box::new(trace_id.clone()));
+        }
+
         if let Some(ref relates) = query.relates {
             sql.push_str(&format!(" AND m.relates = ?{}", param_values.len() + 1));
             param_values.push(Box::new(relates.clone()));
@@ -626,6 +634,28 @@ mod tests {
         };
         let results = store.query_messages(&query).unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn query_by_trace_id() {
+        let store = FeedStore::open_memory().unwrap();
+
+        let mut trace_a = make_test_message("@alice.ed25519", 1, None);
+        trace_a.trace_id = Some("trace-a".to_string());
+        store.insert_message(&trace_a, true).unwrap();
+
+        let mut trace_b = make_test_message("@bob.ed25519", 1, None);
+        trace_b.trace_id = Some("trace-b".to_string());
+        store.insert_message(&trace_b, true).unwrap();
+
+        let query = FeedQuery {
+            trace_id: Some("trace-a".to_string()),
+            ..Default::default()
+        };
+        let results = store.query_messages(&query).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].trace_id.as_deref(), Some("trace-a"));
     }
 
     #[test]

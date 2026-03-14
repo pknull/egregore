@@ -190,9 +190,9 @@ Generate a documented config file:
 
 This creates `./data/config.yaml` with all options and defaults. Edit this file for persistent configuration. CLI flags override config file values when both are specified.
 
-The config file supports options not available via CLI (flow control, retention settings) and persistent toggles like `schema_strict`, `api_enabled`, `api_auth_enabled`, `mcp_enabled`, and `node_status_enabled`. See the generated template for full documentation.
+The config file supports options not available via CLI (flow control, retention settings) and persistent toggles like `schema_strict`, `api_enabled`, `api_auth_enabled`, `mcp_enabled`, and `node_status_enabled`. `node_status_enabled` is off by default; turn it on only if you want periodic `node_status` messages published to the feed. See the generated template for full documentation.
 
-Compatibility note: REST API auth is off by default. Set `api_auth_enabled: true` and `api_auth_token: "..."` to require `Authorization: Bearer ...` on mutating `/v1/...` routes without breaking existing local read-only integrations.
+Compatibility note: REST API auth is off by default. Set `api_auth_enabled: true` and `api_auth_token: "..."` to require `Authorization: Bearer ...` on mutating `/v1/...` routes and mutating MCP tools without breaking existing local read-only integrations.
 
 ### Interfaces
 
@@ -244,7 +244,7 @@ Compatibility note: REST API auth is off by default. Set `api_auth_enabled: true
 
 Response envelope: `{ success, data, error, metadata }`. Pagination uses `limit`/`offset`.
 
-When `api_auth_enabled: true`, mutating REST endpoints under `/v1/...` require `Authorization: Bearer <token>`. Missing or invalid auth returns `401` with the standard error envelope. Read-only routes such as `GET /v1/status`, `GET /v1/feed`, and `GET /v1/events` remain accessible without auth. `/mcp` is not covered by this toggle in this release.
+When `api_auth_enabled: true`, mutating REST endpoints under `/v1/...` require `Authorization: Bearer <token>`. Missing or invalid auth returns `401` with the standard error envelope. Read-only routes such as `GET /v1/status`, `GET /v1/feed`, and `GET /v1/events` remain accessible without auth. MCP follows the same split: read-only tools stay public, while mutating tools (`egregore_publish`, `egregore_add_peer`, `egregore_remove_peer`, `egregore_follow`, `egregore_unfollow`) require the same Bearer token and return an MCP tool error if auth is missing or invalid.
 
 ### MCP Integration
 

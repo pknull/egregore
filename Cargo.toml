@@ -42,7 +42,7 @@ clap = { version = "4.4", features = ["derive"] }
 rpassword = "7.0"
 
 # Self-update
-self_update = { version = "0.39", features = ["archive-tar", "archive-zip", "compression-flate2"] }
+self_update = { version = "0.39", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "rustls"] }
 
 # Logging
 tracing = "0.1"
@@ -66,7 +66,7 @@ async-stream = "0.3"
 futures = "0.3"
 
 # HTTP client (for adapters/examples)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Random
 rand = "0.8"

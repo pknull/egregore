@@ -465,9 +465,14 @@ fn sanitize_value(value: &serde_json::Value, depth: usize) -> serde_json::Value 
         }
         serde_json::Value::String(s) => {
             if s.len() > MAX_STRING_LENGTH {
+                // Find safe UTF-8 boundary for truncation
+                let mut end = MAX_STRING_LENGTH;
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
                 serde_json::Value::String(format!(
                     "{}... [TRUNCATED: {} bytes]",
-                    &s[..MAX_STRING_LENGTH],
+                    &s[..end],
                     s.len()
                 ))
             } else {
@@ -582,6 +587,24 @@ mod tests {
 
         assert!(data.len() < 2000);
         assert!(data.contains("[TRUNCATED:"));
+    }
+
+    #[test]
+    fn sanitize_truncates_utf8_safely() {
+        // Create a string with multi-byte UTF-8 characters that would panic
+        // if truncated at an arbitrary byte boundary
+        let emoji_string = "🎉".repeat(500); // Each emoji is 4 bytes = 2000 bytes
+        let input = serde_json::json!({
+            "data": emoji_string
+        });
+
+        // This should not panic
+        let sanitized = sanitize_for_logging(&input);
+        let data = sanitized["data"].as_str().unwrap();
+
+        assert!(data.contains("[TRUNCATED:"));
+        // Verify the truncated portion is valid UTF-8 (would panic if not)
+        let _ = data.to_string();
     }
 
     #[test]

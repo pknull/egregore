@@ -114,7 +114,15 @@ async fn announce_burst(
     while start.elapsed() < burst.duration {
         match socket.send_to(payload, broadcast_addr).await {
             Ok(_) => tracing::trace!("sent LAN discovery announcement"),
-            Err(e) => tracing::warn!(error = %e, "failed to send discovery announcement"),
+            Err(e) => {
+                // Deduplicate to prevent flooding when network is down
+                crate::dedup_warn!(
+                    "discovery_send_failed",
+                    broadcast_addr,
+                    error = %e,
+                    "failed to send discovery announcement"
+                );
+            }
         }
         tokio::time::sleep(burst.interval).await;
     }
@@ -167,7 +175,13 @@ async fn listen_loop(
         let (len, src_addr) = match socket.recv_from(&mut buf).await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(error = %e, "discovery recv error");
+                // Deduplicate to prevent flooding on persistent network errors
+                crate::dedup_warn!(
+                    "discovery_recv_failed",
+                    "recv",
+                    error = %e,
+                    "discovery recv error"
+                );
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }

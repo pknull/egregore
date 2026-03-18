@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use crate::gossip::bloom::{BloomConfig, BloomFilter, FeedBloomSummary};
 use crate::gossip::connection::SecureConnection;
 use crate::gossip::health::{clamp_observation_timestamp, PeerObservation, MAX_PEER_OBSERVATIONS};
 use crate::identity::PublicId;
+use crate::metrics;
 
 /// Gossip protocol messages sent over the encrypted connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,9 +367,13 @@ async fn merge_peer_observations(
     // Limit observation count to prevent memory exhaustion (Serf-style bounds)
     let obs_count = observations.len();
     if obs_count > MAX_PEER_OBSERVATIONS {
-        tracing::warn!(
+        // Deduplicate by peer to prevent log flooding from misbehaving peer
+        crate::dedup_warn!(
+            "too_many_observations",
+            reported_by.0,
             received = obs_count,
             limit = MAX_PEER_OBSERVATIONS,
+            peer = %reported_by.0,
             "peer sent too many observations, truncating"
         );
     }
@@ -540,6 +546,7 @@ async fn build_want_requests(
 /// Receive messages from peer until Done, with per-frame and per-session limits.
 async fn receive_messages(conn: &mut SecureConnection, engine: &Arc<FeedEngine>) -> Result<()> {
     tracing::debug!("waiting for messages from peer");
+    let start = Instant::now();
     let mut total_received: usize = 0;
     while let Some(data) = conn.recv().await? {
         let msg: GossipMessage = serde_json::from_slice(&data)?;
@@ -547,7 +554,10 @@ async fn receive_messages(conn: &mut SecureConnection, engine: &Arc<FeedEngine>)
             GossipMessage::Messages { messages } => {
                 tracing::debug!(batch_size = messages.len(), "received message batch");
                 if messages.len() > MAX_MESSAGES_PER_FRAME {
-                    tracing::warn!(
+                    // Deduplicate to prevent flooding from misbehaving peer
+                    crate::dedup_warn!(
+                        "too_many_messages_frame",
+                        "frame",
                         count = messages.len(),
                         "peer sent too many messages in one frame, truncating"
                     );
@@ -556,11 +566,17 @@ async fn receive_messages(conn: &mut SecureConnection, engine: &Arc<FeedEngine>)
                     messages.into_iter().take(MAX_MESSAGES_PER_FRAME).collect();
                 let batch_len = batch.len();
 
+                // Record replication metrics (direction: in = received from peer)
+                for _ in 0..batch_len {
+                    metrics::record_message_replicated("in");
+                }
+
                 let eng = engine.clone();
                 tokio::task::spawn_blocking(move || {
                     for m in &batch {
                         if let Err(e) = eng.ingest(m) {
-                            tracing::warn!(
+                            // Routine reject (duplicate, schema error) - debug level per #109
+                            tracing::debug!(
                                 author = %m.author,
                                 seq = m.sequence,
                                 error = %e,
@@ -586,6 +602,12 @@ async fn receive_messages(conn: &mut SecureConnection, engine: &Arc<FeedEngine>)
             GossipMessage::Done => break,
             _ => break,
         }
+    }
+
+    // Record replication latency
+    if total_received > 0 {
+        let latency = start.elapsed().as_secs_f64();
+        metrics::record_replication_latency(latency);
     }
     Ok(())
 }
@@ -686,6 +708,12 @@ async fn handle_peer_wants(
                             let response = GossipMessage::Messages { messages: chunk };
                             conn.send(&serde_json::to_vec(&response)?).await?;
                         }
+
+                        // Record outbound replication metrics
+                        for _ in 0..batch_len {
+                            metrics::record_message_replicated("out");
+                        }
+
                         total_sent += batch_len;
                     }
 
@@ -699,7 +727,8 @@ async fn handle_peer_wants(
             }
             tracing::debug!(total_sent = total_sent, "sending Done");
         } else {
-            tracing::warn!(msg_type = ?msg, "expected Want but got something else");
+            // Protocol variation from peer - debug level per #109
+            tracing::debug!(msg_type = ?msg, "expected Want but got something else");
         }
         conn.send(&serde_json::to_vec(&GossipMessage::Done)?)
             .await?;
@@ -737,11 +766,13 @@ pub async fn negotiate_persistent_mode_client(conn: &mut SecureConnection) -> Re
                 }
             }
             Ok(other) => {
-                tracing::warn!(msg = ?other, "unexpected response to Subscribe");
+                // Protocol variation from peer - debug level per #109
+                tracing::debug!(msg = ?other, "unexpected response to Subscribe");
                 Ok(false)
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to parse Subscribe response");
+                // Schema error from peer - debug level per #109
+                tracing::debug!(error = %e, "failed to parse Subscribe response");
                 Ok(false)
             }
         },
@@ -804,7 +835,8 @@ pub async fn negotiate_persistent_mode_server(
                     Ok(false)
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to parse message during negotiation");
+                    // Schema error from peer - debug level per #109
+                    tracing::debug!(error = %e, "failed to parse message during negotiation");
                     Ok(false)
                 }
             }

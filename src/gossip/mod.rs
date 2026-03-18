@@ -5,6 +5,7 @@ pub mod connection;
 pub mod discovery;
 pub mod flow_control;
 pub mod health;
+pub mod log_dedup;
 pub mod mdns;
 pub mod peers;
 pub mod persistent;

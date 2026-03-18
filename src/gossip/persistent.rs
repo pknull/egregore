@@ -115,7 +115,8 @@ impl PersistentConnectionTask {
                         tracing::trace!(hash = %message.hash, "pushed message is duplicate");
                     }
                     Ok(Err(e)) => {
-                        tracing::warn!(
+                        // Routine reject (schema error) - debug level per #109
+                        tracing::debug!(
                             hash = %message.hash,
                             error = %e,
                             "failed to ingest pushed message"
@@ -131,7 +132,8 @@ impl PersistentConnectionTask {
             | GossipMessage::Messages { .. }
             | GossipMessage::Done => {
                 // Replication messages shouldn't appear in persistent mode
-                tracing::warn!(
+                // Protocol variation from peer - debug level per #109
+                tracing::debug!(
                     peer = %self.peer_id.0,
                     msg_type = ?msg,
                     "unexpected replication message on persistent connection"
@@ -139,7 +141,8 @@ impl PersistentConnectionTask {
             }
             GossipMessage::Subscribe { .. } | GossipMessage::SubscribeAck { .. } => {
                 // Already negotiated, shouldn't receive these again
-                tracing::warn!(
+                // Protocol variation from peer - debug level per #109
+                tracing::debug!(
                     peer = %self.peer_id.0,
                     "received Subscribe/SubscribeAck on active persistent connection"
                 );

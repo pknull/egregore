@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use tokio::net::TcpStream;
+use tracing::Instrument;
 
 use crate::feed::engine::FeedEngine;
 use crate::gossip::backoff::ExponentialBackoff;
@@ -29,6 +30,8 @@ use crate::gossip::persistent::PersistentConnectionTask;
 use crate::gossip::registry::{ConnectionHandle, ConnectionRegistry};
 use crate::gossip::replication::{self, ReplicationConfig};
 use crate::identity::{Identity, PublicId};
+use crate::metrics;
+use crate::telemetry;
 
 /// Max time for a single peer sync (connect + handshake + replication).
 const PEER_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
@@ -204,7 +207,10 @@ pub async fn run_sync_loop_with_push(
                     backoff.retry_after = Some(now + delay);
 
                     if backoff.backoff.is_extended() {
-                        tracing::warn!(
+                        // Deduplicate per peer to prevent flooding
+                        crate::dedup_warn!(
+                            "peer_extended_backoff",
+                            peer_addr,
                             peer = %peer_addr,
                             attempt = backoff.backoff.attempt(),
                             next_retry_secs = delay.as_secs(),
@@ -307,32 +313,47 @@ async fn sync_one_peer(
     repl_config: &ReplicationConfig,
     registry: Option<&Arc<ConnectionRegistry>>,
 ) -> SyncResult {
-    tracing::debug!(peer = %peer_addr, "initiating gossip sync");
-    let sync_result = tokio::time::timeout(
-        PEER_SYNC_TIMEOUT,
-        sync_with_peer(peer_addr, config, engine, repl_config, registry),
-    )
-    .await;
-    match sync_result {
-        Ok(Ok(SyncOutcome::PullComplete(remote_id))) => {
-            tracing::info!(peer = %peer_addr, "gossip sync complete (pull mode)");
-            update_peer_health(engine, peer_addr, &remote_id).await;
-            SyncResult::Success
-        }
-        Ok(Ok(SyncOutcome::PersistentEstablished(remote_id))) => {
-            tracing::info!(peer = %peer_addr, "gossip sync complete (persistent mode)");
-            update_peer_health(engine, peer_addr, &remote_id).await;
-            SyncResult::Success
-        }
-        Ok(Err(e)) => {
-            tracing::warn!(peer = %peer_addr, error = %e, "gossip sync failed");
-            SyncResult::Failed
-        }
-        Err(_) => {
-            tracing::warn!(peer = %peer_addr, "gossip sync timed out");
-            SyncResult::Failed
+    // Generate trace context for this sync cycle
+    let trace_id = telemetry::generate_trace_id();
+    let span_id = telemetry::generate_span_id();
+
+    let span = tracing::info_span!(
+        "gossip_sync",
+        peer = %peer_addr,
+        trace_id = %trace_id,
+        span_id = %span_id,
+    );
+
+    async {
+        tracing::debug!("initiating gossip sync");
+        let sync_result = tokio::time::timeout(
+            PEER_SYNC_TIMEOUT,
+            sync_with_peer(peer_addr, config, engine, repl_config, registry),
+        )
+        .await;
+        match sync_result {
+            Ok(Ok(SyncOutcome::PullComplete(remote_id))) => {
+                tracing::info!(remote_id = %remote_id.0, "gossip sync complete (pull mode)");
+                update_peer_health(engine, peer_addr, &remote_id).await;
+                SyncResult::Success
+            }
+            Ok(Ok(SyncOutcome::PersistentEstablished(remote_id))) => {
+                tracing::info!(remote_id = %remote_id.0, "gossip sync complete (persistent mode)");
+                update_peer_health(engine, peer_addr, &remote_id).await;
+                SyncResult::Success
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "gossip sync failed");
+                SyncResult::Failed
+            }
+            Err(_) => {
+                tracing::warn!("gossip sync timed out");
+                SyncResult::Failed
+            }
         }
     }
+    .instrument(span)
+    .await
 }
 
 /// Outcome of a peer sync operation.
@@ -390,7 +411,11 @@ async fn sync_with_peer(
                 let handle = ConnectionHandle::new(writer, remote_pub_id.clone(), peer_addr, true);
 
                 if reg.register(handle) {
+                    // Update peer connection metrics
+                    metrics::set_peers_connected(reg.connection_count());
+
                     // Spawn task to handle incoming Push messages
+                    let reg_for_task = reg.clone();
                     let task = PersistentConnectionTask::new(
                         reader,
                         remote_pub_id.clone(),
@@ -401,6 +426,8 @@ async fn sync_with_peer(
                         if let Err(e) = task.run().await {
                             tracing::debug!(error = %e, "persistent connection task ended");
                         }
+                        // Update metrics when connection ends
+                        metrics::set_peers_connected(reg_for_task.connection_count());
                     });
 
                     return Ok(SyncOutcome::PersistentEstablished(remote_pub_id));

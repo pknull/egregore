@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::telemetry::{LoggingConfig, OtlpConfig};
+
 /// Placeholder network key that forces users to set their own.
 /// The node will refuse to start with this value.
 pub const DEFAULT_NETWORK_KEY: &str = "CHANGE_ME";
@@ -20,10 +22,51 @@ const DEFAULT_RECONNECT_MAX_SECS: u64 = 300; // 5 minutes
 const DEFAULT_RETENTION_INTERVAL_SECS: u64 = 3600; // 1 hour
 const DEFAULT_TOMBSTONE_MAX_AGE_SECS: u64 = 604_800; // 7 days
 
+// Metrics defaults
+const DEFAULT_METRICS_BIND: &str = "127.0.0.1:9090";
+const DEFAULT_METRICS_PATH: &str = "/metrics";
+
 // Connection/flow defaults
 const DEFAULT_MAX_PERSISTENT_CONNECTIONS: usize = 32;
 const DEFAULT_FLOW_INITIAL_CREDITS: u32 = 100;
 const DEFAULT_FLOW_RATE_LIMIT: u32 = 100; // messages per second per peer
+
+/// Metrics configuration for Prometheus endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsConfig {
+    /// Enable metrics endpoint (default: true).
+    #[serde(default = "default_metrics_enabled")]
+    pub enabled: bool,
+    /// Address to bind the metrics server (default: 127.0.0.1:9090).
+    #[serde(default = "default_metrics_bind")]
+    pub bind: String,
+    /// Path for the metrics endpoint (default: /metrics).
+    /// Note: metrics-exporter-prometheus serves at root, so this is informational.
+    #[serde(default = "default_metrics_path")]
+    pub path: String,
+}
+
+fn default_metrics_enabled() -> bool {
+    true
+}
+
+fn default_metrics_bind() -> String {
+    DEFAULT_METRICS_BIND.to_string()
+}
+
+fn default_metrics_path() -> String {
+    DEFAULT_METRICS_PATH.to_string()
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bind: DEFAULT_METRICS_BIND.to_string(),
+            path: DEFAULT_METRICS_PATH.to_string(),
+        }
+    }
+}
 
 /// A single hook definition. Each hook can be a subprocess, a webhook, or both.
 /// Each hook has its own filter and timeout.
@@ -155,6 +198,15 @@ pub struct Config {
     /// Default is loopback-only for security.
     #[serde(default = "default_gossip_bind")]
     pub gossip_bind: String,
+    /// Prometheus metrics configuration.
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+    /// Logging configuration (format, level, trace IDs).
+    #[serde(default)]
+    pub logging: LoggingConfig,
+    /// OTLP trace export configuration (requires `otlp` feature).
+    #[serde(default)]
+    pub otlp: OtlpConfig,
 }
 
 fn default_retention_interval_secs() -> u64 {
@@ -236,6 +288,9 @@ impl Default for Config {
             retention_interval_secs: DEFAULT_RETENTION_INTERVAL_SECS,
             tombstone_max_age_secs: DEFAULT_TOMBSTONE_MAX_AGE_SECS,
             gossip_bind: default_gossip_bind(),
+            metrics: MetricsConfig::default(),
+            logging: LoggingConfig::default(),
+            otlp: OtlpConfig::default(),
         }
     }
 }

@@ -23,6 +23,7 @@ use egregore::gossip;
 use egregore::hooks::HookExecutor;
 use egregore::identity::Identity;
 use egregore::status::build_node_status;
+use egregore::telemetry::{self, LoggingConfig, OtlpConfig};
 
 #[derive(Parser)]
 #[command(
@@ -418,17 +419,82 @@ fn handle_update(check_only: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Partial telemetry configuration for early loading.
+#[derive(serde::Deserialize, Default)]
+struct PartialTelemetryConfig {
+    #[serde(default)]
+    logging: LoggingConfig,
+    #[serde(default)]
+    otlp: OtlpConfig,
+}
+
+/// Load telemetry configuration early, before full config parsing.
+///
+/// This peeks at the config file to extract logging and OTLP settings for telemetry init.
+/// Falls back to defaults if the config file doesn't exist or can't be parsed.
+fn load_telemetry_config(cli: &Cli) -> PartialTelemetryConfig {
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(|| Config::config_file_path(&cli.data_dir));
+
+    if !config_path.exists() {
+        return PartialTelemetryConfig::default();
+    }
+
+    match std::fs::read_to_string(&config_path) {
+        Ok(contents) => {
+            serde_yaml::from_str::<PartialTelemetryConfig>(&contents).unwrap_or_default()
+        }
+        Err(_) => PartialTelemetryConfig::default(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "egregore=info".into()),
-        )
-        .init();
-
     let mut matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches_mut(&mut matches)?;
+
+    // Load telemetry config early for initialization.
+    // We need to peek at the config file to get logging/OTLP settings before full config load.
+    let telemetry_config = load_telemetry_config(&cli);
+
+    // Initialize telemetry (with OTLP if feature is enabled and configured)
+    #[cfg(feature = "otlp")]
+    {
+        if telemetry_config.otlp.enabled {
+            match telemetry::init_with_otlp(&telemetry_config.logging, &telemetry_config.otlp) {
+                Ok(()) => {
+                    // Log after initialization is complete
+                    tracing::info!(
+                        endpoint = %telemetry_config.otlp.endpoint,
+                        service_name = %telemetry_config.otlp.service_name,
+                        "OTLP trace export enabled"
+                    );
+                }
+                Err(e) => {
+                    // Fall back to logging-only if OTLP init fails
+                    telemetry::init(&telemetry_config.logging);
+                    tracing::warn!(error = %e, "OTLP initialization failed, using logging only");
+                }
+            }
+        } else {
+            telemetry::init(&telemetry_config.logging);
+        }
+    }
+
+    #[cfg(not(feature = "otlp"))]
+    {
+        telemetry::init(&telemetry_config.logging);
+        if telemetry_config.otlp.enabled {
+            // Can't log yet since telemetry just initialized, but we should warn
+            // This will show up in the logs after init
+            tracing::warn!(
+                "OTLP export enabled in config but 'otlp' feature not compiled in. \
+                 Rebuild with `cargo build --features otlp` to enable OTLP export."
+            );
+        }
+    }
 
     // Handle subcommands
     if let Some(Command::Update { check }) = &cli.command {
@@ -502,6 +568,11 @@ async fn main() -> anyhow::Result<()> {
     // Warn if discovery is enabled but gossip bound to loopback
     if let Some(warning) = config.discovery_warning() {
         tracing::warn!("{}", warning.trim());
+    }
+
+    // Initialize metrics server
+    if let Err(e) = egregore::metrics::init_metrics(&config.metrics) {
+        tracing::warn!(error = %e, "failed to initialize metrics server");
     }
 
     // Init feed store
@@ -725,6 +796,23 @@ async fn main() -> anyhow::Result<()> {
     // Clone registry for shutdown handler
     let shutdown_registry = registry.clone();
 
+    // Start metrics update task (db size gauge)
+    if config.metrics.enabled {
+        let metrics_engine = engine.clone();
+        tokio::spawn(async move {
+            let update_interval = std::time::Duration::from_secs(60);
+            loop {
+                let eng = metrics_engine.clone();
+                if let Ok(Ok(size)) =
+                    tokio::task::spawn_blocking(move || eng.store().db_size_bytes()).await
+                {
+                    egregore::metrics::set_db_size(size);
+                }
+                tokio::time::sleep(update_interval).await;
+            }
+        });
+    }
+
     if config.node_status_enabled {
         // Publish node_status periodically and when peer connectivity changes.
         let status_engine = engine.clone();
@@ -755,6 +843,10 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(ref reg) = shutdown_registry {
                     reg.close_all().await;
                 }
+
+                // Flush OTLP spans before exit
+                #[cfg(feature = "otlp")]
+                telemetry::shutdown_otlp();
             })
             .await?;
     } else {
@@ -763,6 +855,10 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref reg) = shutdown_registry {
             reg.close_all().await;
         }
+
+        // Flush OTLP spans before exit
+        #[cfg(feature = "otlp")]
+        telemetry::shutdown_otlp();
     }
 
     Ok(())

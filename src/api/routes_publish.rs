@@ -45,8 +45,14 @@ pub async fn publish(
     };
 
     // Generate trace context if not provided by caller
-    let trace_id = req.trace_id.clone().unwrap_or_else(telemetry::generate_trace_id);
-    let span_id = req.span_id.clone().unwrap_or_else(telemetry::generate_span_id);
+    let trace_id = req
+        .trace_id
+        .clone()
+        .unwrap_or_else(telemetry::generate_trace_id);
+    let span_id = req
+        .span_id
+        .clone()
+        .unwrap_or_else(telemetry::generate_span_id);
 
     let identity = state.identity.clone();
     let engine = state.engine.clone();

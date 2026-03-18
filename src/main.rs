@@ -443,7 +443,9 @@ fn load_telemetry_config(cli: &Cli) -> PartialTelemetryConfig {
     }
 
     match std::fs::read_to_string(&config_path) {
-        Ok(contents) => serde_yaml::from_str::<PartialTelemetryConfig>(&contents).unwrap_or_default(),
+        Ok(contents) => {
+            serde_yaml::from_str::<PartialTelemetryConfig>(&contents).unwrap_or_default()
+        }
         Err(_) => PartialTelemetryConfig::default(),
     }
 }

@@ -168,7 +168,13 @@ async fn process_mdns_events(
                 _ => {}
             },
             Err(e) => {
-                tracing::warn!(error = %e, "mDNS receiver error");
+                // Deduplicate to prevent flooding on persistent mDNS errors
+                crate::dedup_warn!(
+                    "mdns_recv_failed",
+                    "recv",
+                    error = %e,
+                    "mDNS receiver error"
+                );
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
@@ -262,7 +268,10 @@ fn should_verify_peer(peer_addr: &str, recent_peers: &mut HashMap<String, Instan
     if recent_peers.len() >= MAX_RECENT_PEERS {
         recent_peers.retain(|_, ts| now.duration_since(*ts) < PEER_VERIFY_COOLDOWN);
         if recent_peers.len() >= MAX_RECENT_PEERS {
-            tracing::warn!(
+            // Deduplicate - only warn once per window when at capacity
+            crate::dedup_warn!(
+                "mdns_rate_limit",
+                "capacity",
                 peer = %peer_addr,
                 limit = MAX_RECENT_PEERS,
                 "mDNS peer rate limit reached, skipping peer"

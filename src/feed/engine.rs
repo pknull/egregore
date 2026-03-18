@@ -12,6 +12,7 @@ use crate::feed::private_box;
 use crate::feed::schema::SchemaRegistry;
 use crate::feed::store::FeedStore;
 use crate::identity::{sign_bytes, verify_signature, Identity};
+use crate::metrics;
 
 /// Maximum serialized content size in bytes (64 KB).
 const MAX_CONTENT_SIZE: usize = 64 * 1024;
@@ -236,7 +237,27 @@ impl FeedEngine {
     /// entire chain from sequence 1 is validated. When backfill closes a gap,
     /// the successor's flag is promoted to true.
     pub fn ingest(&self, msg: &Message) -> Result<()> {
+        // Extract content type for metrics (bounded label)
+        let content_type = msg
+            .content
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        // Log trace context if present (enables cross-component correlation)
+        if let Some(ref trace_id) = msg.trace_id {
+            tracing::debug!(
+                trace_id = %trace_id,
+                span_id = msg.span_id.as_deref().unwrap_or("-"),
+                author = %msg.author.0,
+                sequence = msg.sequence,
+                content_type = %content_type,
+                "ingesting message with trace context"
+            );
+        }
+
         if msg.sequence == 0 {
+            metrics::record_message_ingested(content_type, "error");
             return Err(EgreError::FeedIntegrity {
                 reason: "sequence must be >= 1".into(),
             });
@@ -247,6 +268,7 @@ impl FeedEngine {
             .map(|s| s.len())
             .unwrap_or(MAX_CONTENT_SIZE + 1);
         if content_size > MAX_CONTENT_SIZE {
+            metrics::record_message_ingested(content_type, "error");
             return Err(EgreError::FeedIntegrity {
                 reason: format!(
                     "content too large: {} bytes (max {})",
@@ -261,6 +283,7 @@ impl FeedEngine {
             .get_message_at_sequence(&msg.author, msg.sequence)?
             .is_some()
         {
+            // Duplicates are expected during replication, not errors
             return Err(EgreError::DuplicateMessage {
                 author: msg.author.0.clone(),
                 sequence: msg.sequence,
@@ -268,15 +291,39 @@ impl FeedEngine {
         }
 
         // Validate content against schema (before expensive signature check)
-        self.schema_registry
-            .validate(&msg.content, msg.schema_id.as_deref())?;
+        if let Err(e) = self
+            .schema_registry
+            .validate(&msg.content, msg.schema_id.as_deref())
+        {
+            metrics::record_message_ingested(content_type, "error");
+            return Err(e);
+        }
 
-        Self::verify_signature_and_hash(msg)?;
-        Self::validate_previous_field(msg)?;
+        if let Err(e) = Self::verify_signature_and_hash(msg) {
+            metrics::record_message_ingested(content_type, "error");
+            return Err(e);
+        }
 
-        let chain_valid = self.validate_chain_links(msg)?;
+        if let Err(e) = Self::validate_previous_field(msg) {
+            metrics::record_message_ingested(content_type, "error");
+            return Err(e);
+        }
+
+        let chain_valid = match self.validate_chain_links(msg) {
+            Ok(valid) => valid,
+            Err(e) => {
+                metrics::record_message_ingested(content_type, "error");
+                return Err(e);
+            }
+        };
+
         self.store.insert_message(msg, chain_valid)?;
         self.emit(msg);
+
+        // Record successful ingestion metrics
+        metrics::record_message_ingested(content_type, "success");
+        metrics::record_message_size(content_size);
+
         Ok(())
     }
 

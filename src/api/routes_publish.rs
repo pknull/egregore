@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::api::response;
 use crate::api::AppState;
+use crate::telemetry;
 
 #[derive(Deserialize)]
 pub struct PublishRequest {
@@ -43,8 +44,25 @@ pub async fn publish(
         Err(rejection) => return response::json_rejection::<()>(rejection).into_response(),
     };
 
+    // Generate trace context if not provided by caller
+    let trace_id = req.trace_id.clone().unwrap_or_else(telemetry::generate_trace_id);
+    let span_id = req.span_id.clone().unwrap_or_else(telemetry::generate_span_id);
+
     let identity = state.identity.clone();
     let engine = state.engine.clone();
+
+    let content_type = req
+        .content
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    tracing::info!(
+        trace_id = %trace_id,
+        span_id = %span_id,
+        content_type = %content_type,
+        "publishing message"
+    );
 
     let result = tokio::task::spawn_blocking(move || {
         engine.publish_full(
@@ -53,8 +71,8 @@ pub async fn publish(
             req.schema_id,
             req.relates,
             req.tags,
-            req.trace_id,
-            req.span_id,
+            Some(trace_id),
+            Some(span_id),
         )
     })
     .await
@@ -63,8 +81,21 @@ pub async fn publish(
     });
 
     match result {
-        Ok(Ok(msg)) => (StatusCode::CREATED, response::ok(msg)).into_response(),
-        Ok(Err(e)) => response::from_error(e),
-        Err(e) => response::from_error(e),
+        Ok(Ok(msg)) => {
+            tracing::debug!(
+                hash = %msg.hash,
+                sequence = msg.sequence,
+                "message published successfully"
+            );
+            (StatusCode::CREATED, response::ok(msg)).into_response()
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "publish failed");
+            response::from_error(e)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "publish task failed");
+            response::from_error(e)
+        }
     }
 }

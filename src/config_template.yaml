@@ -196,3 +196,87 @@ tombstone_max_age_secs: 604800
 #
 #   curl -X POST http://localhost:7654/v1/retention/policies \
 #     -d '{"scope":{"topic":"logs"},"max_count":1000}'
+
+# ---
+# Metrics configuration.
+# ---
+
+# Prometheus metrics are exposed at a configurable HTTP endpoint.
+# Scrape with Prometheus or any compatible metrics collector.
+# Available metrics:
+#   - egregore_messages_ingested_total{content_type, status}
+#   - egregore_messages_replicated_total{direction}
+#   - egregore_peers_connected
+#   - egregore_replication_latency_seconds
+#   - egregore_message_size_bytes
+#   - egregore_db_size_bytes
+metrics:
+  # Enable metrics endpoint.
+  # Default: true
+  enabled: true
+
+  # Address to bind the metrics server.
+  # Default: 127.0.0.1:9090
+  bind: "127.0.0.1:9090"
+
+  # Path for the metrics endpoint (informational, served at root by prometheus exporter).
+  # Default: /metrics
+  path: "/metrics"
+
+# ---
+# Logging configuration.
+# ---
+
+# Logging output format.
+# - json: Machine-readable JSON (recommended for production)
+# - pretty: Human-readable format (recommended for development)
+# Default: json
+logging:
+  format: json
+
+  # Minimum log level (trace, debug, info, warn, error).
+  # Can be overridden with RUST_LOG environment variable.
+  # Default: info
+  level: info
+
+  # Include trace_id and span_id in log output for correlation.
+  # Enables distributed tracing across components.
+  # Default: true
+  include_trace_ids: true
+
+# ---
+# OpenTelemetry OTLP trace export configuration.
+# Requires building with `--features otlp` to enable.
+# ---
+
+# OTLP export sends spans to an OpenTelemetry collector for distributed tracing.
+# Compatible with Jaeger, Grafana Tempo, Honeycomb, Datadog, etc.
+#
+# Example collector setup (Jaeger):
+#   docker run -p 4317:4317 -p 16686:16686 jaegertracing/all-in-one:latest
+#   # View traces at http://localhost:16686
+#
+# Semantic conventions used:
+#   - service.name = configured service_name (default: "egregore")
+#   - service.version = crate version from Cargo.toml
+#   - messaging.system = "egregore"
+otlp:
+  # Enable OTLP trace export.
+  # Default: false
+  enabled: false
+
+  # OTLP collector endpoint (gRPC).
+  # Must be a valid URL with http, https, or grpc scheme.
+  # Default: http://localhost:4317
+  endpoint: "http://localhost:4317"
+
+  # Service name for OpenTelemetry semantic conventions.
+  # Use a unique name per node in multi-node deployments.
+  # Default: egregore
+  service_name: "egregore"
+
+  # Trace sampling rate (0.0 to 1.0).
+  # 1.0 = all traces, 0.1 = 10% of traces, 0.0 = no traces.
+  # Lower values recommended for high-throughput production deployments.
+  # Default: 1.0
+  sample_rate: 1.0

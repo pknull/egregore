@@ -460,6 +460,15 @@ impl FeedStore {
         .map_err(EgreError::from)
     }
 
+    /// Get the database size in bytes (page_count * page_size).
+    /// Returns 0 for in-memory databases.
+    pub fn db_size_bytes(&self) -> Result<u64> {
+        let conn = self.conn();
+        let page_count: u64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let page_size: u64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        Ok(page_count * page_size)
+    }
+
     // ---- Eviction ----
 
     /// Delete messages older than `cutoff`. Returns the number of evicted messages.

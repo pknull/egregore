@@ -35,12 +35,35 @@ use tokio::time::timeout;
 
 use crate::config::HookEntry;
 use crate::feed::models::Message;
+use crate::telemetry::sanitize_for_logging;
 
 /// Default timeout for hook/webhook execution in seconds.
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
 
 /// Minimum duration for cleanup() to protect processing entries.
 const MIN_CLEANUP_DURATION: Duration = Duration::from_secs(1);
+
+/// Create a sanitized copy of a message for sending to external hooks.
+///
+/// Sanitizes the content field to redact sensitive information (passwords,
+/// tokens, keys, etc.) before sending to subprocesses or webhooks.
+fn sanitize_message_for_hook(msg: &Message) -> Message {
+    Message {
+        author: msg.author.clone(),
+        sequence: msg.sequence,
+        previous: msg.previous.clone(),
+        timestamp: msg.timestamp,
+        content: sanitize_for_logging(&msg.content),
+        schema_id: msg.schema_id.clone(),
+        relates: msg.relates.clone(),
+        tags: msg.tags.clone(),
+        trace_id: msg.trace_id.clone(),
+        span_id: msg.span_id.clone(),
+        expires_at: msg.expires_at,
+        hash: msg.hash.clone(),
+        signature: msg.signature.clone(),
+    }
+}
 
 /// State of a hook execution for idempotency tracking.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,6 +402,9 @@ impl HookExecutor {
     /// Uses `tokio::process::Command` for async process handling with proper
     /// timeout semantics. When timeout fires, the child process is killed
     /// and reaped to prevent zombie processes.
+    ///
+    /// Note: Message content is sanitized before sending to prevent leaking
+    /// sensitive fields (passwords, tokens, keys, etc.) to external processes.
     async fn execute_subprocess(
         &self,
         msg: &Message,
@@ -386,7 +412,9 @@ impl HookExecutor {
         timeout_secs: Option<u64>,
         name: &Option<String>,
     ) -> HookResult {
-        let json = match serde_json::to_string(msg) {
+        // Sanitize message content before sending to external process
+        let sanitized_msg = sanitize_message_for_hook(msg);
+        let json = match serde_json::to_string(&sanitized_msg) {
             Ok(j) => j,
             Err(e) => {
                 tracing::warn!(hook_name = ?name, error = %e, "failed to serialize message for hook");
@@ -477,6 +505,9 @@ impl HookExecutor {
     }
 
     /// Execute webhook by POSTing message JSON to URL.
+    ///
+    /// Note: Message content is sanitized before sending to prevent leaking
+    /// sensitive fields (passwords, tokens, keys, etc.) to external webhooks.
     async fn execute_webhook(
         &self,
         msg: &Message,
@@ -487,8 +518,10 @@ impl HookExecutor {
         let timeout_secs = timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
         let hook_timeout = Duration::from_secs(timeout_secs);
 
+        // Sanitize message content before sending to external webhook
+        let sanitized_msg = sanitize_message_for_hook(msg);
         let result = timeout(hook_timeout, async {
-            let mut request = self.http_client.post(url).json(msg);
+            let mut request = self.http_client.post(url).json(&sanitized_msg);
 
             // Propagate trace context as HTTP headers
             if let Some(ref trace_id) = msg.trace_id {

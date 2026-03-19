@@ -148,29 +148,122 @@ impl Default for OtlpConfig {
     }
 }
 
+impl OtlpConfig {
+    /// Validate OTLP configuration.
+    /// Returns warnings for out-of-range sample_rate values.
+    pub fn validate(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        if self.sample_rate < 0.0 {
+            warnings.push(format!(
+                "otlp.sample_rate {} is negative, will be treated as 0.0 (no sampling)",
+                self.sample_rate
+            ));
+        } else if self.sample_rate > 1.0 {
+            warnings.push(format!(
+                "otlp.sample_rate {} exceeds 1.0, will be treated as 1.0 (sample all)",
+                self.sample_rate
+            ));
+        }
+
+        if self.service_name.is_empty() {
+            warnings.push("otlp.service_name is empty, using default".to_string());
+        }
+
+        warnings
+    }
+}
+
 /// Validate OTLP endpoint URL for security.
 /// Returns Ok(()) if valid, Err with description if invalid.
+///
+/// Security: Rejects private/internal network addresses to prevent SSRF attacks.
 #[cfg(feature = "otlp")]
 fn validate_otlp_endpoint(endpoint: &str) -> Result<(), String> {
     let url = url::Url::parse(endpoint).map_err(|e| format!("Invalid OTLP endpoint URL: {}", e))?;
 
     // Validate scheme
     match url.scheme() {
-        "http" | "https" | "grpc" => {}
+        "http" | "https" => {}
         other => {
             return Err(format!(
-                "Unsupported OTLP scheme '{}'. Use http, https, or grpc.",
+                "Unsupported OTLP scheme '{}'. Use http or https.",
                 other
             ))
         }
     }
 
     // Validate host exists
-    if url.host_str().is_none() {
-        return Err("OTLP endpoint must have a host".to_string());
+    let host = url
+        .host_str()
+        .ok_or_else(|| "OTLP endpoint must have a host".to_string())?;
+
+    // SSRF protection: reject private/internal network addresses
+    if is_private_host(host) {
+        return Err(format!(
+            "OTLP endpoint '{}' resolves to a private/internal address. \
+             Use a public collector endpoint.",
+            host
+        ));
     }
 
     Ok(())
+}
+
+/// Check if a hostname resolves to a private/internal IP range.
+/// Returns true for localhost, private IPs, link-local, and loopback addresses.
+#[cfg(feature = "otlp")]
+fn is_private_host(host: &str) -> bool {
+    use std::net::IpAddr;
+
+    // Check for localhost variations
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost" || host_lower == "localhost." {
+        return true;
+    }
+
+    // Try to parse as IP address
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return is_private_ip(&ip);
+    }
+
+    // For hostnames, we can't know without DNS resolution.
+    // Allow hostnames by default - operators are responsible for their configs.
+    false
+}
+
+/// Check if an IP address is private/internal.
+#[cfg(feature = "otlp")]
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()                    // 127.0.0.0/8
+                || v4.is_private()              // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || v4.is_link_local()           // 169.254.0.0/16
+                || v4.is_broadcast()            // 255.255.255.255
+                || v4.is_unspecified()          // 0.0.0.0
+                || v4.octets()[0] == 100 && (v4.octets()[1] >= 64 && v4.octets()[1] <= 127)
+            // CGNAT 100.64.0.0/10
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()                    // ::1
+                || v6.is_unspecified()          // ::
+                || is_ipv6_private(v6)
+        }
+    }
+}
+
+/// Check if an IPv6 address is in a private range.
+#[cfg(feature = "otlp")]
+fn is_ipv6_private(v6: &std::net::Ipv6Addr) -> bool {
+    let segments = v6.segments();
+    // fc00::/7 - Unique local addresses
+    (segments[0] & 0xfe00) == 0xfc00
+        // fe80::/10 - Link-local
+        || (segments[0] & 0xffc0) == 0xfe80
+        // ::ffff:0:0/96 - IPv4-mapped (check the mapped address)
+        || (segments[0] == 0 && segments[1] == 0 && segments[2] == 0
+            && segments[3] == 0 && segments[4] == 0 && segments[5] == 0xffff)
 }
 
 /// Combined telemetry configuration (logging + OTLP).
@@ -442,7 +535,11 @@ fn sanitize_value(value: &serde_json::Value, depth: usize) -> serde_json::Value 
                     || key_lower.contains("password")
                     || key_lower.contains("token")
                     || key_lower.contains("credential")
-                    || key_lower.contains("private");
+                    || key_lower.contains("private")
+                    || key_lower.contains("auth")
+                    || key_lower.contains("bearer")
+                    || key_lower.contains("session")
+                    || key_lower.contains("cookie");
 
                 if should_redact {
                     sanitized.insert(

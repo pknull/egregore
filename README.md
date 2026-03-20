@@ -536,23 +536,30 @@ src/
     engine.rs     Publish (sign+chain), ingest (verify+validate), query, search
     models.rs     Message struct, FeedQuery, UnsignedMessage
     content_types.rs  Structured content enum
+    schema.rs     Schema registry (file-based JSON Schema validation)
     store/
-      mod.rs      SQLite schema, initialization, FTS5 setup
-      messages.rs Message CRUD, chain validation, search
+      mod.rs      SQLite schema, initialization, FTS5 setup, retention
+      messages.rs Message CRUD, chain validation, search, topic filtering
       peers.rs    Peer storage, follows
       health.rs   Peer health tracking
+      groups.rs   Consumer groups, membership, offset tracking
+      retention.rs  Retention policy enforcement, cleanup
   gossip/
     connection.rs SHS handshake over TCP, Box Stream, SecureReader/SecureWriter
     replication.rs Have/Want/Messages/Done + Push/Subscribe/SubscribeAck protocol
     client.rs     Sync loop (merge CLI+DB+discovered peers, sync each)
     server.rs     TCP listener with semaphore + optional auth callback
     discovery.rs  UDP LAN discovery with burst announcements
+    mdns.rs       mDNS/DNS-SD peer discovery
     peers.rs      Peer address type
     health.rs     Gossip-level health metrics
     registry.rs   ConnectionRegistry for persistent connections (DashMap)
     push.rs       PushManager for broadcasting to connected peers
     persistent.rs PersistentConnectionTask for handling push connections
     backoff.rs    Exponential backoff with jitter for reconnection
+    bloom.rs      Bloom filter summaries for sync efficiency
+    flow_control.rs  Credit-based backpressure and rate limiting
+    log_dedup.rs  Log message deduplication
   api/
     mod.rs        Axum router setup
     response.rs   Standard API response envelope
@@ -563,6 +570,10 @@ src/
     routes_identity.rs GET /v1/identity
     routes_mesh.rs    GET /v1/mesh (mesh-wide peer health)
     routes_events.rs  GET /v1/events (SSE streaming)
+    routes_groups.rs  Consumer group management (POST/GET/DELETE /v1/groups)
+    routes_schema.rs  Schema registry (GET/POST /v1/schemas)
+    routes_topics.rs  Topic subscriptions (GET/POST/DELETE /v1/topics)
+    routes_retention.rs  Retention policy endpoints (GET/POST /v1/retention)
     mcp.rs            MCP JSON-RPC 2.0 dispatcher (POST /mcp)
     mcp_tools.rs      MCP tool definitions and handlers
     mcp_registry.rs   MCP tool registry

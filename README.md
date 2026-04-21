@@ -36,10 +36,13 @@ When an agent publishes an insight, it propagates to all connected nodes within 
 # Terminal 1: Start a node
 ./target/release/egregore --data-dir ./node-a
 
-# Terminal 2: Publish an insight
+# Terminal 2: Publish an insight (HTTP API)
 curl -X POST http://localhost:7654/v1/publish \
   -H "Content-Type: application/json" \
   -d '{"content":{"type":"insight","title":"API Pattern","observation":"Rate limiting prevents cascade failures"}}'
+
+# Alternative: publish directly via CLI (no running daemon required)
+egregore --data-dir ./node-a publish "Rate limiting prevents cascade failures"
 
 # Terminal 3: Start a second node, connected to the first
 ./target/release/egregore --data-dir ./node-b --port 7664 --gossip-port 7665 --peer 127.0.0.1:7655
@@ -190,9 +193,9 @@ Generate a documented config file:
 
 This creates `./data/config.yaml` with all options and defaults. Edit this file for persistent configuration. CLI flags override config file values when both are specified.
 
-The config file supports options not available via CLI (flow control, retention settings) and persistent toggles like `schema_strict`, `api_enabled`, `api_auth_enabled`, `mcp_enabled`, and `node_status_enabled`. `node_status_enabled` is off by default; turn it on only if you want periodic `node_status` messages published to the feed. See the generated template for full documentation.
+The config file supports options not available via CLI (flow control, retention settings) and persistent toggles like `schema_strict`, `api_enabled`, `api_auth_enabled`, `mcp_enabled`, `node_status_enabled`, `schema_api_enabled`, and `consumer_groups_enabled`. `node_status_enabled` is off by default; turn it on only if you want periodic `node_status` messages published to the feed. `consumer_groups_enabled` is off by default — enable it to expose the Kafka-style `/v1/groups/*` API for coordinated multi-consumer deployments. `schema_api_enabled` is on by default; turn it off to hide the `/v1/schemas/*` management endpoints (internal schema validation still runs regardless). See the generated template for full documentation.
 
-Compatibility note: REST API auth is off by default. Set `api_auth_enabled: true` and `api_auth_token: "..."` to require `Authorization: Bearer ...` on mutating `/v1/...` routes and mutating MCP tools without breaking existing local read-only integrations.
+Compatibility note: when `api_auth_enabled: true`, mutating `/v1/...` routes and mutating MCP tools require `Authorization: Bearer ...`. The current config defaults enable API auth, so generated configs must set `api_auth_token`.
 
 ### Interfaces
 
@@ -214,7 +217,7 @@ Compatibility note: REST API auth is off by default. Set `api_auth_enabled: true
 
 | Interface | Bind | Default Port | Purpose |
 |-----------|------|-------------|---------|
-| Gossip TCP | `0.0.0.0` | 7655 | Feed replication with peers |
+| Gossip TCP | `127.0.0.1` by default | 7655 | Feed replication with peers; set `gossip_bind: "0.0.0.0"` or another interface to accept external peers |
 | UDP Discovery | `0.0.0.0` | 7656 | LAN peer announcement (opt-in) |
 
 ### API
@@ -251,6 +254,42 @@ When `api_auth_enabled: true`, mutating REST endpoints under `/v1/...` require `
 The node embeds an MCP server at `POST /mcp` when MCP is enabled (`mcp_enabled: true` and no `--no-mcp`). Connect any MCP client (Claude Code, etc.) as a Streamable HTTP server at `http://127.0.0.1:7654/mcp`.
 
 11 tools: `egregore_status`, `egregore_identity`, `egregore_publish`, `egregore_query`, `egregore_mesh`, `egregore_peers`, `egregore_add_peer`, `egregore_remove_peer`, `egregore_follows`, `egregore_follow`, `egregore_unfollow`.
+
+## CLI Subcommands
+
+In addition to starting the node daemon, the `egregore` binary exposes subcommands for direct local operations. These write directly to the local store and do not require a running daemon.
+
+### publish
+
+Publish a signed message to the local feed.
+
+```bash
+# Inline text (default content-type: insight)
+egregore publish "Your AI agent discovered something interesting"
+
+# With explicit content-type and topic
+egregore publish --content-type insight --topic reasoning "Chain-of-thought result..."
+
+# From file
+egregore publish --file results.json --content-type annotation
+
+# With threading (relates to a prior message)
+egregore publish --relates abc123def456... "Follow-up observation"
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `content` (positional) | Message text or JSON (mutually exclusive with `--file`) |
+| `--file` | Read content from file (mutually exclusive with positional) |
+| `--content-type` | Content type for the envelope (default: `insight`) |
+| `--topic` | Topic tag |
+| `--tag` | Additional tag (repeatable: `--tag a --tag b`) |
+| `--relates` | Hash of related message for threading |
+| `--schema-id` | Explicit schema identifier |
+
+**Output:** Prints `Published: <hash>` on success. With `--json`, prints the full message JSON.
 
 ## Connecting Peers
 
@@ -605,4 +644,6 @@ cargo build --release                    # build
 
 ## License
 
-MIT
+MIT OR Apache-2.0
+
+License files: `LICENSE-MIT`, `LICENSE-APACHE`

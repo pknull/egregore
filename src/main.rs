@@ -188,6 +188,51 @@ enum Command {
         #[arg(long)]
         export: bool,
     },
+
+    /// Rotate the node's identity keypair
+    RotateKey {
+        /// Reason for key rotation
+        #[arg(long, default_value = "manual rotation")]
+        reason: String,
+
+        /// When the new key becomes effective (ISO 8601). Defaults to now.
+        #[arg(long)]
+        effective_at: Option<String>,
+    },
+
+    /// Publish a signed message to the local feed (no daemon required)
+    Publish {
+        /// Message content (text or JSON string).
+        /// Mutually exclusive with --file.
+        content: Option<String>,
+
+        /// Read content from a file (JSON or plain text).
+        /// Mutually exclusive with positional content.
+        #[arg(long, conflicts_with = "content")]
+        file: Option<PathBuf>,
+
+        /// Content type for the message envelope.
+        /// Determines the "type" field in the content JSON.
+        #[arg(long, default_value = "insight")]
+        content_type: String,
+
+        /// Topic tag for the message.
+        #[arg(long)]
+        topic: Option<String>,
+
+        /// Additional tags (repeatable: --tag a --tag b).
+        #[arg(long)]
+        tag: Vec<String>,
+
+        /// Hash of a related message (for threading).
+        #[arg(long)]
+        relates: Option<String>,
+
+        /// Schema identifier (e.g., "insight/v1").
+        /// If omitted, inferred from content type.
+        #[arg(long)]
+        schema_id: Option<String>,
+    },
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
@@ -351,8 +396,6 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
     if cli.mdns {
         config.mdns_discovery = true;
     }
-
-    config.validate()?;
 
     Ok(config)
 }
@@ -537,6 +580,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Validate full config for daemon startup (admin subcommands returned early above)
+    config.validate()?;
+
     // Load or generate identity
     let identity_dir = config.identity_dir();
     let identity = if cli.passphrase {
@@ -624,6 +670,9 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Initialize blob store
+    let blob_store = egregore::blob::BlobStore::new(&config.data_dir);
+
     // Build and optionally start API server.
     let api_server = if config.api_enabled {
         let state = api::AppState {
@@ -632,6 +681,7 @@ async fn main() -> anyhow::Result<()> {
             config: Arc::new(config.clone()),
             started_at,
             mcp_registry: api::mcp_registry::create_registry(),
+            blob_store: blob_store.clone(),
         };
         let app = if config.mcp_enabled {
             api::router(state)
@@ -1010,5 +1060,81 @@ mod tests {
             Command::Identity { export } => assert!(export),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_publish_with_all_flags() {
+        let cli = Cli::try_parse_from([
+            "egregore",
+            "--json",
+            "--data-dir",
+            "/tmp/test",
+            "publish",
+            "--content-type",
+            "annotation",
+            "--topic",
+            "reasoning",
+            "--tag",
+            "test",
+            "--relates",
+            "abc123",
+            "Some content here",
+        ])
+        .unwrap();
+
+        assert!(cli.json);
+        match cli.command.unwrap() {
+            Command::Publish {
+                content,
+                file,
+                content_type,
+                topic,
+                tag,
+                relates,
+                schema_id,
+            } => {
+                assert_eq!(content.as_deref(), Some("Some content here"));
+                assert!(file.is_none());
+                assert_eq!(content_type, "annotation");
+                assert_eq!(topic.as_deref(), Some("reasoning"));
+                assert_eq!(tag, vec!["test".to_string()]);
+                assert_eq!(relates.as_deref(), Some("abc123"));
+                assert!(schema_id.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_publish_with_file() {
+        let cli = Cli::try_parse_from([
+            "egregore",
+            "publish",
+            "--file",
+            "results.json",
+            "--content-type",
+            "annotation",
+        ])
+        .unwrap();
+
+        match cli.command.unwrap() {
+            Command::Publish { content, file, .. } => {
+                assert!(content.is_none());
+                assert_eq!(file.unwrap().to_str().unwrap(), "results.json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_publish_with_both_content_and_file() {
+        let result = Cli::try_parse_from([
+            "egregore",
+            "publish",
+            "--file",
+            "results.json",
+            "Some content",
+        ]);
+        assert!(result.is_err());
     }
 }

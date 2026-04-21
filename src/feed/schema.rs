@@ -1,5 +1,11 @@
 //! Schema registry and versioning for message validation.
 //!
+//! The registry itself is always available for internal content validation.
+//! The public management API (`/v1/schemas/*`) is controlled by
+//! `schema_api_enabled` (default on). Disable the API for minimal deployments
+//! that do not need runtime schema registration. Strict rejection of unknown
+//! schemas at publish/ingest is a separate toggle (`schema_strict`, default off).
+//!
 //! Provides:
 //! - Schema registration with version management
 //! - Schema validation at publish/ingest time
@@ -12,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use tracing;
 
@@ -553,7 +561,7 @@ impl SchemaRegistry {
 
         // Check version monotonicity
         {
-            let versions = self.latest_versions.read().unwrap();
+            let versions = self.latest_versions.read();
             if let Some(&latest) = versions.get(&schema.content_type) {
                 if schema.version <= latest {
                     return Err(EgreError::Schema {
@@ -576,15 +584,15 @@ impl SchemaRegistry {
 
         // Register the schema
         {
-            let mut schemas = self.schemas.write().unwrap();
+            let mut schemas = self.schemas.write();
             schemas.insert(schema.schema_id.clone(), schema.clone());
         }
         {
-            let mut versions = self.latest_versions.write().unwrap();
+            let mut versions = self.latest_versions.write();
             versions.insert(schema.content_type.clone(), schema.version);
         }
         {
-            let mut validators = self.validators.write().unwrap();
+            let mut validators = self.validators.write();
             validators.insert(schema.schema_id.clone(), Arc::new(validator));
         }
 
@@ -593,13 +601,13 @@ impl SchemaRegistry {
 
     /// Get a schema by its ID.
     pub fn get(&self, schema_id: &str) -> Option<SchemaDefinition> {
-        let schemas = self.schemas.read().unwrap();
+        let schemas = self.schemas.read();
         schemas.get(schema_id).cloned()
     }
 
     /// Get the latest schema for a content type.
     pub fn get_latest(&self, content_type: &str) -> Option<SchemaDefinition> {
-        let versions = self.latest_versions.read().unwrap();
+        let versions = self.latest_versions.read();
         let version = versions.get(content_type)?;
         let schema_id = format!("{}/v{}", content_type, version);
         drop(versions);
@@ -608,7 +616,7 @@ impl SchemaRegistry {
 
     /// Get all registered schemas.
     pub fn list_all(&self) -> Vec<SchemaDefinition> {
-        let schemas = self.schemas.read().unwrap();
+        let schemas = self.schemas.read();
         schemas.values().cloned().collect()
     }
 
@@ -631,7 +639,7 @@ impl SchemaRegistry {
                         })?;
 
                 // Use latest version for this content type
-                let versions = self.latest_versions.read().unwrap();
+                let versions = self.latest_versions.read();
                 match versions.get(content_type) {
                     Some(&version) => format!("{}/v{}", content_type, version),
                     None if self.strict_mode => {
@@ -647,7 +655,7 @@ impl SchemaRegistry {
             }
         };
 
-        let validators = self.validators.read().unwrap();
+        let validators = self.validators.read();
         match validators.get(&effective_schema_id) {
             Some(validator) => {
                 let result = validator.validate(content);
@@ -774,7 +782,7 @@ impl SchemaRegistry {
     /// Returns the latest version schema_id for the content type.
     pub fn infer_schema_id(&self, content: &serde_json::Value) -> Option<String> {
         let content_type = content.get("type")?.as_str()?;
-        let versions = self.latest_versions.read().unwrap();
+        let versions = self.latest_versions.read();
         let version = versions.get(content_type)?;
         Some(format!("{}/v{}", content_type, version))
     }
@@ -1152,6 +1160,48 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Regression: std::sync::RwLock poisons on panic, crashing the node.
+    /// parking_lot::RwLock does not poison, so the registry stays usable
+    /// after a thread panics while holding a write lock.
+    #[test]
+    fn registry_usable_after_thread_panic() {
+        let registry = SchemaRegistry::new(false);
+
+        // Register a schema so the registry has state to read back.
+        let schema =
+            SchemaDefinition::new("panic_test", 1, serde_json::json!({ "type": "object" }));
+        registry.register(schema).unwrap();
+
+        // Spawn a thread that acquires a write lock and panics.
+        let reg_clone = registry.clone();
+        let handle = std::thread::spawn(move || {
+            let mut schemas = reg_clone.schemas.write();
+            schemas.insert(
+                "poison_attempt".to_string(),
+                SchemaDefinition::new("poison", 1, serde_json::json!({ "type": "object" })),
+            );
+            panic!("deliberate panic while holding write lock");
+        });
+
+        // The thread panicked -- join returns Err.
+        assert!(handle.join().is_err());
+
+        // With parking_lot::RwLock this succeeds.
+        // With std::sync::RwLock this would panic (poisoned lock).
+        assert!(
+            registry.get("panic_test/v1").is_some(),
+            "registry must remain readable after another thread panics under write lock"
+        );
+
+        // Write path must also survive.
+        let schema_v2 =
+            SchemaDefinition::new("panic_test", 2, serde_json::json!({ "type": "object" }));
+        assert!(
+            registry.register(schema_v2).is_ok(),
+            "registry must remain writable after another thread panics under write lock"
+        );
     }
 
     #[test]

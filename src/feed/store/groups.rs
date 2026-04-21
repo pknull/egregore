@@ -1,5 +1,11 @@
 //! Consumer groups — Kafka-style group membership and offset tracking.
 //!
+//! **Advanced feature, disabled by default.** Most local meshes do not need
+//! consumer groups. Enable via `consumer_groups_enabled = true` in config to
+//! expose `/v1/groups/*` HTTP endpoints. When disabled, the underlying storage
+//! is still linked but inert — no routes are registered and no background
+//! rebalancing runs.
+//!
 //! Consumer groups enable coordinated consumption of feeds. Multiple consumers
 //! join a group, and feeds are assigned to members via round-robin. Group offsets
 //! (cursors) are stored per-group rather than per-consumer, enabling exactly-once

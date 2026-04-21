@@ -35,12 +35,22 @@ fn create_test_engine() -> (Identity, Arc<FeedEngine>) {
 }
 
 fn create_test_app_with_identity(identity: Identity, engine: Arc<FeedEngine>) -> axum::Router {
+    let config = Config {
+        api_auth_enabled: false,
+        // Integration tests exercise the full HTTP surface, including advanced
+        // features that are off by default in production.
+        consumer_groups_enabled: true,
+        ..Config::default()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let blob_store = egregore::blob::BlobStore::new(tmp.path());
     let state = AppState {
         identity,
         engine,
-        config: Arc::new(Config::default()),
+        config: Arc::new(config),
         started_at: Instant::now(),
         mcp_registry: mcp_registry::create_registry(),
+        blob_store,
     };
 
     router_with_mcp(state, false)
@@ -1023,5 +1033,85 @@ async fn test_events_endpoint_accepts_query_params() {
         .unwrap();
 
     // Should successfully connect even with filters
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Build a test app with a custom config closure. Lets individual tests flip
+/// feature flags (e.g., disable consumer groups) to verify route gating.
+fn create_test_app_with_config<F>(customize: F) -> axum::Router
+where
+    F: FnOnce(&mut Config),
+{
+    let identity = Identity::generate();
+    let store = FeedStore::open_memory().unwrap();
+    let engine = Arc::new(FeedEngine::new(store));
+    let mut config = Config {
+        api_auth_enabled: false,
+        consumer_groups_enabled: true,
+        ..Config::default()
+    };
+    customize(&mut config);
+    let tmp = tempfile::tempdir().unwrap();
+    let blob_store = egregore::blob::BlobStore::new(tmp.path());
+    let state = AppState {
+        identity,
+        engine,
+        config: Arc::new(config),
+        started_at: Instant::now(),
+        mcp_registry: mcp_registry::create_registry(),
+        blob_store,
+    };
+    router_with_mcp(state, false)
+}
+
+#[tokio::test]
+async fn consumer_groups_disabled_returns_404() {
+    let app = create_test_app_with_config(|c| c.consumer_groups_enabled = false);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/groups")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn schema_api_disabled_returns_404() {
+    let app = create_test_app_with_config(|c| c.schema_api_enabled = false);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/schemas")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn core_routes_unaffected_by_advanced_toggles() {
+    // With both advanced features off, core routes (feed, identity) still respond.
+    let app = create_test_app_with_config(|c| {
+        c.consumer_groups_enabled = false;
+        c.schema_api_enabled = false;
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/identity")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }

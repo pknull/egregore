@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
 use crate::feed::engine::FeedEngine;
@@ -61,10 +62,39 @@ pub async fn run_server(
 }
 
 /// Start the gossip server with push support.
+///
+/// Runs until the underlying `TcpListener` errors fatally — in practice, until
+/// the process is torn down. For a cancellable variant that can be stopped
+/// cooperatively (used by `transport::gossip::GossipTransport::shutdown`), see
+/// [`run_server_with_push_cancellable`]. This wrapper delegates to the
+/// cancellable form with a token that never fires, so `main.rs` does not need
+/// to construct or thread a `CancellationToken` through for single-transport
+/// boot.
 pub async fn run_server_with_push(
     config: ServerConfig,
     engine: Arc<FeedEngine>,
     registry: Option<Arc<ConnectionRegistry>>,
+) -> Result<()> {
+    // Never-firing token keeps the loop shape identical to the historical
+    // behavior: `ctrl_c` + `registry.close_all()` tears the process down.
+    run_server_with_push_cancellable(config, engine, registry, CancellationToken::new()).await
+}
+
+/// Start the gossip server with push support and cooperative cancellation.
+///
+/// When `cancel` is triggered, the accept loop returns `Ok(())` at the next
+/// `select!` decision point. Accepted connections already handed off to
+/// per-connection tasks are *not* forcibly aborted here — shutdown drain of
+/// those is driven by `ConnectionRegistry::close_all()` at the caller (see
+/// `GossipTransport::shutdown`).
+///
+/// This is the plumbing added in Phase 1 Step 3 to satisfy `Transport::shutdown`
+/// (plan §11 OQ-5).
+pub async fn run_server_with_push_cancellable(
+    config: ServerConfig,
+    engine: Arc<FeedEngine>,
+    registry: Option<Arc<ConnectionRegistry>>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let listener = TcpListener::bind(&config.bind_addr).await?;
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
@@ -76,11 +106,18 @@ pub async fn run_server_with_push(
     );
 
     loop {
-        let (stream, peer_addr) = match listener.accept().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to accept connection");
-                continue;
+        let (stream, peer_addr) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                tracing::info!(addr = %config.bind_addr, "gossip server cancelled; accept loop exiting");
+                return Ok(());
+            }
+            accept_result = listener.accept() => match accept_result {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to accept connection");
+                    continue;
+                }
             }
         };
 

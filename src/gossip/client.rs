@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::feed::engine::FeedEngine;
@@ -98,10 +99,31 @@ pub async fn run_sync_loop(
 }
 
 /// Periodically sync with known peers, with optional push support.
+///
+/// See [`run_sync_loop_with_push_cancellable`] for the cancellable form used
+/// by `transport::gossip::GossipTransport`. This wrapper delegates with a
+/// never-firing token so `main.rs` can keep calling the historical signature.
 pub async fn run_sync_loop_with_push(
     config: SyncConfig,
     engine: Arc<FeedEngine>,
     registry: Option<Arc<ConnectionRegistry>>,
+) {
+    run_sync_loop_with_push_cancellable(config, engine, registry, CancellationToken::new()).await
+}
+
+/// Periodically sync with known peers, with cooperative cancellation.
+///
+/// The loop checks `cancel` between cycles and interrupts both the inter-cycle
+/// sleep and the idle-peer sleep. In-flight per-peer syncs complete naturally
+/// (each is already bounded by `PEER_SYNC_TIMEOUT`).
+///
+/// Added in Phase 1 Step 3 per plan §11 OQ-5 so `GossipTransport::shutdown`
+/// can cooperatively tear down the sync loop.
+pub async fn run_sync_loop_with_push_cancellable(
+    config: SyncConfig,
+    engine: Arc<FeedEngine>,
+    registry: Option<Arc<ConnectionRegistry>>,
+    cancel: CancellationToken,
 ) {
     tracing::info!(
         static_peer_count = config.static_peers.len(),
@@ -114,6 +136,10 @@ pub async fn run_sync_loop_with_push(
     let mut peer_backoffs: HashMap<String, PeerBackoff> = HashMap::new();
 
     loop {
+        if cancel.is_cancelled() {
+            tracing::info!("gossip sync loop cancelled; exiting");
+            return;
+        }
         // Evict stale health records (Consul-style 72-hour TTL)
         let evict_engine = engine.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || {
@@ -153,7 +179,14 @@ pub async fn run_sync_loop_with_push(
 
         if peer_set.is_empty() {
             tracing::debug!("no peers available, waiting for next cycle");
-            tokio::time::sleep(config.interval).await;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    tracing::info!("gossip sync loop cancelled during idle wait; exiting");
+                    return;
+                }
+                _ = tokio::time::sleep(config.interval) => {}
+            }
             continue;
         }
 
@@ -226,7 +259,14 @@ pub async fn run_sync_loop_with_push(
                 }
             }
         }
-        tokio::time::sleep(config.interval).await;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                tracing::info!("gossip sync loop cancelled between cycles; exiting");
+                return;
+            }
+            _ = tokio::time::sleep(config.interval) => {}
+        }
     }
 }
 

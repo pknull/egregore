@@ -730,23 +730,27 @@ async fn main() -> anyhow::Result<()> {
     // Start gossip server
     let gossip_bind = format!("{}:{}", config.gossip_bind, config.gossip_port);
     tracing::info!(bind = %gossip_bind, "gossip server starting");
-    let gossip_net_key = config.network_key_bytes();
-    let gossip_identity = identity.clone();
+    // Build the server config once so the Phase-1 `GossipTransport` (attached
+    // below) and the existing gossip-server spawn site can share it without
+    // drifting. `ServerConfig` derives `Clone`, so cloning for each consumer
+    // is free.
+    let server_config = gossip::server::ServerConfig {
+        bind_addr: gossip_bind,
+        network_key: config.network_key_bytes(),
+        identity: identity.clone(),
+        push_enabled: config.push_enabled,
+        max_persistent_connections: config.max_persistent_connections,
+    };
     let gossip_engine = engine.clone();
     let server_registry = registry.clone();
-    let server_push_enabled = config.push_enabled;
-    let server_max_conns = config.max_persistent_connections;
+    let spawn_server_config = server_config.clone();
     tokio::spawn(async move {
-        let server_config = gossip::server::ServerConfig {
-            bind_addr: gossip_bind,
-            network_key: gossip_net_key,
-            identity: gossip_identity,
-            push_enabled: server_push_enabled,
-            max_persistent_connections: server_max_conns,
-        };
-        if let Err(e) =
-            gossip::server::run_server_with_push(server_config, gossip_engine, server_registry)
-                .await
+        if let Err(e) = gossip::server::run_server_with_push(
+            spawn_server_config,
+            gossip_engine,
+            server_registry,
+        )
+        .await
         {
             tracing::error!(error = %e, "gossip server failed");
         }
@@ -765,9 +769,37 @@ async fn main() -> anyhow::Result<()> {
 
     let sync_engine = engine.clone();
     let sync_registry = registry.clone();
+    let spawn_sync_config = sync_config.clone();
     tokio::spawn(async move {
-        gossip::client::run_sync_loop_with_push(sync_config, sync_engine, sync_registry).await;
+        gossip::client::run_sync_loop_with_push(spawn_sync_config, sync_engine, sync_registry)
+            .await;
     });
+
+    // Phase 1 Step 5: construct a `GossipTransport` and attach it to the
+    // engine. The transport's `start()` is NOT called — the existing spawn
+    // sites above continue to own the wire fan-out path via
+    // `event_tx → PushManager → registry.broadcast`. Attaching here lets
+    // `engine.transport_count()` and `engine.transport_health()` report the
+    // transport for Phase 2 and for the WARN log in Step 8.
+    //
+    // When `config.push_enabled == false`, there is no `ConnectionRegistry`
+    // (it is only created in the `push_enabled` branch above), so we skip
+    // attachment. This matches the pre-Phase-1 reality: a node without push
+    // had no transport abstraction in the first place, so leaving
+    // `transport_count() == 0` preserves zero observable change.
+    if let Some(gossip_registry) = registry.as_ref() {
+        let transport: Arc<dyn egregore::transport::Transport> =
+            Arc::new(egregore::transport::gossip::GossipTransport::new(
+                egregore::transport::gossip::GossipTransportConfig {
+                    registry: gossip_registry.clone(),
+                    identity: identity.clone(),
+                    engine: engine.clone(),
+                    server_config,
+                    sync_config,
+                },
+            ));
+        engine.attach_transport(transport);
+    }
 
     // Start LAN discovery if enabled
     if config.lan_discovery {

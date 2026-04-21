@@ -4,6 +4,7 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::Utc;
+use parking_lot::RwLock;
 use tokio::sync::broadcast;
 
 use crate::error::{EgreError, Result};
@@ -13,6 +14,7 @@ use crate::feed::schema::SchemaRegistry;
 use crate::feed::store::FeedStore;
 use crate::identity::{sign_bytes, verify_signature, Identity};
 use crate::metrics;
+use crate::transport::{Transport, TransportHealth};
 
 /// Maximum serialized content size in bytes (64 KB).
 const MAX_CONTENT_SIZE: usize = 64 * 1024;
@@ -25,6 +27,17 @@ pub struct FeedEngine {
     store: FeedStore,
     event_tx: broadcast::Sender<Arc<Message>>,
     schema_registry: SchemaRegistry,
+    /// Transports attached to this engine. Phase 1 stores but does not
+    /// dispatch through this vec on the publish hot path (see plan §7.2);
+    /// Phase 2's multi-transport fan-out consumer iterates it.
+    ///
+    /// Uses `parking_lot::RwLock` (non-poisoning, egregore convention) to
+    /// permit attach-after-`Arc::new` construction: `GossipTransport` holds
+    /// `Arc<FeedEngine>`, so the engine cannot take transports by value at
+    /// construction time without a chicken-and-egg dep cycle (plan §11 OQ-1).
+    /// Read paths are low-frequency (startup log, health snapshot); RwLock
+    /// overhead is irrelevant.
+    transports: RwLock<Vec<Arc<dyn Transport>>>,
 }
 
 impl FeedEngine {
@@ -40,6 +53,7 @@ impl FeedEngine {
             store,
             event_tx,
             schema_registry,
+            transports: RwLock::new(Vec::new()),
         }
     }
 
@@ -500,6 +514,53 @@ impl FeedEngine {
     /// Get a single message by hash.
     pub fn get_message(&self, hash: &str) -> Result<Option<Message>> {
         self.store.get_message(hash)
+    }
+
+    /// Attach a transport to this engine. Appends to the transport list.
+    ///
+    /// This method exists so that transports holding `Arc<FeedEngine>` (e.g.
+    /// `GossipTransport`) can be constructed after the engine itself is
+    /// wrapped in an `Arc` — the alternative (passing transports to the
+    /// constructor) creates a circular construction dependency (plan §11
+    /// OQ-1).
+    ///
+    /// **Idempotency is not enforced.** Calling `attach_transport` twice with
+    /// the same `Arc<dyn Transport>` (or two distinct transports of the same
+    /// backend) results in two entries in the internal `Vec`. Callers
+    /// (today: `main.rs` once at boot) are responsible for not double-
+    /// attaching; a double-attach is a boot-sequence bug, not a library
+    /// concern.
+    pub fn attach_transport(&self, transport: Arc<dyn Transport>) {
+        self.transports.write().push(transport);
+    }
+
+    /// Current number of attached transports. Consumed by the multi-transport
+    /// WARN log in `main.rs` (plan §4 Step 8) and by Phase 2 dispatch logic.
+    pub fn transport_count(&self) -> usize {
+        self.transports.read().len()
+    }
+
+    /// Aggregate transport health for `/v1/status` consumers.
+    ///
+    /// - No transports attached → `None`.
+    /// - One transport → that transport's `health()` verbatim (no wrapping).
+    /// - Two or more transports → `TransportHealth::aggregate("composite", ..)`
+    ///   per RFC 0001 §5.2.
+    ///
+    /// Phase 1 does **not** wire this to the `/v1/status` HTTP response (that
+    /// would be an observable behavior change on the Phase 1 zero-behavior-
+    /// change budget — plan §3.4). Exposed now so Phase 2 can wire it without
+    /// re-touching this file.
+    pub fn transport_health(&self) -> Option<TransportHealth> {
+        let guard = self.transports.read();
+        match guard.as_slice() {
+            [] => None,
+            [single] => Some(single.health()),
+            many => Some(TransportHealth::aggregate(
+                "composite",
+                many.iter().map(|t| t.health()).collect(),
+            )),
+        }
     }
 }
 
@@ -1396,5 +1457,173 @@ mod tests {
         assert_ne!(msg1.hash, msg2.hash);
         assert_eq!(msg1.schema_id, Some("profile/v1".to_string()));
         assert_eq!(msg2.schema_id, Some("profile/v2".to_string()));
+    }
+
+    // ------------------------------------------------------------------
+    // Step 5 — `transports` field, `attach_transport`, `transport_count`,
+    // `transport_health`. Tests use an inline test-only mock transport; the
+    // full `MockTransport` test harness lives in `tests/common/mock_transport.rs`
+    // (arrives in Step 9).
+    // ------------------------------------------------------------------
+
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use std::time::Duration;
+
+    use crate::feed::models::Message;
+    use crate::identity::PublicId;
+    use crate::transport::{
+        filter::TopicFilter, subscription::SubscriptionHandle, Transport, TransportHealth,
+    };
+
+    /// Inline test-only mock. Canned `health()` response; all other trait
+    /// methods `unimplemented!()` because the engine's transport-surface tests
+    /// only exercise `health()` + counting. The fuller `MockTransport` with
+    /// publish/subscribe/request_from fidelity lives in
+    /// `tests/common/mock_transport.rs` and arrives in Step 9.
+    struct InlineMock {
+        health: TransportHealth,
+    }
+
+    impl InlineMock {
+        fn new(connected: bool, backend: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                health: TransportHealth {
+                    connected,
+                    backend,
+                    last_successful_publish: None,
+                    last_peer_contact: None,
+                    unreplicated_count: 0,
+                    inflight_publishes: 0,
+                    last_error: None,
+                    children: vec![],
+                },
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Transport for InlineMock {
+        async fn publish(&self, _msg: &Message) -> Result<()> {
+            unimplemented!("InlineMock::publish — not exercised by engine.rs Step 5 tests")
+        }
+
+        async fn subscribe(
+            &self,
+            _filter: TopicFilter,
+        ) -> Result<(SubscriptionHandle, BoxStream<'static, Message>)> {
+            unimplemented!("InlineMock::subscribe — not exercised by engine.rs Step 5 tests")
+        }
+
+        async fn request_from(
+            &self,
+            _author: PublicId,
+            _after_seq: u64,
+        ) -> Result<BoxStream<'static, Message>> {
+            unimplemented!("InlineMock::request_from — not exercised by engine.rs Step 5 tests")
+        }
+
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&self, _deadline: Duration) -> Result<()> {
+            Ok(())
+        }
+
+        fn health(&self) -> TransportHealth {
+            self.health.clone()
+        }
+    }
+
+    #[test]
+    fn feed_engine_default_has_no_transports() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new(store);
+        assert_eq!(
+            engine.transport_count(),
+            0,
+            "fresh engine must have zero transports"
+        );
+        assert!(
+            engine.transport_health().is_none(),
+            "fresh engine with no transports reports no health"
+        );
+    }
+
+    #[test]
+    fn attach_transport_appends_and_counts() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new(store);
+
+        engine.attach_transport(InlineMock::new(true, "mock-a"));
+        assert_eq!(engine.transport_count(), 1);
+        assert!(
+            engine.transport_health().is_some(),
+            "single-transport engine surfaces that transport's health"
+        );
+
+        engine.attach_transport(InlineMock::new(true, "mock-b"));
+        assert_eq!(engine.transport_count(), 2);
+
+        let agg = engine
+            .transport_health()
+            .expect("two-transport engine produces aggregate health");
+        assert_eq!(
+            agg.backend, "composite",
+            "multi-transport aggregate uses 'composite' backend label"
+        );
+        assert_eq!(
+            agg.children.len(),
+            2,
+            "aggregate retains per-transport children for operator visibility"
+        );
+    }
+
+    #[test]
+    fn transport_health_single_returns_child_health() {
+        // With one transport attached, transport_health() returns that
+        // transport's health verbatim (no wrapping). The backend label passes
+        // through to the returned health — this is the observable contract
+        // plan §7.1 specifies.
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new(store);
+
+        engine.attach_transport(InlineMock::new(true, "gossip"));
+        let h = engine
+            .transport_health()
+            .expect("single-transport health exposed");
+        assert_eq!(
+            h.backend, "gossip",
+            "single-transport path must NOT relabel; must pass child backend through"
+        );
+        assert!(h.connected, "child's connected flag passes through");
+        assert!(
+            h.children.is_empty(),
+            "single-transport path does not wrap the child in a composite"
+        );
+    }
+
+    #[test]
+    fn transport_health_multi_aggregates() {
+        // With two transports whose `connected` flags differ, the top-level
+        // health's `connected` follows AND semantics (RFC 0001 §5.2 /
+        // TransportHealth::aggregate). Any disconnected child forces the
+        // aggregate to report disconnected.
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new(store);
+
+        engine.attach_transport(InlineMock::new(true, "mock-a"));
+        engine.attach_transport(InlineMock::new(false, "mock-b"));
+
+        let agg = engine
+            .transport_health()
+            .expect("two-transport aggregate present");
+        assert!(
+            !agg.connected,
+            "AND across children: one disconnected child forces aggregate disconnected"
+        );
+        assert_eq!(agg.backend, "composite");
+        assert_eq!(agg.children.len(), 2);
     }
 }

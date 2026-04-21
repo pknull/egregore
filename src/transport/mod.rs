@@ -6,8 +6,10 @@
 //! filter honesty, shutdown drains).
 //!
 //! Phase 1 scope: trait + types + `GossipTransport` adapter over the existing
-//! `gossip/` stack. This module is scaffolding in Step 1 — functional contents
-//! land in Steps 2+ of `Work/implementation/2026-04-21--phase-1-plan.md`.
+//! `gossip/` stack. Step 2 populates the trait, `TopicFilter`,
+//! `SubscriptionHandle`, and `TransportHealth` (with its aggregation helper).
+//! `GossipTransport` itself lands in Step 3 — see
+//! `Work/implementation/2026-04-21--phase-1-plan.md`.
 
 pub mod filter;
 pub mod gossip;

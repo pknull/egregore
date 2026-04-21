@@ -26,26 +26,29 @@ pub struct SubscriptionHandle {
 ///
 /// Phase 2 adds `Nats(oneshot::Sender<()>)` and
 /// `Composite(Vec<SubscriptionHandle>)` variants.
-// TODO(Step 3): `GossipTransport::subscribe` is the first constructor of
-// `SubscriptionInner::Gossip`; the allow-dead-code annotations below are
-// removed once Step 3 wires the first caller.
-#[allow(dead_code)]
 pub(crate) enum SubscriptionInner {
-    /// Gossip adapter cancel channel. `GossipTransport` owns the receiver
-    /// side and shuts down its per-subscription task when the sender is
-    /// dropped.
-    Gossip(oneshot::Sender<()>),
+    /// Generic oneshot-based cancel channel, used by both the `GossipTransport`
+    /// adapter and test-only adapters (`MockTransport`). A single variant
+    /// suffices because all current adapters share the same cancel shape;
+    /// Phase 2 adds additional variants as new wire backends land.
+    OneshotCancel(oneshot::Sender<()>),
 }
 
 impl SubscriptionHandle {
-    /// Construct a Gossip-variant handle. Called by `GossipTransport` in
-    /// Step 3+; kept `pub(crate)` so adapters inside the crate can build it.
-    // TODO(Step 3): remove `#[allow(dead_code)]` once `GossipTransport`
-    // calls this from its `subscribe` implementation.
-    #[allow(dead_code)]
-    pub(crate) fn gossip(cancel: oneshot::Sender<()>) -> Self {
+    /// Construct a handle whose cancel primitive is a `tokio::sync::oneshot`
+    /// sender. When the handle drops, the sender drops, and the adapter's
+    /// receiver observes `Err(RecvError)` — which the adapter interprets as
+    /// "stop the subscription."
+    ///
+    /// This is the single construction path for Phase-1 adapters (both
+    /// `GossipTransport` and the integration-test `MockTransport`). The
+    /// constructor is `pub` rather than `pub(crate)` because integration
+    /// tests live in a separate crate (`egregore/tests/`) and need to build
+    /// their own adapter impls; the opaque return type keeps the cancel
+    /// primitive unobservable to external callers.
+    pub fn from_cancel(cancel: oneshot::Sender<()>) -> Self {
         Self {
-            inner: SubscriptionInner::Gossip(cancel),
+            inner: SubscriptionInner::OneshotCancel(cancel),
         }
     }
 }
@@ -60,7 +63,7 @@ impl Drop for SubscriptionHandle {
         // dedicated hook; today it is effectively a no-op because drop of
         // the struct already drops its fields.
         match &mut self.inner {
-            SubscriptionInner::Gossip(_cancel) => {
+            SubscriptionInner::OneshotCancel(_cancel) => {
                 // dropped implicitly; nothing to do. Keeping the branch
                 // explicit documents the contract for future variants.
             }

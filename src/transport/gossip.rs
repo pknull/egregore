@@ -30,14 +30,31 @@
 //!
 //! # Step 4 scope
 //!
-//! `publish` now delegates to `ConnectionRegistry::broadcast`, mirroring the
+//! `publish` delegates to `ConnectionRegistry::broadcast`, mirroring the
 //! existing `PushManager::handle_message` fan-out path. No engine re-entry
 //! (Invariant 4): signed bytes go straight to the wire. Three health fields
 //! (`inflight_publishes`, `last_successful_publish`, `last_peer_contact`)
 //! are wired to publish activity via `AtomicUsize` + `parking_lot::RwLock`.
-//! `subscribe` and `request_from` remain `todo!()` until Step 9.
 //! `main.rs` still does not invoke `GossipTransport::publish`; Step 5 wires
 //! `FeedEngine.transports` to dispatch through the trait.
+//!
+//! # Step 9 scope
+//!
+//! `subscribe` bridges `engine.event_tx` (broadcast) through a `TopicFilter`
+//! into a `BoxStream<'static, Message>`, using `async_stream::stream!` with a
+//! `tokio::select!` that races the broadcast receive against a
+//! `oneshot::Receiver<()>` drop-cancel. The `SubscriptionHandle` returned to
+//! callers owns the paired `oneshot::Sender`; dropping the handle drops the
+//! sender, the receiver resolves to `Err(RecvError)`, and the stream ends.
+//! RFC §6 Invariant 1 (per-author FIFO) is inherited from the underlying
+//! broadcast channel, which preserves insertion order per-sender.
+//!
+//! `request_from` is a one-shot snapshot query via
+//! `FeedStore::get_messages_after`, which orders by sequence ASC. Per
+//! Invariant 5 the stream ends without a distinguishable error — consumers
+//! detect gaps via the chain's `previous` hash after the stream terminates.
+//! Phase 1 does not merge live-forward events; Phase 2+ composite transport
+//! may extend this.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -102,10 +119,11 @@ pub struct GossipTransportConfig {
 pub struct GossipTransport {
     /// Shared registry used for peer fan-out and `health().connected`.
     registry: Arc<ConnectionRegistry>,
-    /// Local identity retained for future use (Step 9+ may attach it to
-    /// subscription/request_from metadata). The publish path does NOT need
-    /// it — Invariant 4 requires the caller to have already signed the
-    /// message, so the transport is only a wire fan-out.
+    /// Local identity retained for future use. Phase-1 subscribe/request_from
+    /// do not touch it — the filter evaluates `msg.author` (the signed
+    /// envelope's author, not our local identity), and Invariant 4 forbids
+    /// re-signing. Phase 2's composite-transport fan-in may attach local
+    /// identity to subscription metadata (ack accounting, tenancy).
     #[allow(dead_code)]
     identity: Identity,
     /// Engine reference. Used by `start` to wire the existing server /
@@ -143,6 +161,34 @@ pub struct GossipTransport {
     /// successful fan-out (peer contact happens as part of broadcast) and
     /// (Step 9) by `subscribe` on inbound messages.
     last_peer_contact: RwLock<Option<DateTime<Utc>>>,
+}
+
+/// Evaluate a [`TopicFilter`] against a message.
+///
+/// - `authors = None` — all authors pass this dimension.
+/// - `authors = Some(v)` — pass iff `v` contains `msg.author`. An empty
+///   `Some(vec![])` matches nothing on this dimension (the filter is
+///   expressed as an explicit inclusion list; empty means "no-one").
+/// - `tags = None` — all tag sets pass this dimension.
+/// - `tags = Some(v)` — pass iff `msg.tags` intersects `v`. Empty `Some(vec![])`
+///   matches nothing.
+/// - Both dimensions `Some` → AND.
+///
+/// Per RFC 0001 §6 Invariant 6, the evaluator is allowed to be lenient
+/// (return true when it "should have" returned false — the caller then sees
+/// a superset). Returning false for a matching message is a bug (subset).
+fn matches_filter(filter: &TopicFilter, msg: &Message) -> bool {
+    if let Some(authors) = filter.authors.as_ref() {
+        if !authors.iter().any(|a| a == &msg.author) {
+            return false;
+        }
+    }
+    if let Some(tags) = filter.tags.as_ref() {
+        if !tags.iter().any(|t| msg.tags.contains(t)) {
+            return false;
+        }
+    }
+    true
 }
 
 impl GossipTransport {
@@ -212,21 +258,103 @@ impl Transport for GossipTransport {
 
     async fn subscribe(
         &self,
-        _filter: TopicFilter,
+        filter: TopicFilter,
     ) -> Result<(SubscriptionHandle, BoxStream<'static, Message>)> {
-        // TODO(Step 9): construct oneshot cancel, build filtered stream over
-        // `engine.subscribe()` broadcast receiver (plan §4 Step 9).
-        todo!("subscribe lands in Phase 1 Step 9")
+        // RFC 0001 §5.1 + §6 Invariants 1 & 6. Wire `engine.event_tx` (broadcast
+        // of every published and ingested message) through a filter, terminating
+        // the stream when either:
+        //   - the `SubscriptionHandle` returned here is dropped (the paired
+        //     `oneshot::Sender` drops, the receiver resolves to `Err(RecvError)`,
+        //     and the stream pipeline ends), OR
+        //   - the broadcast receiver itself closes (all senders dropped — this
+        //     can't happen while the engine is alive, but ends cleanly if it does).
+        //
+        // We use `async_stream::stream!` (already a crate dep) rather than
+        // `tokio-stream::BroadcastStream` because (a) we avoid taking another
+        // dep, (b) the cancel semantics are cleaner: a single `tokio::select!`
+        // inside the stream body lets us race the broadcast receive against
+        // the cancel signal without external adapter glue.
+        //
+        // Filter semantics follow the `MockTransport` contract — `None` on a
+        // dimension is "no predicate", `Some(vec)` is "must match at least one".
+        // Filter evaluation is best-effort at the wire; canonical filtering
+        // is always a consumer-side responsibility (RFC §6 Invariant 6
+        // permits superset delivery, forbids subset).
+
+        let mut rx = self.engine.subscribe();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = SubscriptionHandle::from_cancel(cancel_tx);
+
+        let stream = async_stream::stream! {
+            loop {
+                tokio::select! {
+                    biased;
+                    // Drop-cancel has priority so a caller dropping the handle
+                    // before the first receive still promptly ends the stream.
+                    _ = &mut cancel_rx => break,
+                    recv = rx.recv() => {
+                        match recv {
+                            Ok(arc_msg) => {
+                                let msg = (*arc_msg).clone();
+                                if matches_filter(&filter, &msg) {
+                                    yield msg;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                // Lagged subscribers MAY drop messages — this
+                                // is a superset-vs-subset concern. Per
+                                // Invariant 6, we must not silently produce a
+                                // subset unless we also end the stream. Here
+                                // we log and continue: for a live stream over
+                                // a 1024-capacity broadcast the subscriber
+                                // chose this position; consumers that require
+                                // strict ordering should drain promptly. Phase
+                                // 2's composite transport can upgrade to a
+                                // strict policy if needed.
+                                tracing::warn!(
+                                    lagged_by = n,
+                                    "GossipTransport::subscribe receiver lagged — \
+                                     downstream consumer did not drain promptly"
+                                );
+                                continue;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok((handle, Box::pin(stream)))
     }
 
     async fn request_from(
         &self,
-        _author: PublicId,
-        _after_seq: u64,
+        author: PublicId,
+        after_seq: u64,
     ) -> Result<BoxStream<'static, Message>> {
-        // TODO(Step 9): build a live-forward stream against the local store
-        // (plan §4 Step 9).
-        todo!("request_from lands in Phase 1 Step 9")
+        // RFC 0001 §5.1 + §6 Invariant 5. One-shot snapshot query against the
+        // local store. `FeedStore::get_messages_after` already returns messages
+        // in strictly increasing sequence order (ORDER BY sequence ASC in the
+        // underlying SQL); we simply stream them.
+        //
+        // Stream ending is NOT a distinguishable error per Invariant 5 —
+        // consumers detect gaps via the chain's `previous` hash after the
+        // stream ends. For Phase 1 this is a snapshot only; Phase 2+ may
+        // extend to merge live-forward events (for now, `subscribe` is the
+        // live-forward primitive and consumers interleave the two themselves).
+        //
+        // LIMIT is capped defensively at `u32::MAX`; the store's own query
+        // upper bounds keep this sane. A large author feed could OOM if
+        // materialized all at once; for now this matches the gossip
+        // replication path's behavior (which also pulls whole backlogs into
+        // memory per batch).
+        const REQUEST_FROM_LIMIT: u32 = u32::MAX;
+        let messages = self
+            .engine
+            .store()
+            .get_messages_after(&author, after_seq, REQUEST_FROM_LIMIT)?;
+        Ok(Box::pin(futures::stream::iter(messages)))
     }
 
     async fn start(&self) -> Result<()> {

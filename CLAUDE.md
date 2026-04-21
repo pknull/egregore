@@ -28,6 +28,7 @@ src/
   error.rs            Error types (EgreError)
   hooks.rs            Message hook infrastructure (subprocess/webhook)
   main.rs             Node binary entry point
+  cli_admin.rs        CLI subcommand dispatch (publish handler and future admin subcommands)
   identity/
     keys.rs           Ed25519 keypair, Ed25519-to-X25519 conversion
     signing.rs        Sign/verify operations
@@ -92,6 +93,7 @@ src/
 ## Conventions
 
 - `spawn_blocking` for all rusqlite calls (sync library in async runtime)
+- `parking_lot::RwLock` used in schema registry (non-poisoning, preferred over std RwLock)
 - `#[serde(tag = "type")]` for content type enum variants
 - Standard API response: `{ success, data, error, metadata }`
 - Pagination: `limit`/`offset` query parameters

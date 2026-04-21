@@ -230,7 +230,9 @@ impl SecureConnection {
                 });
             }
 
-            let header: [u8; 34] = frame[..34].try_into().unwrap();
+            let header: [u8; 34] = frame[..34].try_into().map_err(|_| EgreError::Peer {
+                reason: "frame header wrong size".into(),
+            })?;
             match self.reader.decrypt_header(&header)? {
                 None => return Ok(None), // Goodbye
                 Some((body_len, body_mac)) => {
@@ -382,7 +384,9 @@ impl SecureReader {
                 });
             }
 
-            let header: [u8; 34] = frame[..34].try_into().unwrap();
+            let header: [u8; 34] = frame[..34].try_into().map_err(|_| EgreError::Peer {
+                reason: "frame header wrong size".into(),
+            })?;
             match self.reader.decrypt_header(&header)? {
                 None => return Ok(None),
                 Some((body_len, body_mac)) => {

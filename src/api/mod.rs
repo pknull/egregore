@@ -21,6 +21,7 @@ pub mod mcp;
 pub mod mcp_registry;
 pub mod mcp_tools;
 pub mod response;
+pub mod routes_blobs;
 pub mod routes_events;
 pub mod routes_feed;
 pub mod routes_follows;
@@ -45,6 +46,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 
+use crate::blob::BlobStore;
 use crate::config::Config;
 use crate::feed::engine::FeedEngine;
 use crate::identity::Identity;
@@ -58,6 +60,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub started_at: Instant,
     pub mcp_registry: SharedRegistry,
+    pub blob_store: BlobStore,
 }
 
 fn is_mutating_rest_request(req: &Request<Body>) -> bool {
@@ -73,30 +76,53 @@ fn is_mutating_rest_request(req: &Request<Body>) -> bool {
 /// Requires `Content-Type: application/json` for mutating HTTP methods (POST, PUT, DELETE, PATCH).
 /// This prevents simple CSRF attacks from HTML forms which cannot set custom Content-Type headers.
 ///
-/// Returns 415 Unsupported Media Type if the Content-Type is missing or not application/json.
+/// Exempts `/v1/blobs` which accepts `application/octet-stream`.
+///
+/// Returns 415 Unsupported Media Type if the Content-Type is missing or not acceptable.
 async fn require_json_content_type(req: Request<Body>, next: Next) -> Response {
     // Only check mutating methods
     if matches!(
         *req.method(),
         Method::POST | Method::PUT | Method::DELETE | Method::PATCH
     ) {
+        let path = req.uri().path().to_string();
         let content_type = req
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok());
 
-        match content_type {
-            Some(ct) if ct.starts_with("application/json") => {
-                // Valid JSON content type, proceed
+        // Blob upload accepts octet-stream
+        if path == "/v1/blobs" {
+            match content_type {
+                Some(ct)
+                    if ct.starts_with("application/octet-stream")
+                        || ct.starts_with("application/json") =>
+                {
+                    // Valid content type for blob upload
+                }
+                _ => {
+                    return response::err::<()>(
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        "UNSUPPORTED_MEDIA_TYPE",
+                        "Content-Type must be application/octet-stream for blob uploads",
+                    )
+                    .into_response();
+                }
             }
-            _ => {
-                // Missing or invalid Content-Type
-                return response::err::<()>(
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "UNSUPPORTED_MEDIA_TYPE",
-                    "Content-Type must be application/json for mutating requests",
-                )
-                .into_response();
+        } else {
+            match content_type {
+                Some(ct) if ct.starts_with("application/json") => {
+                    // Valid JSON content type, proceed
+                }
+                _ => {
+                    // Missing or invalid Content-Type
+                    return response::err::<()>(
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        "UNSUPPORTED_MEDIA_TYPE",
+                        "Content-Type must be application/json for mutating requests",
+                    )
+                    .into_response();
+                }
             }
         }
     }
@@ -127,7 +153,14 @@ async fn require_api_auth(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
 
-    if expected_token.is_some() && provided_token == expected_token {
+    let auth_ok = match (expected_token, provided_token) {
+        (Some(expected), Some(provided)) => {
+            use subtle::ConstantTimeEq;
+            bool::from(provided.as_bytes().ct_eq(expected.as_bytes()))
+        }
+        _ => false,
+    };
+    if auth_ok {
         return next.run(req).await;
     }
 
@@ -172,34 +205,7 @@ pub fn router_with_mcp(state: AppState, mcp_enabled: bool) -> Router {
         )
         .route("/v1/topics", get(routes_topics::get_topic_subscriptions))
         .route("/v1/topics/known", get(routes_topics::get_known_topics))
-        .route(
-            "/v1/groups",
-            get(routes_groups::list_groups).post(routes_groups::create_group),
-        )
-        .route(
-            "/v1/groups/:id",
-            get(routes_groups::get_group).delete(routes_groups::delete_group),
-        )
-        .route(
-            "/v1/groups/:id/members",
-            get(routes_groups::get_group_members),
-        )
-        .route("/v1/groups/:id/join", post(routes_groups::join_group))
-        .route("/v1/groups/:id/leave", post(routes_groups::leave_group))
-        .route(
-            "/v1/groups/:id/offsets",
-            get(routes_groups::get_group_offsets).post(routes_groups::commit_offset),
-        )
         .route("/v1/events", get(routes_events::subscribe))
-        .route(
-            "/v1/schemas",
-            get(routes_schema::list_schemas).post(routes_schema::register_schema),
-        )
-        .route(
-            "/v1/schemas/validate",
-            post(routes_schema::validate_content),
-        )
-        .route("/v1/schemas/*schema_id", get(routes_schema::get_schema))
         .route(
             "/v1/retention/policies",
             get(routes_retention::list_policies).post(routes_retention::create_policy),
@@ -207,7 +213,56 @@ pub fn router_with_mcp(state: AppState, mcp_enabled: bool) -> Router {
         .route(
             "/v1/retention/policies/:id",
             delete(routes_retention::delete_policy),
-        );
+        )
+        .route(
+            "/v1/blobs",
+            post(routes_blobs::upload_blob)
+                .layer(DefaultBodyLimit::max(100 * 1024 * 1024)), // 100 MB for blob uploads
+        )
+        .route("/v1/blobs/:hash", get(routes_blobs::download_blob))
+        .route("/v1/blobs/:hash/info", get(routes_blobs::blob_info));
+
+    // Consumer groups API (advanced feature; off by default).
+    let router = if state.config.consumer_groups_enabled {
+        router
+            .route(
+                "/v1/groups",
+                get(routes_groups::list_groups).post(routes_groups::create_group),
+            )
+            .route(
+                "/v1/groups/:id",
+                get(routes_groups::get_group).delete(routes_groups::delete_group),
+            )
+            .route(
+                "/v1/groups/:id/members",
+                get(routes_groups::get_group_members),
+            )
+            .route("/v1/groups/:id/join", post(routes_groups::join_group))
+            .route("/v1/groups/:id/leave", post(routes_groups::leave_group))
+            .route(
+                "/v1/groups/:id/offsets",
+                get(routes_groups::get_group_offsets).post(routes_groups::commit_offset),
+            )
+    } else {
+        router
+    };
+
+    // Schema registry management API (on by default; internal validation is always on).
+    let router = if state.config.schema_api_enabled {
+        router
+            .route(
+                "/v1/schemas",
+                get(routes_schema::list_schemas).post(routes_schema::register_schema),
+            )
+            .route(
+                "/v1/schemas/validate",
+                post(routes_schema::validate_content),
+            )
+            .route("/v1/schemas/*schema_id", get(routes_schema::get_schema))
+    } else {
+        router
+    };
+
     let router = if mcp_enabled {
         router.route(
             "/mcp",
@@ -244,6 +299,8 @@ mod tests {
     fn test_state_with_config(config: Config) -> AppState {
         let store = FeedStore::open_memory().unwrap();
         let engine = FeedEngine::new(store);
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_store = BlobStore::new(tmp.path());
 
         AppState {
             identity: Identity::generate(),
@@ -251,6 +308,7 @@ mod tests {
             config: Arc::new(config),
             started_at: Instant::now(),
             mcp_registry: mcp_registry::create_registry(),
+            blob_store,
         }
     }
 

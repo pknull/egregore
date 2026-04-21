@@ -61,6 +61,15 @@ pub enum Content {
         #[serde(default)]
         capabilities: Vec<String>,
     },
+    #[serde(rename = "key_rotation")]
+    KeyRotation {
+        old_key: String,
+        new_key: String,
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        effective_at: Option<String>,
+    },
 }
 
 impl Content {
@@ -88,6 +97,21 @@ mod tests {
         let val = content.to_value();
         assert_eq!(val["type"], "insight");
         assert_eq!(val["title"], "Test");
+    }
+
+    #[test]
+    fn key_rotation_to_value_has_type_field() {
+        let content = Content::KeyRotation {
+            old_key: "@old.ed25519".to_string(),
+            new_key: "@new.ed25519".to_string(),
+            reason: Some("scheduled rotation".to_string()),
+            effective_at: Some("2026-04-01T00:00:00Z".to_string()),
+        };
+        let val = content.to_value();
+        assert_eq!(val["type"], "key_rotation");
+        assert_eq!(val["old_key"], "@old.ed25519");
+        assert_eq!(val["new_key"], "@new.ed25519");
+        assert_eq!(val["reason"], "scheduled rotation");
     }
 
     #[test]

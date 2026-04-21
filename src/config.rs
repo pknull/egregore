@@ -128,7 +128,7 @@ pub struct Config {
     pub api_enabled: bool,
     /// Require Bearer token auth for mutating REST API endpoints under /v1.
     /// Read-only routes remain accessible without auth.
-    #[serde(default)]
+    #[serde(default = "default_api_auth_enabled")]
     pub api_auth_enabled: bool,
     /// Bearer token accepted by mutating REST API endpoints when auth is enabled.
     #[serde(default)]
@@ -144,6 +144,22 @@ pub struct Config {
     /// When true, unknown content types/schemas are rejected at publish/ingest.
     #[serde(default)]
     pub schema_strict: bool,
+    /// Expose the schema registry management API (`/v1/schemas/*`).
+    ///
+    /// The schema registry itself is always available internally for content
+    /// validation. This flag only gates the public HTTP endpoints used to list,
+    /// register, and validate schemas. Disable for minimal deployments that do
+    /// not need runtime schema management.
+    #[serde(default = "default_schema_api_enabled")]
+    pub schema_api_enabled: bool,
+    /// Enable consumer groups (`/v1/groups/*`).
+    ///
+    /// Consumer groups provide Kafka-style coordinated feed consumption with
+    /// generation counters, heartbeat-based eviction, and offset tracking. This
+    /// is an advanced feature useful for multi-consumer deployments. Disabled
+    /// by default — most local meshes do not need it.
+    #[serde(default)]
+    pub consumer_groups_enabled: bool,
     pub peers: Vec<String>,
     pub lan_discovery: bool,
     pub discovery_port: u16,
@@ -253,7 +269,15 @@ fn default_api_enabled() -> bool {
     true
 }
 
+fn default_api_auth_enabled() -> bool {
+    true
+}
+
 fn default_mcp_enabled() -> bool {
+    true
+}
+
+fn default_schema_api_enabled() -> bool {
     true
 }
 
@@ -262,7 +286,7 @@ impl Default for Config {
         Self {
             data_dir: PathBuf::from("./data"),
             api_enabled: true,
-            api_auth_enabled: false,
+            api_auth_enabled: true,
             api_auth_token: None,
             mcp_enabled: true,
             port: DEFAULT_HTTP_PORT,
@@ -270,6 +294,8 @@ impl Default for Config {
             gossip_interval_secs: DEFAULT_GOSSIP_INTERVAL_SECS,
             network_key: DEFAULT_NETWORK_KEY.to_string(),
             schema_strict: false,
+            schema_api_enabled: true,
+            consumer_groups_enabled: false,
             peers: Vec::new(),
             lan_discovery: false,
             discovery_port: DEFAULT_DISCOVERY_PORT,
@@ -662,7 +688,7 @@ mod tests {
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(!config.schema_strict);
         assert!(config.api_enabled);
-        assert!(!config.api_auth_enabled);
+        assert!(config.api_auth_enabled);
         assert!(config.api_auth_token.is_none());
         assert!(config.mcp_enabled);
         assert!(!config.node_status_enabled);
@@ -674,6 +700,7 @@ mod tests {
         let config = Config {
             port: 7654,
             gossip_port: 7654,
+            api_auth_token: Some("test-token".to_string()),
             ..Config::default()
         };
         assert!(config.validate().is_err());
@@ -717,6 +744,7 @@ mod tests {
                 webhook_url: Some("not-a-url".to_string()),
                 ..Default::default()
             }],
+            api_auth_token: Some("test-token".to_string()),
             ..Config::default()
         };
         assert!(config.validate().is_err());
@@ -729,6 +757,7 @@ mod tests {
                 webhook_url: Some("https://example.com/hook".to_string()),
                 ..Default::default()
             }],
+            api_auth_token: Some("test-token".to_string()),
             ..Config::default()
         };
         assert!(config.validate().is_ok());

@@ -304,6 +304,15 @@ impl FeedEngine {
             return Err(e);
         }
 
+        // Reject messages signed by a superseded key (key rotation enforcement).
+        // Key rotation messages themselves are exempt (they must be signed by the old key).
+        if content_type != "key_rotation" {
+            if let Err(e) = self.check_key_not_rotated(&msg.author) {
+                metrics::record_message_ingested(content_type, "error");
+                return Err(e);
+            }
+        }
+
         if let Err(e) = Self::validate_previous_field(msg) {
             metrics::record_message_ingested(content_type, "error");
             return Err(e);
@@ -361,6 +370,54 @@ impl FeedEngine {
                 ),
             });
         }
+        Ok(())
+    }
+
+    /// Check if a signing key has been superseded by a key_rotation message.
+    ///
+    /// Queries for key_rotation messages where `old_key` matches the author.
+    /// If any exist with an `effective_at` that has passed (or no effective_at,
+    /// meaning immediately effective), the key is considered superseded.
+    fn check_key_not_rotated(&self, author: &crate::identity::PublicId) -> Result<()> {
+        let query = FeedQuery {
+            content_type: Some("key_rotation".to_string()),
+            limit: Some(100),
+            ..Default::default()
+        };
+
+        let messages = self.store.query_messages(&query)?;
+
+        let now = Utc::now();
+        for msg in &messages {
+            let old_key = msg.content.get("old_key").and_then(|v| v.as_str());
+            if old_key != Some(&author.0) {
+                continue;
+            }
+
+            // Check if effective_at has passed (or if absent, immediately effective)
+            let effective_at = msg
+                .content
+                .get("effective_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+
+            let is_effective = match effective_at {
+                Some(dt) => now >= dt,
+                None => true, // No effective_at means immediately effective
+            };
+
+            if is_effective {
+                return Err(EgreError::FeedIntegrity {
+                    reason: format!(
+                        "signing key {} has been superseded by key rotation; \
+                         use the new key to publish",
+                        author.0
+                    ),
+                });
+            }
+        }
+
         Ok(())
     }
 

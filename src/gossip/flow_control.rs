@@ -1,5 +1,9 @@
 //! Flow control and backpressure for gossip replication.
 //!
+//! Controlled by `flow_control_enabled` (default on). Disabling skips credit
+//! negotiation during push setup — useful for small, trusted meshes where
+//! backpressure is not a concern. Most deployments should leave this on.
+//!
 //! Implements credit-based flow control where consumers request batches
 //! of messages rather than receiving unbounded push. Each peer grants
 //! credits indicating how many messages they can accept.

@@ -27,13 +27,26 @@
 //! `subscribe`, and `request_from` remain `todo!()` and land in Steps 4 and 9.
 //! No code in `src/main.rs`, `src/feed/engine.rs`, or any other crate module
 //! observes `GossipTransport` at the end of Step 3.
+//!
+//! # Step 4 scope
+//!
+//! `publish` now delegates to `ConnectionRegistry::broadcast`, mirroring the
+//! existing `PushManager::handle_message` fan-out path. No engine re-entry
+//! (Invariant 4): signed bytes go straight to the wire. Three health fields
+//! (`inflight_publishes`, `last_successful_publish`, `last_peer_contact`)
+//! are wired to publish activity via `AtomicUsize` + `parking_lot::RwLock`.
+//! `subscribe` and `request_from` remain `todo!()` until Step 9.
+//! `main.rs` still does not invoke `GossipTransport::publish`; Step 5 wires
+//! `FeedEngine.transports` to dispatch through the trait.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use futures::stream::BoxStream;
+use parking_lot::RwLock;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -89,12 +102,16 @@ pub struct GossipTransportConfig {
 pub struct GossipTransport {
     /// Shared registry used for peer fan-out and `health().connected`.
     registry: Arc<ConnectionRegistry>,
-    /// Local identity retained for future use (Step 4+ may attach it to
-    /// published messages' metadata; `start`/`shutdown` do not need it).
+    /// Local identity retained for future use (Step 9+ may attach it to
+    /// subscription/request_from metadata). The publish path does NOT need
+    /// it — Invariant 4 requires the caller to have already signed the
+    /// message, so the transport is only a wire fan-out.
     #[allow(dead_code)]
     identity: Identity,
-    /// Engine the adapter will drive for inbound ingest (Step 9).
-    #[allow(dead_code)]
+    /// Engine reference. Used by `start` to wire the existing server /
+    /// sync-loop tasks; Step 9 will use it from `subscribe`/`request_from`
+    /// to hand out a live-forward receiver. NOT used by `publish` (Invariant
+    /// 4: no engine re-entry on the publish path).
     engine: Arc<FeedEngine>,
     /// Server loop configuration.
     server_config: ServerConfig,
@@ -111,6 +128,21 @@ pub struct GossipTransport {
     /// children). `Mutex<Option<_>>` so `shutdown` can take ownership and
     /// await them.
     handles: Mutex<Option<Vec<JoinHandle<()>>>>,
+    /// Number of `publish` calls currently in flight. Incremented before the
+    /// call to `registry.broadcast` and decremented after it resolves
+    /// (regardless of Ok/Err), so the `health()` snapshot always observes a
+    /// consistent count.
+    inflight_publishes: AtomicUsize,
+    /// Wall-clock of the most recent successful `publish`. `parking_lot::RwLock`
+    /// per egregore/CLAUDE.md (non-poisoning; preferred over std `RwLock`).
+    /// Kept separate from `last_peer_contact` because Step 9's `subscribe`
+    /// will also update `last_peer_contact` from inbound traffic, and we do
+    /// not want that path to entangle with outbound publish timestamps.
+    last_successful_publish: RwLock<Option<DateTime<Utc>>>,
+    /// Wall-clock of the most recent peer contact. Updated by `publish` on
+    /// successful fan-out (peer contact happens as part of broadcast) and
+    /// (Step 9) by `subscribe` on inbound messages.
+    last_peer_contact: RwLock<Option<DateTime<Utc>>>,
 }
 
 impl GossipTransport {
@@ -133,16 +165,49 @@ impl GossipTransport {
             started: AtomicBool::new(false),
             cancel: CancellationToken::new(),
             handles: Mutex::new(Some(Vec::new())),
+            inflight_publishes: AtomicUsize::new(0),
+            last_successful_publish: RwLock::new(None),
+            last_peer_contact: RwLock::new(None),
         }
     }
 }
 
 #[async_trait]
 impl Transport for GossipTransport {
-    async fn publish(&self, _msg: &Message) -> Result<()> {
-        // TODO(Step 4): delegate to `self.registry.broadcast(_msg)` — mirrors
-        // `PushManager::handle_message` (plan §4 Step 4).
-        todo!("publish lands in Phase 1 Step 4")
+    async fn publish(&self, msg: &Message) -> Result<()> {
+        // RFC 0001 §5.1 + §6 Invariant 4: this is a wire fan-out ONLY. The
+        // caller has already signed the message; we MUST NOT re-route through
+        // `FeedEngine::publish` (which re-signs) or `FeedEngine::ingest`
+        // (which re-verifies and would double-store). Mirrors the existing
+        // `PushManager::handle_message` path that already fans signed bytes
+        // out to connected peers.
+        //
+        // `ConnectionRegistry::broadcast` is infallible — it handles per-peer
+        // send failures internally (logs them, drops the failed connection
+        // from the registry, and updates `registry.metrics.push_failures`).
+        // Per Invariant 2 (no silent drop), that per-peer failure surfaces
+        // through metrics rather than this return value; publish returns Ok
+        // once the message has been accepted for eventual delivery, which
+        // happens the moment we hand it to the registry.
+
+        // Bracket the call with an inflight counter so `health()` snapshots
+        // during concurrent publishes observe non-zero inflight counts. The
+        // decrement MUST run regardless of broadcast outcome; since broadcast
+        // is infallible there is no panic path to guard against, but we
+        // keep the symmetric increment/decrement for future-proofing when
+        // subscribe/request_from land in Step 9.
+        self.inflight_publishes.fetch_add(1, Ordering::AcqRel);
+        self.registry.broadcast(msg).await;
+        self.inflight_publishes.fetch_sub(1, Ordering::AcqRel);
+
+        // Stamp liveness. `last_peer_contact` gets the same timestamp because
+        // outbound fan-out is also a form of peer contact; Step 9's subscribe
+        // will also update this field from inbound traffic.
+        let now = Utc::now();
+        *self.last_successful_publish.write() = Some(now);
+        *self.last_peer_contact.write() = Some(now);
+
+        Ok(())
     }
 
     async fn subscribe(
@@ -255,14 +320,16 @@ impl Transport for GossipTransport {
         TransportHealth {
             connected: self.registry.connection_count() > 0,
             backend: "gossip",
-            // Step 4+ populates these once `publish` observes send outcomes
-            // and the subscribe/ingest path records inbound peer contact.
-            last_successful_publish: None,
-            last_peer_contact: None,
-            // Step 5+ plumbs unreplicated count through the store once the
-            // engine dispatches publish via the trait.
+            last_successful_publish: *self.last_successful_publish.read(),
+            last_peer_contact: *self.last_peer_contact.read(),
+            // TODO(Step 5+): plumb unreplicated count through the engine
+            // once FeedEngine.transports dispatches publish via the trait.
             unreplicated_count: 0,
-            inflight_publishes: 0,
+            inflight_publishes: self.inflight_publishes.load(Ordering::Acquire),
+            // `registry.broadcast` is infallible (it handles per-peer errors
+            // internally via logging + connection drop + metrics). Step 9's
+            // subscribe/request_from paths will surface adapter-level errors
+            // here when they land.
             last_error: None,
             // Gossip is a leaf transport; composites (Phase 2) populate
             // `children` themselves.
@@ -438,5 +505,160 @@ mod tests {
             .shutdown(Duration::from_millis(100))
             .await
             .expect("shutdown without start is ok");
+    }
+
+    // ------------------------------------------------------------------
+    // Step 4 tests — publish wiring to registry.broadcast, health fields.
+    // ------------------------------------------------------------------
+
+    /// Build a signed `Message` through the engine's normal publish path so
+    /// tests use a real, well-formed, already-signed envelope (Invariant 4
+    /// requires transports NOT to mutate signed bytes, so the test input must
+    /// already be signed).
+    fn sign_message(engine: &FeedEngine, identity: &Identity) -> Message {
+        engine
+            .publish(
+                identity,
+                serde_json::json!({ "type": "test", "body": "step-4" }),
+                None,
+                vec![],
+            )
+            .expect("engine publish produces signed message")
+    }
+
+    /// Invariant 2 (no silent drop) — publish with no peers must succeed.
+    /// "Accepted for eventual delivery" is still Ok even when there are zero
+    /// peers to fan out to. Empty registry is not an error.
+    #[tokio::test]
+    async fn publish_with_no_peers_returns_ok() {
+        let registry = Arc::new(ConnectionRegistry::new(32));
+        let (cfg, engine) = build_config(registry.clone(), "127.0.0.1:0");
+        let identity = cfg.identity.clone();
+        let transport = GossipTransport::new(cfg);
+
+        let msg = sign_message(&engine, &identity);
+        transport
+            .publish(&msg)
+            .await
+            .expect("publish with empty registry must return Ok");
+    }
+
+    /// `publish` must update `last_successful_publish` on success so operators
+    /// can observe liveness via `/v1/status`.
+    #[tokio::test]
+    async fn publish_updates_last_successful_publish() {
+        let registry = Arc::new(ConnectionRegistry::new(32));
+        let (cfg, engine) = build_config(registry.clone(), "127.0.0.1:0");
+        let identity = cfg.identity.clone();
+        let transport = GossipTransport::new(cfg);
+
+        // Precondition: fresh transport has no prior publish timestamp.
+        assert!(transport.health().last_successful_publish.is_none());
+
+        let before = chrono::Utc::now();
+        let msg = sign_message(&engine, &identity);
+        transport.publish(&msg).await.expect("publish ok");
+        let after = chrono::Utc::now();
+
+        let ts = transport
+            .health()
+            .last_successful_publish
+            .expect("last_successful_publish set after publish");
+        assert!(
+            ts >= before && ts <= after,
+            "last_successful_publish must be within [before, after] of the publish call; \
+             got {ts}, window [{before}, {after}]"
+        );
+    }
+
+    /// `publish` also updates `last_peer_contact` on success. Kept as a
+    /// separate field so Step 9's `subscribe` can update it from inbound
+    /// traffic without entangling with publish-side timestamps.
+    #[tokio::test]
+    async fn publish_updates_last_peer_contact() {
+        let registry = Arc::new(ConnectionRegistry::new(32));
+        let (cfg, engine) = build_config(registry.clone(), "127.0.0.1:0");
+        let identity = cfg.identity.clone();
+        let transport = GossipTransport::new(cfg);
+
+        assert!(transport.health().last_peer_contact.is_none());
+
+        let before = chrono::Utc::now();
+        let msg = sign_message(&engine, &identity);
+        transport.publish(&msg).await.expect("publish ok");
+        let after = chrono::Utc::now();
+
+        let ts = transport
+            .health()
+            .last_peer_contact
+            .expect("last_peer_contact set after publish");
+        assert!(
+            ts >= before && ts <= after,
+            "last_peer_contact must be within [before, after] of the publish call; \
+             got {ts}, window [{before}, {after}]"
+        );
+    }
+
+    /// `inflight_publishes` must start at 0, and return to 0 after `publish`
+    /// completes. The increment-while-running half of the contract requires
+    /// concurrency to observe and is deferred to Step 9's property tests;
+    /// this test asserts the observable start-and-end invariant.
+    #[tokio::test]
+    async fn publish_increments_inflight_then_decrements() {
+        let registry = Arc::new(ConnectionRegistry::new(32));
+        let (cfg, engine) = build_config(registry.clone(), "127.0.0.1:0");
+        let identity = cfg.identity.clone();
+        let transport = GossipTransport::new(cfg);
+
+        assert_eq!(
+            transport.health().inflight_publishes,
+            0,
+            "fresh transport has no inflight publishes"
+        );
+
+        let msg = sign_message(&engine, &identity);
+        transport.publish(&msg).await.expect("publish ok");
+
+        assert_eq!(
+            transport.health().inflight_publishes,
+            0,
+            "inflight count must return to 0 after publish resolves"
+        );
+    }
+
+    /// Invariant 4 (envelope preservation). `publish` MUST NOT route through
+    /// `FeedEngine::publish` (which signs) or `FeedEngine::ingest` (which
+    /// verifies + stores a second copy). It is a wire-only fan-out. This test
+    /// guards against anyone accidentally adding an engine round-trip to the
+    /// publish path by observing the engine's store row count.
+    #[tokio::test]
+    async fn publish_does_not_reinvoke_feed_engine() {
+        let registry = Arc::new(ConnectionRegistry::new(32));
+        let (cfg, engine) = build_config(registry.clone(), "127.0.0.1:0");
+        let identity = cfg.identity.clone();
+        let transport = GossipTransport::new(cfg);
+
+        // One engine.publish above to obtain a signed message — store has 1.
+        let msg = sign_message(&engine, &identity);
+        let before = engine
+            .store()
+            .message_count()
+            .expect("message_count readable");
+        assert_eq!(before, 1, "baseline: engine stored the signed message");
+
+        transport
+            .publish(&msg)
+            .await
+            .expect("transport publish ok");
+
+        let after = engine
+            .store()
+            .message_count()
+            .expect("message_count readable");
+        assert_eq!(
+            after, before,
+            "Invariant 4 — transport publish must NOT re-ingest through the engine; \
+             store count must be unchanged (before={before}, after={after})"
+        );
     }
 }

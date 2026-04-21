@@ -10,3 +10,4 @@ pub mod identity;
 pub mod metrics;
 pub mod status;
 pub mod telemetry;
+pub mod transport;

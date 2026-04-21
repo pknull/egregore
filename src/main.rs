@@ -801,6 +801,12 @@ async fn main() -> anyhow::Result<()> {
         engine.attach_transport(transport);
     }
 
+    // RFC 0002 §4 Principle 7: emit WARN line if this node is running with
+    // ≥ 2 transports (emergent bridge mode). No-op when `transport_count() < 2`,
+    // which is the Phase 1 default. Placed after attach and before LAN/mDNS
+    // discovery spawns so operators see the line before inbound traffic starts.
+    egregore::transport::announce_if_multi_transport(&engine);
+
     // Start LAN discovery if enabled
     if config.lan_discovery {
         let disc_config = config.clone();

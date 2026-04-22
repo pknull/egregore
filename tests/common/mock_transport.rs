@@ -174,6 +174,16 @@ fn matches_filter(filter: &TopicFilter, msg: &Message) -> bool {
 #[async_trait]
 impl Transport for MockTransport {
     async fn publish(&self, msg: &Message) -> Result<()> {
+        // Fail-fast on publishes that arrive *after* shutdown has been
+        // signaled. Plan §5.8 (strengthened): the B.7 invariant requires
+        // that `publish` honors the `shut` flag — otherwise shutdown is a
+        // vacuous "publishes drain on their own" test. In-flight publishes
+        // (those that acquired the `inflight` slot before `shut` was set)
+        // complete their drain so the `shutdown` deadline logic can observe
+        // them returning to 0.
+        if self.shut.load(Ordering::Acquire) {
+            return Err(crate::common::post_shutdown_err());
+        }
         self.inflight.fetch_add(1, Ordering::AcqRel);
 
         // Always record the publish attempt, even if wire-dropped. This is
@@ -181,9 +191,10 @@ impl Transport for MockTransport {
         // sender-side attempts, not receiver-side deliveries.
         self.published.lock().push(msg.clone());
 
-        // Simulate broker ack latency if requested. Check shutdown flag after
-        // so slow-ack in flight at shutdown time sees the flag and short-
-        // circuits; otherwise publishes pile up waiting on the sleep.
+        // Simulate broker ack latency if requested. The B.7 test uses
+        // slow_ack to widen the in-flight window so `shutdown` is called
+        // while publishes are mid-drain; the shutdown side-loop then waits
+        // for `inflight` to return to zero.
         if self.slow_ack.load(Ordering::Acquire) {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -247,8 +258,25 @@ impl Transport for MockTransport {
         Ok(())
     }
 
-    async fn shutdown(&self, _deadline: Duration) -> Result<()> {
+    async fn shutdown(&self, deadline: Duration) -> Result<()> {
         self.shut.store(true, Ordering::Release);
+        // Drain loop: wait for every in-flight publish to finish (or for the
+        // deadline to expire). Without this wait, B.7 is vacuous — in-flight
+        // publishes complete on their own because nothing is gating them.
+        // The shutdown contract (RFC 0001 §6 Invariant 7) is that shutdown
+        // coordinates with publish; here we enforce that coordination with
+        // a bounded poll.
+        let start = tokio::time::Instant::now();
+        while self.inflight.load(Ordering::Acquire) > 0 {
+            if start.elapsed() >= deadline {
+                tracing::warn!(
+                    inflight = self.inflight.load(Ordering::Acquire),
+                    "shutdown deadline exceeded with inflight publishes"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         // Drain subscribers so they observe EOS on their next poll.
         self.subs.lock().clear();
         Ok(())

@@ -355,6 +355,7 @@ async fn b7_shutdown_drains() {
     mock.set_slow_ack(true);
 
     // Spawn 5 concurrent publishes. Each takes ~50ms due to slow_ack.
+    // They all enter the in-flight state before the shutdown call below.
     let mut handles = Vec::new();
     for msg in &chain {
         let t = Arc::clone(&mock);
@@ -362,7 +363,17 @@ async fn b7_shutdown_drains() {
         handles.push(tokio::spawn(async move { t.publish(&msg).await }));
     }
 
-    // Shutdown almost immediately.
+    // Give publishes a head start so they are observably in-flight when
+    // shutdown is called. Without this, the test might see shutdown before
+    // any publish acquires its inflight slot — reducing coverage of the
+    // drain-wait logic.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let inflight_before_shutdown = mock.health().inflight_publishes;
+    assert!(
+        inflight_before_shutdown > 0,
+        "expected in-flight publishes before shutdown (got {inflight_before_shutdown})"
+    );
+
     let sd_start = std::time::Instant::now();
     mock.shutdown(Duration::from_secs(5))
         .await
@@ -372,14 +383,24 @@ async fn b7_shutdown_drains() {
         sd_elapsed < Duration::from_secs(5),
         "shutdown must return within deadline, took {sd_elapsed:?}"
     );
+    // Shutdown must actually wait for in-flight drain — slow_ack publishes
+    // take ~50ms each, so a truthful shutdown spends non-trivial time
+    // waiting. A vacuous shutdown (sets flag + returns immediately) would
+    // finish in microseconds.
+    assert!(
+        sd_elapsed >= Duration::from_millis(25),
+        "shutdown must wait for in-flight drain (took {sd_elapsed:?})"
+    );
 
-    // Every publish resolves (Ok or Err) — not pending forever.
+    // Every publish resolves — Ok for those that entered before shutdown,
+    // Err for any that raced the shutdown flag. Either is acceptable, but
+    // none may remain pending.
     for h in handles {
         tokio::time::timeout(Duration::from_secs(2), h)
             .await
             .expect("join within 2s post-shutdown")
             .expect("task did not panic")
-            .expect("publish resolved");
+            .ok(); // accept Ok or Err; not-pending is the invariant
     }
 
     // Inflight returns to 0.
@@ -387,6 +408,16 @@ async fn b7_shutdown_drains() {
         mock.health().inflight_publishes,
         0,
         "inflight must return to 0 after shutdown drains"
+    );
+
+    // Post-shutdown fail-fast: a fresh publish after shutdown MUST error,
+    // not silently accept. Protects the contract that shut transports
+    // don't keep pretending to work.
+    let (_idd, extra) = build_chain(1);
+    let post = mock.publish(&extra[0]).await;
+    assert!(
+        post.is_err(),
+        "post-shutdown publish must fail-fast, got {post:?}"
     );
 }
 

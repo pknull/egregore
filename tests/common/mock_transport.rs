@@ -265,21 +265,34 @@ impl Transport for MockTransport {
         // publishes complete on their own because nothing is gating them.
         // The shutdown contract (RFC 0001 §6 Invariant 7) is that shutdown
         // coordinates with publish; here we enforce that coordination with
-        // a bounded poll.
+        // a bounded poll, and surface a deadline miss as `Err` so callers
+        // can distinguish "drained cleanly" from "bailed with stuck work."
         let start = tokio::time::Instant::now();
+        let mut timed_out = false;
+        let mut stuck_inflight: usize = 0;
         while self.inflight.load(Ordering::Acquire) > 0 {
             if start.elapsed() >= deadline {
+                stuck_inflight = self.inflight.load(Ordering::Acquire);
                 tracing::warn!(
-                    inflight = self.inflight.load(Ordering::Acquire),
+                    inflight = stuck_inflight,
                     "shutdown deadline exceeded with inflight publishes"
                 );
+                timed_out = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         // Drain subscribers so they observe EOS on their next poll.
         self.subs.lock().clear();
-        Ok(())
+        if timed_out {
+            Err(egregore::error::EgreError::Peer {
+                reason: format!(
+                    "shutdown deadline exceeded with {stuck_inflight} inflight publishes"
+                ),
+            })
+        } else {
+            Ok(())
+        }
     }
 
     fn health(&self) -> TransportHealth {

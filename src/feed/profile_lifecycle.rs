@@ -102,7 +102,8 @@ impl ProfileValidity {
 /// (RFC 0001 §11.2).
 ///
 /// Lives here rather than `peers.rs` (plan §6.3 item 4) because the lookup
-/// needs `FeedEngine::query` access, not peer-table access.
+/// needs message-table access (sequence-ordered via
+/// `FeedStore::get_latest_by_content_type`), not peer-table access.
 ///
 /// Reuses the existing `Clock` trait from Step 11 so tests can simulate time
 /// passing without wall-clock dependencies.

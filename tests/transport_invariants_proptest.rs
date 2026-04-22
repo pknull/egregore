@@ -174,8 +174,10 @@ async fn b6_filter_honesty() {
     };
     tokio::time::timeout(Duration::from_secs(2), collect)
         .await
-        .expect("filter delivery must complete within 2s — if it times out, \
-                 the filter dropped a matching message (Invariant 6 subset bug)");
+        .expect(
+            "filter delivery must complete within 2s — if it times out, \
+                 the filter dropped a matching message (Invariant 6 subset bug)",
+        );
 
     // Invariant 6 lower bound: every chain_a message is present.
     for a in &chain_a {
@@ -183,7 +185,8 @@ async fn b6_filter_honesty() {
             delivered.iter().any(|m| m.hash == a.hash),
             "filter dropped a matching message (author={}, seq={}) — \
              this is an Invariant 6 subset bug",
-            a.author.0, a.sequence
+            a.author.0,
+            a.sequence
         );
     }
 

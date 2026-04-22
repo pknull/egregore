@@ -34,9 +34,7 @@ pub use self::trait_def::Transport;
 /// changes require an RFC amendment.
 pub fn announce_if_multi_transport(engine: &crate::feed::engine::FeedEngine) {
     if engine.transport_count() >= 2 {
-        tracing::warn!(
-            "Multi-transport (bridge) mode active — forwarding all signed messages"
-        );
+        tracing::warn!("Multi-transport (bridge) mode active — forwarding all signed messages");
     }
 }
 

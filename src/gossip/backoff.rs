@@ -35,11 +35,10 @@ impl ExponentialBackoff {
         // 2^max_exp * initial_millis <= max_millis
         let initial_millis = initial_delay.as_millis() as u64;
         let max_millis = max_delay.as_millis() as u64;
-        let max_exponent = if initial_millis > 0 {
-            ((max_millis / initial_millis) as f64).log2().floor() as u32
-        } else {
-            0
-        };
+        let max_exponent = max_millis
+            .checked_div(initial_millis)
+            .map(|ratio| (ratio as f64).log2().floor() as u32)
+            .unwrap_or(0);
 
         Self {
             initial_delay,

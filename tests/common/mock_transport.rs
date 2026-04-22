@@ -317,6 +317,9 @@ mod tokio_stream_wrappers {
     use tokio::sync::mpsc;
 
     pub fn receiver_stream<T: Send + 'static>(rx: mpsc::Receiver<T>) -> BoxStream<'static, T> {
-        unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) }).boxed()
+        unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        })
+        .boxed()
     }
 }

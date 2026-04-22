@@ -314,7 +314,7 @@ async fn build_have_message(
                     author: author.clone(),
                     latest_sequence: *latest_seq,
                     filter: crate::gossip::bloom::BloomFilter::from_hashes(
-                        hash_refs.into_iter(),
+                        hash_refs,
                         &bloom_config,
                     ),
                 }

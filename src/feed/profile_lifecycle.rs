@@ -864,10 +864,7 @@ mod tests {
             author: peer_id.clone(),
             sequence: 1,
             previous: None,
-            timestamp: chrono::TimeZone::with_ymd_and_hms(
-                &Utc, 2099, 1, 1, 0, 0, 0,
-            )
-            .unwrap(),
+            timestamp: chrono::TimeZone::with_ymd_and_hms(&Utc, 2099, 1, 1, 0, 0, 0).unwrap(),
             content: seq1_content.to_value(),
             schema_id: Some("profile.v1".into()),
             relates: None,
@@ -893,10 +890,7 @@ mod tests {
             author: peer_id.clone(),
             sequence: 2,
             previous: Some("fake_hash_seq1".to_string()),
-            timestamp: chrono::TimeZone::with_ymd_and_hms(
-                &Utc, 2020, 1, 1, 0, 0, 0,
-            )
-            .unwrap(),
+            timestamp: chrono::TimeZone::with_ymd_and_hms(&Utc, 2020, 1, 1, 0, 0, 0).unwrap(),
             content: seq2_content.to_value(),
             schema_id: Some("profile.v1".into()),
             relates: None,
@@ -919,8 +913,8 @@ mod tests {
             .insert_message(&seq2, true)
             .expect("insert seq2");
 
-        let validity = peer_profile_validity(&engine, &peer_id, &clock)
-            .expect("lookup must succeed");
+        let validity =
+            peer_profile_validity(&engine, &peer_id, &clock).expect("lookup must succeed");
 
         // If the lookup ordered by timestamp, it would find seq1 (year 2099)
         // first and return Expired. Sequence-ordered lookup finds seq2 and

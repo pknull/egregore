@@ -1,0 +1,11 @@
+# cargo-audit configuration
+# See https://rustsec.org/advisories/ and https://docs.rs/cargo-audit/
+
+[advisories]
+# RUSTSEC-2026-0097: rand 0.9.2 is unsound with a custom logger using
+# rand::rng(). Transitively pulled in via quinn-proto, proptest, and
+# metrics-util. Egregore does not install a custom logger that calls
+# rand::rng(), so the unsoundness is not reachable from our code. Upstream
+# crates are expected to pin rand 0.9.3+ in future releases; revisit this
+# ignore entry when those updates land.
+ignore = ["RUSTSEC-2026-0097"]

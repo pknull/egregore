@@ -132,10 +132,7 @@ pub async fn build_mesh_health(state: &AppState) -> MeshHealthResponse {
     // a rusqlite query per peer; hopping back through the runtime per-peer
     // would thrash. We collect the peer IDs, batch-query on a single blocking
     // task, then merge back into the response.
-    let peer_ids: Vec<PublicId> = peers
-        .iter()
-        .map(|p| PublicId(p.peer_id.clone()))
-        .collect();
+    let peer_ids: Vec<PublicId> = peers.iter().map(|p| PublicId(p.peer_id.clone())).collect();
     let validity_engine = state.engine.clone();
     let validity_map: HashMap<String, bool> = tokio::task::spawn_blocking(move || {
         let clock = SystemClock;

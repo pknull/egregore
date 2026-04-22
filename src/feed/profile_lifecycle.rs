@@ -18,7 +18,7 @@ use crate::error::Result;
 use crate::feed::content_types::{BrokerDetails, Content};
 use crate::feed::engine::FeedEngine;
 use crate::feed::models::FeedQuery;
-use crate::identity::Identity;
+use crate::identity::{Identity, PublicId};
 
 /// Default TTL for fresh Profiles (days). Step 14 will replace this hardcoded
 /// value with a `config.profile_ttl_days` read; the 90-day default is
@@ -55,6 +55,94 @@ impl Clock for SystemClock {
 /// wire format is `@<44 base64 chars>.ed25519` (53 chars); we truncate to a
 /// bounded display length so downstream renderers don't have to.
 const DEFAULT_NAME_DISPLAY_LEN: usize = 20;
+
+/// Result of looking up a peer's most-recent Profile to determine its
+/// freshness. Per RFC 0001 §11.2 the peer filter is lenient on missing
+/// `valid_until` (pre-upgrade peers) — that case deserves a distinct variant
+/// from `Expired` so callers can render different UX.
+///
+/// The four variants:
+/// - `Absent`: no Profile exists on the peer's feed.
+/// - `Undated`: Profile exists, `valid_until` is `None` (pre-upgrade peer).
+/// - `Valid`: Profile exists, `valid_until` is in the future (any future
+///   `valid_until` is considered valid for peers — the 7-day refresh window
+///   applies only to the *own* feed, not peer feeds).
+/// - `Expired`: Profile exists and `valid_until < now`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileValidity {
+    /// No Profile message exists on the peer's feed.
+    Absent,
+    /// Profile exists but `valid_until` is None (pre-upgrade peer; accept).
+    Undated,
+    /// Profile exists, `valid_until` is in the future (outside refresh window
+    /// is not significant for peers — we treat any future `valid_until` as
+    /// valid).
+    Valid,
+    /// Profile exists and `valid_until < now`.
+    Expired,
+}
+
+impl ProfileValidity {
+    /// The single predicate the §6.3 consumers need: "should this peer be
+    /// excluded from capability/routing decisions?" — returns true ONLY for
+    /// `Expired`. Absent and Undated are conservatively permitted (RFC 0001
+    /// §11.2 — don't blanket-reject pre-upgrade peers).
+    pub fn is_expired(&self) -> bool {
+        matches!(self, Self::Expired)
+    }
+}
+
+/// Look up a peer's most-recent Profile and classify its freshness.
+///
+/// Consumed by `/v1/mesh` and `build_node_status` to surface a `profile_expired`
+/// boolean per peer (Phase 1 plan §6.3). The peer is never removed from the
+/// response — expiration is a trust/freshness signal, not a connectivity gate
+/// (RFC 0001 §11.2).
+///
+/// Lives here rather than `peers.rs` (plan §6.3 item 4) because the lookup
+/// needs `FeedEngine::query` access, not peer-table access.
+///
+/// Reuses the existing `Clock` trait from Step 11 so tests can simulate time
+/// passing without wall-clock dependencies.
+pub fn peer_profile_validity(
+    engine: &FeedEngine,
+    peer_id: &PublicId,
+    clock: &dyn Clock,
+) -> Result<ProfileValidity> {
+    let query = FeedQuery {
+        author: Some(peer_id.clone()),
+        content_type: Some("profile".into()),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let recent = engine.query(&query)?;
+
+    let Some(msg) = recent.into_iter().next() else {
+        return Ok(ProfileValidity::Absent);
+    };
+
+    let content: Content = serde_json::from_value(msg.content.clone())?;
+    let validity = match content {
+        Content::Profile {
+            valid_until: None, ..
+        } => ProfileValidity::Undated,
+        Content::Profile {
+            valid_until: Some(vu),
+            ..
+        } => {
+            if vu < clock.now() {
+                ProfileValidity::Expired
+            } else {
+                ProfileValidity::Valid
+            }
+        }
+        // A non-Profile row in the `profile` content_type slot would be a
+        // serialization bug; treat as Absent so the consumer does not mark
+        // the peer as expired on the basis of corrupt data.
+        _ => ProfileValidity::Absent,
+    };
+    Ok(validity)
+}
 
 /// Startup self-enforce per RFC 0001 §11.2 + Phase 1 plan §6.2.
 ///
@@ -509,5 +597,186 @@ mod tests {
             "healthy engine + empty feed must succeed: {:?}",
             result.err()
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Step 12 — peer_profile_validity tests
+    //
+    // The lookup helper represents four distinct states (Absent / Undated /
+    // Valid / Expired); callers render them differently (RFC 0001 §11.2).
+    // `is_expired()` is the single predicate consumers need to decide whether
+    // to mark a peer's `profile_expired` flag.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn peer_profile_validity_absent() {
+        let (engine, _self_identity) = setup();
+        let peer_identity = Identity::generate();
+        let clock = MockClock::new(Utc::now());
+
+        let validity = peer_profile_validity(&engine, &peer_identity.public_id(), &clock)
+            .expect("lookup must succeed on empty feed");
+
+        assert_eq!(validity, ProfileValidity::Absent);
+        assert!(!validity.is_expired(), "Absent is not expired");
+    }
+
+    #[test]
+    fn peer_profile_validity_undated() {
+        // Simulate a pre-upgrade peer: Profile with valid_until = None. The
+        // soft filter must treat this as Undated/accept — NOT Expired.
+        let (engine, _self_identity) = setup();
+        let peer_identity = Identity::generate();
+        let clock = MockClock::new(Utc::now());
+
+        let legacy_profile = Content::Profile {
+            name: "legacy-peer".to_string(),
+            description: None,
+            capabilities: vec![],
+            broker: None,
+            valid_from: None,
+            valid_until: None,
+        };
+        engine
+            .publish_with_schema(
+                &peer_identity,
+                legacy_profile.to_value(),
+                None,
+                None,
+                vec![],
+            )
+            .expect("publish pre-upgrade Profile on peer feed");
+
+        let validity = peer_profile_validity(&engine, &peer_identity.public_id(), &clock)
+            .expect("lookup must succeed");
+
+        assert_eq!(validity, ProfileValidity::Undated);
+        assert!(
+            !validity.is_expired(),
+            "Undated (pre-upgrade peer) must NOT be treated as expired (RFC 0001 §11.2)"
+        );
+    }
+
+    #[test]
+    fn peer_profile_validity_valid() {
+        let (engine, _self_identity) = setup();
+        let peer_identity = Identity::generate();
+        let now = Utc::now();
+        let clock = MockClock::new(now);
+
+        let fresh = Content::Profile {
+            name: "current-peer".to_string(),
+            description: None,
+            capabilities: vec![],
+            broker: None,
+            valid_from: Some(now),
+            valid_until: Some(now + Duration::days(30)),
+        };
+        engine
+            .publish_with_schema(&peer_identity, fresh.to_value(), None, None, vec![])
+            .expect("publish fresh Profile on peer feed");
+
+        let validity = peer_profile_validity(&engine, &peer_identity.public_id(), &clock)
+            .expect("lookup must succeed");
+
+        assert_eq!(validity, ProfileValidity::Valid);
+        assert!(!validity.is_expired());
+    }
+
+    #[test]
+    fn peer_profile_validity_expired() {
+        let (engine, _self_identity) = setup();
+        let peer_identity = Identity::generate();
+        let t0 = Utc::now();
+        let clock = MockClock::new(t0);
+
+        // Peer publishes at T with valid_until = T + 10d.
+        let short_lived = Content::Profile {
+            name: "soon-expired".to_string(),
+            description: None,
+            capabilities: vec![],
+            broker: None,
+            valid_from: Some(t0),
+            valid_until: Some(t0 + Duration::days(10)),
+        };
+        engine
+            .publish_with_schema(&peer_identity, short_lived.to_value(), None, None, vec![])
+            .expect("publish short-lived Profile on peer feed");
+
+        // Advance to T + 20d (past valid_until).
+        clock.advance(Duration::days(20));
+
+        let validity = peer_profile_validity(&engine, &peer_identity.public_id(), &clock)
+            .expect("lookup must succeed");
+
+        assert_eq!(validity, ProfileValidity::Expired);
+        assert!(validity.is_expired());
+    }
+
+    #[test]
+    fn peer_profile_validity_uses_most_recent_profile() {
+        let (engine, _self_identity) = setup();
+        let peer_identity = Identity::generate();
+        let t0 = Utc::now();
+        let clock = MockClock::new(t0);
+
+        // Three Profiles in sequence, each with a different valid_until. The
+        // last one published is the one the lookup must use.
+        let p1 = Content::Profile {
+            name: "first".to_string(),
+            description: None,
+            capabilities: vec![],
+            broker: None,
+            valid_from: Some(t0),
+            valid_until: Some(t0 + Duration::days(5)),
+        };
+        let p2 = Content::Profile {
+            name: "second".to_string(),
+            description: None,
+            capabilities: vec![],
+            broker: None,
+            valid_from: Some(t0),
+            valid_until: Some(t0 + Duration::days(10)),
+        };
+        let p3 = Content::Profile {
+            name: "third".to_string(),
+            description: None,
+            capabilities: vec![],
+            broker: None,
+            valid_from: Some(t0),
+            valid_until: Some(t0 + Duration::days(60)),
+        };
+        engine
+            .publish_with_schema(&peer_identity, p1.to_value(), None, None, vec![])
+            .expect("publish p1");
+        engine
+            .publish_with_schema(&peer_identity, p2.to_value(), None, None, vec![])
+            .expect("publish p2");
+        engine
+            .publish_with_schema(&peer_identity, p3.to_value(), None, None, vec![])
+            .expect("publish p3");
+
+        // Advance to T + 20d: p1 and p2 are expired, p3 still valid. The
+        // helper must use p3 (most recent) and return Valid.
+        clock.advance(Duration::days(20));
+
+        let validity = peer_profile_validity(&engine, &peer_identity.public_id(), &clock)
+            .expect("lookup must succeed");
+
+        assert_eq!(
+            validity,
+            ProfileValidity::Valid,
+            "most-recent Profile (p3, valid_until = T+60d) determines validity, \
+             not any older Profile"
+        );
+    }
+
+    #[test]
+    fn is_expired_flag_only_true_for_expired_variant() {
+        // Guard the semantic invariant — the one predicate callers rely on.
+        assert!(!ProfileValidity::Absent.is_expired());
+        assert!(!ProfileValidity::Undated.is_expired());
+        assert!(!ProfileValidity::Valid.is_expired());
+        assert!(ProfileValidity::Expired.is_expired());
     }
 }

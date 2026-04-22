@@ -204,7 +204,22 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
       "type": { "const": "profile" },
       "name": { "type": "string", "minLength": 1 },
       "description": { "type": ["string", "null"] },
-      "capabilities": { "type": "array", "items": { "type": "string" } }
+      "capabilities": { "type": "array", "items": { "type": "string" } },
+      "broker": {
+        "type": ["object", "null"],
+        "required": ["operator_name", "jurisdiction", "disclosure_policy", "tenancy", "broker_endpoint", "backend"],
+        "properties": {
+          "operator_name": { "type": "string", "minLength": 1 },
+          "jurisdiction": { "type": "string", "minLength": 1 },
+          "disclosure_policy": { "type": "string", "minLength": 1 },
+          "tenancy": { "type": "string", "minLength": 1 },
+          "broker_endpoint": { "type": "string", "minLength": 1 },
+          "backend": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      },
+      "valid_from": { "type": ["string", "null"], "format": "date-time" },
+      "valid_until": { "type": ["string", "null"], "format": "date-time" }
     },
     "additionalProperties": false
   }

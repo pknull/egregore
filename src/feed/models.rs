@@ -142,6 +142,9 @@ mod tests {
             name: "test".to_string(),
             description: None,
             capabilities: vec![],
+            broker: None,
+            valid_from: None,
+            valid_until: None,
         };
         let from_enum = content.to_value();
         let from_json = serde_json::json!({
@@ -149,6 +152,9 @@ mod tests {
             "name": "test",
             "description": null,
             "capabilities": [],
+            "broker": null,
+            "valid_from": null,
+            "valid_until": null,
         });
 
         // Both produce identical hashes

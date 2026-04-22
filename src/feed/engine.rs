@@ -599,6 +599,9 @@ mod tests {
             name: "test-agent".to_string(),
             description: Some("A test agent".to_string()),
             capabilities: vec!["testing".to_string()],
+            broker: None,
+            valid_from: None,
+            valid_until: None,
         };
 
         let msg = engine
@@ -683,6 +686,9 @@ mod tests {
                     name: "remote".to_string(),
                     description: None,
                     capabilities: vec![],
+                    broker: None,
+                    valid_from: None,
+                    valid_until: None,
                 }
                 .to_value(),
                 None,
@@ -708,6 +714,9 @@ mod tests {
                     name: "remote".to_string(),
                     description: None,
                     capabilities: vec![],
+                    broker: None,
+                    valid_from: None,
+                    valid_until: None,
                 }
                 .to_value(),
                 None,
@@ -1294,6 +1303,9 @@ mod tests {
                     name: "Inferred Schema".to_string(),
                     description: None,
                     capabilities: vec![],
+                    broker: None,
+                    valid_from: None,
+                    valid_until: None,
                 }
                 .to_value(),
                 None,
@@ -1425,6 +1437,9 @@ mod tests {
                     name: "Test".to_string(),
                     description: None,
                     capabilities: vec![],
+                    broker: None,
+                    valid_from: None,
+                    valid_until: None,
                 }
                 .to_value(),
                 Some("profile/v1".to_string()),
@@ -1444,6 +1459,9 @@ mod tests {
                     name: "Test".to_string(),
                     description: None,
                     capabilities: vec![],
+                    broker: None,
+                    valid_from: None,
+                    valid_until: None,
                 }
                 .to_value(),
                 Some("profile/v2".to_string()),

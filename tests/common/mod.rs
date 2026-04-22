@@ -8,10 +8,21 @@
 
 pub mod mock_transport;
 
+use egregore::error::EgreError;
 use egregore::feed::engine::FeedEngine;
 use egregore::feed::models::Message;
 use egregore::feed::store::FeedStore;
 use egregore::identity::Identity;
+
+/// Error returned by `MockTransport::publish` when the transport has been
+/// shut down. B.7 asserts that post-shutdown publishes are rejected rather
+/// than silently accepted — otherwise the shutdown contract (RFC 0001 §6
+/// Invariant 7) is vacuous.
+pub fn post_shutdown_err() -> EgreError {
+    EgreError::Peer {
+        reason: "transport shut".into(),
+    }
+}
 
 /// Build a signed chain of `n` messages for a fresh author.
 ///

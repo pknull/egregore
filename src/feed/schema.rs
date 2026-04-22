@@ -257,7 +257,8 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
               "properties": {
                 "peer": { "type": "string", "minLength": 1 },
                 "status": { "type": "string", "minLength": 1 },
-                "lag_msgs": { "type": "integer", "minimum": 0 }
+                "lag_msgs": { "type": "integer", "minimum": 0 },
+                "profile_expired": { "type": "boolean" }
               },
               "additionalProperties": false
             }

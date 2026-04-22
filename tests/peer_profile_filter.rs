@@ -121,6 +121,60 @@ async fn expired_peer_remains_in_node_status_with_flag_set() {
     );
 }
 
+/// Regression for the node_status/v1 schema lock-step requirement (RFC 0001
+/// §11.2 + Phase 1 plan §6.3): when a peer is present in node_status output,
+/// `publish_with_schema` on `node_status/v1` MUST succeed — meaning the
+/// embedded JSON Schema at `src/feed/schema.rs` includes `profile_expired`
+/// as a permitted per-peer property. Before the fix, the schema's
+/// `additionalProperties: false` rejected the extended content.
+#[tokio::test]
+async fn node_status_with_peer_roundtrips_through_schema_validation() {
+    let self_identity = Identity::generate();
+    let peer_identity = Identity::generate();
+    let store = FeedStore::open_memory().unwrap();
+    let engine = FeedEngine::new(store);
+
+    publish_expired_profile(&engine, &peer_identity);
+    record_peer(&engine, &peer_identity);
+
+    let status = build_node_status(
+        &self_identity,
+        &Config::default(),
+        &engine,
+        None,
+        Instant::now(),
+    )
+    .expect("build_node_status");
+
+    // Sanity: peer is actually in the status output (otherwise this test
+    // wouldn't exercise the schema path for per-peer objects).
+    assert!(
+        status
+            .peers
+            .health
+            .iter()
+            .any(|p| p.peer == peer_identity.public_id().0),
+        "precondition: peer must appear in node_status.peers.health"
+    );
+
+    let status_json = serde_json::to_value(&status).expect("serialize node_status");
+
+    // This is the load-bearing assertion: publish through the real schema
+    // registry must accept the content. If the schema drifts from the Rust
+    // struct, this fails with `Schema { reason: ... }`.
+    let message = engine
+        .publish_with_schema(
+            &self_identity,
+            status_json,
+            Some("node_status/v1".to_string()),
+            None,
+            vec!["node_status".to_string()],
+        )
+        .expect("node_status with peer + profile_expired must pass schema validation");
+
+    assert_eq!(message.schema_id.as_deref(), Some("node_status/v1"));
+}
+
 /// RFC 0001 §11.2 guardrail: messages from expired-Profile peers STILL flow
 /// on the wire. Step 12 is a read-path flag, not an ingest gate. If this
 /// test ever fails, Step 12 has accidentally become a filter on ingest —

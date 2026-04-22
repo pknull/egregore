@@ -17,8 +17,10 @@ use chrono::{DateTime, Duration, Utc};
 use crate::error::Result;
 use crate::feed::content_types::{BrokerDetails, Content};
 use crate::feed::engine::FeedEngine;
-use crate::feed::models::FeedQuery;
 use crate::identity::{Identity, PublicId};
+
+/// Content type for `Content::Profile` in the `messages.content_type` column.
+const PROFILE_CONTENT_TYPE: &str = "profile";
 
 /// Default TTL for fresh Profiles (days). Step 14 will replace this hardcoded
 /// value with a `config.profile_ttl_days` read; the 90-day default is
@@ -109,15 +111,13 @@ pub fn peer_profile_validity(
     peer_id: &PublicId,
     clock: &dyn Clock,
 ) -> Result<ProfileValidity> {
-    let query = FeedQuery {
-        author: Some(peer_id.clone()),
-        content_type: Some("profile".into()),
-        limit: Some(1),
-        ..Default::default()
-    };
-    let recent = engine.query(&query)?;
-
-    let Some(msg) = recent.into_iter().next() else {
+    // Sequence-ordered lookup per RFC 0001 §11.2: timestamp ordering would
+    // let a peer dominate Profile selection by backdating or future-dating a
+    // signed Profile. Feed sequence is append-only monotonic per-author.
+    let Some(msg) = engine
+        .store()
+        .get_latest_by_content_type(peer_id, PROFILE_CONTENT_TYPE)?
+    else {
         return Ok(ProfileValidity::Absent);
     };
 
@@ -168,19 +168,17 @@ pub fn ensure_valid_profile(
 ) -> Result<()> {
     let author = identity.public_id();
 
-    // Step 1: most-recent Profile on the author's own feed.
-    let query = FeedQuery {
-        author: Some(author.clone()),
-        content_type: Some("profile".into()),
-        limit: Some(1),
-        ..Default::default()
-    };
-    let recent = engine.query(&query)?;
+    // Step 1: most-recent Profile on the author's own feed, selected by
+    // highest sequence (RFC 0001 §11.2) — NOT by message timestamp. See
+    // `peer_profile_validity` for the same rationale.
+    let recent = engine
+        .store()
+        .get_latest_by_content_type(&author, PROFILE_CONTENT_TYPE)?;
 
     let now = clock.now();
 
     // Step 2: decide whether to publish.
-    let (needs_publish, prior_profile) = match recent.into_iter().next() {
+    let (needs_publish, prior_profile) = match recent {
         None => (true, None),
         Some(msg) => {
             // Deserialize back to Content to read typed fields.
@@ -258,11 +256,27 @@ pub async fn run_profile_refresh(
 ) {
     loop {
         tokio::time::sleep(poll_interval).await;
-        if let Err(e) = ensure_valid_profile(&engine, &identity, ttl_days, &*clock) {
-            tracing::warn!(
+        // `ensure_valid_profile` issues sync rusqlite queries and a publish
+        // through FeedStore; project convention (egregore/CLAUDE.md) requires
+        // these run on the blocking pool. The `tokio::task::spawn_blocking`
+        // hop keeps the async runtime reactor free.
+        let engine_ref = engine.clone();
+        let identity_ref = identity.clone();
+        let clock_ref = clock.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            ensure_valid_profile(&engine_ref, &identity_ref, ttl_days, &*clock_ref)
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(
                 error = %e,
                 "profile refresh failed; will retry on next tick"
-            );
+            ),
+            Err(join_err) => tracing::warn!(
+                error = %join_err,
+                "profile refresh blocking task panicked; will retry on next tick"
+            ),
         }
     }
 }
@@ -308,6 +322,7 @@ impl Clock for MockClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::models::FeedQuery;
     use crate::feed::store::FeedStore;
 
     fn setup() -> (FeedEngine, Identity) {
@@ -335,16 +350,15 @@ mod tests {
         engine.query(&q).unwrap().len()
     }
 
-    /// Helper: the most-recent Profile, deserialized to Content.
+    /// Helper: the most-recent Profile, deserialized to Content. Uses the
+    /// sequence-ordered store helper so tests exercise the same path as
+    /// production (RFC 0001 §11.2).
     fn latest_profile(engine: &FeedEngine, identity: &Identity) -> Content {
-        let q = FeedQuery {
-            author: Some(identity.public_id()),
-            content_type: Some("profile".into()),
-            limit: Some(1),
-            ..Default::default()
-        };
-        let msgs = engine.query(&q).unwrap();
-        let msg = msgs.first().expect("expected at least one Profile");
+        let msg = engine
+            .store()
+            .get_latest_by_content_type(&identity.public_id(), PROFILE_CONTENT_TYPE)
+            .expect("store lookup")
+            .expect("expected at least one Profile");
         serde_json::from_value(msg.content.clone()).expect("Profile must deserialize")
     }
 
@@ -810,6 +824,113 @@ mod tests {
         assert!(!ProfileValidity::Undated.is_expired());
         assert!(!ProfileValidity::Valid.is_expired());
         assert!(ProfileValidity::Expired.is_expired());
+    }
+
+    /// RFC 0001 §11.2 regression: Profile selection MUST order by highest
+    /// feed sequence, not message timestamp. A peer could otherwise dominate
+    /// Profile lookup by signing a lower-sequence Profile with a far-future
+    /// timestamp.
+    ///
+    /// This test inserts two Profiles via the raw store (bypassing publish)
+    /// so the relative timestamp/sequence ordering is arbitrary:
+    /// - sequence=1, timestamp = year 2099, valid_until = expired
+    /// - sequence=2, timestamp = year 2020, valid_until = far future
+    ///
+    /// If the lookup used `timestamp DESC` (the `FeedQuery`/`query_messages`
+    /// default), the helper would return the seq=1 Profile and report
+    /// `Expired`. With sequence-ordered lookup, it returns seq=2 and reports
+    /// `Valid`.
+    #[test]
+    fn peer_profile_validity_orders_by_sequence_not_timestamp() {
+        use crate::feed::models::Message;
+
+        let (engine, _self_identity) = setup();
+        let peer_identity = Identity::generate();
+        let peer_id = peer_identity.public_id();
+        let clock = MockClock::new(Utc::now());
+
+        // Construct seq=1 Profile with FUTURE timestamp + EXPIRED valid_until.
+        // If the helper orders by timestamp, this row wins and returns Expired.
+        let seq1_content = Content::Profile {
+            name: "backdated-attempt".to_string(),
+            description: None,
+            capabilities: vec![],
+            broker: None,
+            valid_from: Some(clock.now() - Duration::days(400)),
+            valid_until: Some(clock.now() - Duration::days(1)),
+        };
+        let seq1 = Message {
+            author: peer_id.clone(),
+            sequence: 1,
+            previous: None,
+            timestamp: chrono::TimeZone::with_ymd_and_hms(
+                &Utc, 2099, 1, 1, 0, 0, 0,
+            )
+            .unwrap(),
+            content: seq1_content.to_value(),
+            schema_id: Some("profile.v1".into()),
+            relates: None,
+            tags: vec![],
+            trace_id: None,
+            span_id: None,
+            expires_at: None,
+            hash: "fake_hash_seq1".to_string(),
+            signature: "fake_sig_seq1".to_string(),
+        };
+
+        // Construct seq=2 Profile with PAST timestamp + VALID valid_until. The
+        // sequence-ordered helper must pick this row.
+        let seq2_content = Content::Profile {
+            name: "current".to_string(),
+            description: None,
+            capabilities: vec![],
+            broker: None,
+            valid_from: Some(clock.now()),
+            valid_until: Some(clock.now() + Duration::days(60)),
+        };
+        let seq2 = Message {
+            author: peer_id.clone(),
+            sequence: 2,
+            previous: Some("fake_hash_seq1".to_string()),
+            timestamp: chrono::TimeZone::with_ymd_and_hms(
+                &Utc, 2020, 1, 1, 0, 0, 0,
+            )
+            .unwrap(),
+            content: seq2_content.to_value(),
+            schema_id: Some("profile.v1".into()),
+            relates: None,
+            tags: vec![],
+            trace_id: None,
+            span_id: None,
+            expires_at: None,
+            hash: "fake_hash_seq2".to_string(),
+            signature: "fake_sig_seq2".to_string(),
+        };
+
+        // Direct store inserts bypass signature verification; this is the
+        // test fixture. Production never lands unsigned messages on a feed.
+        engine
+            .store()
+            .insert_message(&seq1, true)
+            .expect("insert seq1");
+        engine
+            .store()
+            .insert_message(&seq2, true)
+            .expect("insert seq2");
+
+        let validity = peer_profile_validity(&engine, &peer_id, &clock)
+            .expect("lookup must succeed");
+
+        // If the lookup ordered by timestamp, it would find seq1 (year 2099)
+        // first and return Expired. Sequence-ordered lookup finds seq2 and
+        // returns Valid.
+        assert_eq!(
+            validity,
+            ProfileValidity::Valid,
+            "Profile lookup MUST order by highest sequence, not timestamp \
+             (RFC 0001 §11.2). If this fails, a peer can backdate or \
+             future-date a signed Profile to dominate lookup."
+        );
     }
 
     // ------------------------------------------------------------------

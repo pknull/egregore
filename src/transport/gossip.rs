@@ -350,10 +350,34 @@ impl Transport for GossipTransport {
         // replication path's behavior (which also pulls whole backlogs into
         // memory per batch).
         const REQUEST_FROM_LIMIT: u32 = u32::MAX;
-        let messages = self
-            .engine
-            .store()
-            .get_messages_after(&author, after_seq, REQUEST_FROM_LIMIT)?;
+        // Project convention (egregore/CLAUDE.md): rusqlite calls MUST run on
+        // the blocking pool. `get_messages_after` issues a sync SQL query.
+        let engine = self.engine.clone();
+        let author_for_log = author.0.clone();
+        let messages = match tokio::task::spawn_blocking(move || {
+            engine
+                .store()
+                .get_messages_after(&author, after_seq, REQUEST_FROM_LIMIT)
+        })
+        .await
+        {
+            Ok(result) => result?,
+            Err(join_err) => {
+                // Panic or cancellation inside the blocking task. Matches the
+                // Invariant 5 contract: the caller cannot distinguish this
+                // from transport disconnection or head-of-feed; gaps are
+                // detected post-hoc via chain validation. We log and yield
+                // an empty snapshot — consistent with the pattern in
+                // `gossip/client.rs:165`.
+                tracing::warn!(
+                    author = %author_for_log,
+                    after_seq,
+                    error = %join_err,
+                    "request_from blocking task failed; returning empty stream"
+                );
+                Vec::new()
+            }
+        };
         Ok(Box::pin(futures::stream::iter(messages)))
     }
 

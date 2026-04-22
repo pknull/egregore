@@ -7,7 +7,9 @@ use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::feed::profile_lifecycle::{peer_profile_validity, SystemClock};
 use crate::gossip::health::{PeerHealthStatus, DIRECT_OBSERVATION_MARKER};
+use crate::identity::PublicId;
 
 use super::response;
 use super::routes_peers::{build_status, HealthIndicators, StatusInfo, SubsystemHealth};
@@ -34,6 +36,15 @@ pub struct MeshPeerInfo {
     pub last_seq: u64,
     pub generation: u32,
     pub status: PeerHealthStatus,
+    /// RFC 0001 §11.2 soft-filter flag: `true` when the peer's most-recent
+    /// Profile has `valid_until < now`. The peer is NOT removed from the
+    /// response — expiration is a trust/freshness signal, not a connectivity
+    /// gate. `Absent` and `Undated` (pre-upgrade peer) both render as `false`.
+    ///
+    /// `#[serde(default)]` on the outgoing struct is a mild safety net for
+    /// downstream deserializers that predate this field.
+    #[serde(default)]
+    pub profile_expired: bool,
 }
 
 /// Build mesh health info from current state. Shared by HTTP route and MCP tool.
@@ -86,6 +97,10 @@ pub async fn build_mesh_health(state: &AppState) -> MeshHealthResponse {
                 last_seq: record.last_seq,
                 generation: record.generation,
                 status,
+                // Soft-filter flag populated below once all peers are known,
+                // so we pay the lookup cost once per unique peer rather than
+                // once per (peer, reporter) row.
+                profile_expired: false,
             });
 
         // Prefer direct observations over transitive
@@ -106,7 +121,55 @@ pub async fn build_mesh_health(state: &AppState) -> MeshHealthResponse {
         }
     }
 
-    let peers: Vec<MeshPeerInfo> = peer_map.into_values().collect();
+    let mut peers: Vec<MeshPeerInfo> = peer_map.into_values().collect();
+
+    // RFC 0001 §11.2 peer-side soft filter: surface `profile_expired` per peer.
+    // The peer is NEVER removed from the response — expiration is a
+    // trust/freshness signal, not a connectivity gate. Undated (pre-upgrade)
+    // peers render as `profile_expired: false` (§6.1 deliberate asymmetry).
+    //
+    // Lookups run on the blocking pool because `peer_profile_validity` issues
+    // a rusqlite query per peer; hopping back through the runtime per-peer
+    // would thrash. We collect the peer IDs, batch-query on a single blocking
+    // task, then merge back into the response.
+    let peer_ids: Vec<PublicId> = peers
+        .iter()
+        .map(|p| PublicId(p.peer_id.clone()))
+        .collect();
+    let validity_engine = state.engine.clone();
+    let validity_map: HashMap<String, bool> = tokio::task::spawn_blocking(move || {
+        let clock = SystemClock;
+        let mut map = HashMap::with_capacity(peer_ids.len());
+        for pid in peer_ids {
+            // On lookup error, default to `false` (don't falsely mark expired
+            // because of a transient store error) and log for operators.
+            match peer_profile_validity(&validity_engine, &pid, &clock) {
+                Ok(v) => {
+                    map.insert(pid.0, v.is_expired());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        peer_id = %pid.0,
+                        error = %e,
+                        "peer_profile_validity lookup failed; defaulting profile_expired=false"
+                    );
+                    map.insert(pid.0, false);
+                }
+            }
+        }
+        map
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "peer_profile_validity join failed; all peers default to profile_expired=false");
+        HashMap::new()
+    });
+
+    for peer in peers.iter_mut() {
+        if let Some(&expired) = validity_map.get(&peer.peer_id) {
+            peer.profile_expired = expired;
+        }
+    }
 
     // Only include health field when degraded (backward compat)
     let health = if store_health.is_healthy() {

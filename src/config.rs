@@ -223,6 +223,11 @@ pub struct Config {
     /// OTLP trace export configuration (requires `otlp` feature).
     #[serde(default)]
     pub otlp: OtlpConfig,
+    /// Profile TTL in days (RFC 0001 §11.2). Fresh Profiles are published
+    /// with `valid_until = now + profile_ttl_days`. Must be > 0 and ≤ 180.
+    /// Default: 90.
+    #[serde(default = "default_profile_ttl_days")]
+    pub profile_ttl_days: u32,
 }
 
 fn default_retention_interval_secs() -> u64 {
@@ -281,6 +286,10 @@ fn default_schema_api_enabled() -> bool {
     true
 }
 
+fn default_profile_ttl_days() -> u32 {
+    crate::feed::profile_lifecycle::DEFAULT_PROFILE_TTL_DAYS
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -317,6 +326,7 @@ impl Default for Config {
             metrics: MetricsConfig::default(),
             logging: LoggingConfig::default(),
             otlp: OtlpConfig::default(),
+            profile_ttl_days: default_profile_ttl_days(),
         }
     }
 }
@@ -479,6 +489,16 @@ impl Config {
                     );
                 }
             }
+        }
+        // Profile TTL bounds (RFC 0001 §11.2; Phase 1 plan §6.5).
+        if self.profile_ttl_days == 0 {
+            anyhow::bail!("profile_ttl_days must be > 0");
+        }
+        if self.profile_ttl_days > 180 {
+            anyhow::bail!(
+                "profile_ttl_days must be ≤ 180 (was {})",
+                self.profile_ttl_days
+            );
         }
         Ok(())
     }
@@ -875,5 +895,79 @@ mod tests {
         assert_eq!(DEFAULT_NETWORK_KEY, "CHANGE_ME");
         let config = Config::default();
         assert_eq!(config.network_key, "CHANGE_ME");
+    }
+
+    // ============ PROFILE TTL CONFIG TESTS (Phase 1 Step 14) ============
+
+    #[test]
+    fn config_default_has_profile_ttl_90() {
+        let config = Config::default();
+        assert_eq!(config.profile_ttl_days, 90);
+    }
+
+    #[test]
+    fn config_parses_profile_ttl_from_yaml() {
+        let yaml = "data_dir: ./data\nport: 7654\ngossip_port: 7655\ngossip_interval_secs: 300\nnetwork_key: test\npeers: []\nlan_discovery: false\ndiscovery_port: 7656\nprofile_ttl_days: 30\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.profile_ttl_days, 30);
+    }
+
+    #[test]
+    fn config_parses_missing_profile_ttl_as_default() {
+        // Backward-compat guard: existing deployments lacking this field
+        // must continue to parse, with the default filled in by serde.
+        let yaml = "data_dir: ./data\nport: 7654\ngossip_port: 7655\ngossip_interval_secs: 300\nnetwork_key: test\npeers: []\nlan_discovery: false\ndiscovery_port: 7656\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.profile_ttl_days, 90);
+    }
+
+    #[test]
+    fn validate_rejects_profile_ttl_zero() {
+        let config = Config {
+            profile_ttl_days: 0,
+            api_auth_token: Some("test-token".to_string()),
+            ..Config::default()
+        };
+        let err = config.validate().expect_err("profile_ttl_days=0 must fail");
+        assert!(
+            err.to_string().contains("profile_ttl_days"),
+            "error message must mention the field name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_profile_ttl_over_180() {
+        let config = Config {
+            profile_ttl_days: 181,
+            api_auth_token: Some("test-token".to_string()),
+            ..Config::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("profile_ttl_days=181 must fail");
+        assert!(
+            err.to_string().contains("profile_ttl_days"),
+            "error message must mention the field name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_profile_ttl_at_180_boundary() {
+        let config = Config {
+            profile_ttl_days: 180,
+            api_auth_token: Some("test-token".to_string()),
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_profile_ttl_at_one() {
+        let config = Config {
+            profile_ttl_days: 1,
+            api_auth_token: Some("test-token".to_string()),
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
     }
 }

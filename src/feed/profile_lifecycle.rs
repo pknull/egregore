@@ -235,6 +235,38 @@ pub fn ensure_valid_profile(
     Ok(())
 }
 
+/// Long-running task: polls every `poll_interval` and calls
+/// `ensure_valid_profile`. When the Profile enters the 7-day refresh window
+/// or expires, the embedded self-enforce logic re-publishes.
+///
+/// Spawned from `main.rs` after `ensure_valid_profile` succeeds at boot.
+/// Loops forever; a transient `ensure_valid_profile` failure is logged at
+/// WARN and the loop continues — a one-off store-write error must not kill
+/// the refresh task for the life of the process.
+///
+/// Plan §6.4 specifies a 1-hour poll interval in production. The parameter
+/// is exposed so tests can drop it to ~10ms and still exercise real
+/// `tokio::time::sleep` without wall-clock dependencies. The `MockClock` drives
+/// what `ensure_valid_profile` sees as "now"; it does NOT affect `sleep`,
+/// which is exactly the separation of concerns tests need.
+pub async fn run_profile_refresh(
+    engine: std::sync::Arc<FeedEngine>,
+    identity: Identity,
+    ttl_days: u32,
+    clock: std::sync::Arc<dyn Clock>,
+    poll_interval: std::time::Duration,
+) {
+    loop {
+        tokio::time::sleep(poll_interval).await;
+        if let Err(e) = ensure_valid_profile(&engine, &identity, ttl_days, &*clock) {
+            tracing::warn!(
+                error = %e,
+                "profile refresh failed; will retry on next tick"
+            );
+        }
+    }
+}
+
 /// Build sensible default identity fields for a first-ever Profile publish.
 /// The name is a truncated PublicId substring so operators can see something
 /// human-ish on day-0; the rest is empty.
@@ -779,4 +811,184 @@ mod tests {
         assert!(!ProfileValidity::Valid.is_expired());
         assert!(ProfileValidity::Expired.is_expired());
     }
+
+    // ------------------------------------------------------------------
+    // Step 13 — run_profile_refresh tests
+    //
+    // The refresh task is a long-running loop that polls
+    // `ensure_valid_profile` on a schedule so a node up for months doesn't
+    // let its Profile expire. The `MockClock` drives what the refresh logic
+    // *sees* as "now"; the poll cadence is real wall-clock time via
+    // `tokio::time::sleep`. Tests drop `poll_interval` to ~10ms so real
+    // runtime stays tiny.
+    //
+    // Plan §10.4 acceptance criterion 6 is the target: "Re-publish scheduler
+    // fires within a minute of the 7-day window opening."
+    // ------------------------------------------------------------------
+
+    use std::sync::Arc;
+    use std::time::Duration as StdDuration;
+
+    /// Poll until `predicate()` is true or `deadline_ms` elapses. Panics on
+    /// timeout. Used to wait for the refresh task to re-publish without
+    /// coupling to its exact poll cadence.
+    async fn wait_until(
+        deadline_ms: u64,
+        poll_ms: u64,
+        mut predicate: impl FnMut() -> bool,
+        msg: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + StdDuration::from_millis(deadline_ms);
+        loop {
+            if predicate() {
+                return;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("{} (timeout after {}ms)", msg, deadline_ms);
+            }
+            tokio::time::sleep(StdDuration::from_millis(poll_ms)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_task_republishes_when_window_opens() {
+        // Setup — wrap in Arc so the spawned task can own an owned handle.
+        let store = FeedStore::open_memory().unwrap();
+        let engine = Arc::new(FeedEngine::new(store));
+        let identity = Identity::generate();
+        let t0 = Utc::now();
+        let clock = Arc::new(MockClock::new(t0));
+
+        // Seed with a Profile whose valid_until = T0 + 10d. At T0 this is
+        // outside the 7-day refresh window (10d > 7d). We'll advance the
+        // mock clock into the window.
+        let seed = Content::Profile {
+            name: "seed".to_string(),
+            description: None,
+            capabilities: vec![],
+            broker: None,
+            valid_from: Some(t0),
+            valid_until: Some(t0 + Duration::days(10)),
+        };
+        engine
+            .publish_with_schema(&identity, seed.to_value(), None, None, vec![])
+            .expect("seed publish");
+        assert_eq!(count_profile_messages(&engine, &identity), 1);
+
+        // Spawn the refresh task with a tight poll interval.
+        let refresh_engine = engine.clone();
+        let refresh_identity = identity.clone();
+        let refresh_clock: Arc<dyn Clock> = clock.clone();
+        let handle = tokio::spawn(async move {
+            run_profile_refresh(
+                refresh_engine,
+                refresh_identity,
+                DEFAULT_PROFILE_TTL_DAYS,
+                refresh_clock,
+                StdDuration::from_millis(10),
+            )
+            .await;
+        });
+
+        // Advance mock clock so `ensure_valid_profile` sees "it's now T0 + 4d",
+        // i.e. valid_until (T0+10d) - now (T0+4d) = 6d < 7d refresh window.
+        clock.advance(Duration::days(4));
+
+        // Poll (up to 500ms real wall-clock) for the refresh task to re-publish.
+        let engine_for_poll = engine.clone();
+        let identity_for_poll = identity.clone();
+        wait_until(
+            500,
+            10,
+            move || count_profile_messages(&engine_for_poll, &identity_for_poll) >= 2,
+            "refresh task did not re-publish within the 7-day window",
+        )
+        .await;
+
+        // Assert the new Profile's valid_from is at the mock-clock "now", which
+        // is T0 + 4d — strictly greater than T0 (the seed's valid_from).
+        let latest = latest_profile(&engine, &identity);
+        match latest {
+            Content::Profile {
+                valid_from,
+                valid_until,
+                ..
+            } => {
+                let vf = valid_from.expect("fresh Profile must have valid_from");
+                assert!(
+                    vf > t0,
+                    "re-published Profile's valid_from ({:?}) must be after seed's ({:?})",
+                    vf,
+                    t0
+                );
+                assert_eq!(
+                    valid_until,
+                    Some(vf + Duration::days(DEFAULT_PROFILE_TTL_DAYS as i64))
+                );
+            }
+            other => panic!("expected Profile, got {:?}", other),
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_task_does_nothing_when_profile_is_fresh() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = Arc::new(FeedEngine::new(store));
+        let identity = Identity::generate();
+        let t0 = Utc::now();
+        let clock = Arc::new(MockClock::new(t0));
+
+        // Seed with a Profile whose valid_until = T0 + 90d. Well outside the
+        // refresh window.
+        let seed = Content::Profile {
+            name: "fresh-seed".to_string(),
+            description: None,
+            capabilities: vec![],
+            broker: None,
+            valid_from: Some(t0),
+            valid_until: Some(t0 + Duration::days(DEFAULT_PROFILE_TTL_DAYS as i64)),
+        };
+        engine
+            .publish_with_schema(&identity, seed.to_value(), None, None, vec![])
+            .expect("seed publish");
+        assert_eq!(count_profile_messages(&engine, &identity), 1);
+
+        // Spawn the refresh task with a 10ms poll interval.
+        let refresh_engine = engine.clone();
+        let refresh_identity = identity.clone();
+        let refresh_clock: Arc<dyn Clock> = clock.clone();
+        let handle = tokio::spawn(async move {
+            run_profile_refresh(
+                refresh_engine,
+                refresh_identity,
+                DEFAULT_PROFILE_TTL_DAYS,
+                refresh_clock,
+                StdDuration::from_millis(10),
+            )
+            .await;
+        });
+
+        // Let the task run for ~100ms (≈10 poll cycles). Don't advance the
+        // mock clock — Profile stays fresh.
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+
+        // No re-publish should have happened.
+        assert_eq!(
+            count_profile_messages(&engine, &identity),
+            1,
+            "fresh Profile must not trigger re-publish"
+        );
+
+        handle.abort();
+    }
+
+    // refresh_task_continues_after_transient_error: validated by code review
+    // of `run_profile_refresh` — the loop body wraps `ensure_valid_profile`
+    // in `if let Err(e) = ... { tracing::warn!(...) }` so a single transient
+    // failure is logged and the loop continues on the next tick. Triggering
+    // an `ensure_valid_profile` failure without mocking `FeedEngine` internals
+    // is impractical (see analogous note on
+    // `ensure_propagates_publish_errors_by_construction`).
 }

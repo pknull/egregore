@@ -639,6 +639,23 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing::info!(schemas_dir = %schemas_dir.display(), "custom schemas directory");
 
+    // Phase 1 Step 11: startup self-enforce per RFC 0001 §11.2. Publishes a
+    // fresh Profile if none exists, is undated, has expired, or is within the
+    // 7-day refresh window. Returns an error if publish fails; the node
+    // refuses to start in that case. Must complete before the gossip server
+    // spawns below so the node has a valid Profile on its own feed before
+    // accepting peer connections.
+    //
+    // TTL is hardcoded to `DEFAULT_PROFILE_TTL_DAYS` for now; Step 14 will
+    // replace the constant with a `config.profile_ttl_days` read.
+    {
+        use egregore::feed::profile_lifecycle::{
+            ensure_valid_profile, SystemClock, DEFAULT_PROFILE_TTL_DAYS,
+        };
+        let clock = SystemClock;
+        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock)?;
+    }
+
     // Start hook executor if configured
     if let Some(executor) = HookExecutor::new(config.hooks.clone()) {
         let hook_count = config.hooks.iter().filter(|h| h.is_active()).count();

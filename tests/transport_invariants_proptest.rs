@@ -25,15 +25,15 @@ use crate::common::mock_transport::MockTransport;
 // B.4 — Envelope preservation (Invariant 4).
 //
 // Every byte of the signed message delivered to the transport must be
-// preserved verbatim through to both:
-//   - the `published` log (records sender-side bytes exactly)
-//   - any subscriber's delivery (forwards bytes exactly)
+// preserved verbatim end-to-end — from the publish call, through the
+// transport, to the subscriber stream. The trait contract (RFC 0001 §6
+// Invariant 4) forbids any adapter from re-signing, re-canonicalizing, or
+// mutating fields. This test exercises the subscriber delivery path because
+// that is where a lossy adapter would manifest.
 //
-// The mock transport is a pure wire emulation — it does not re-sign, re-hash,
-// or re-serialize. This test guards against any future mock evolution that
-// would accidentally mutate. The trait contract (RFC 0001 §6 Invariant 4)
-// requires the same of every real adapter; this is the transport-agnostic
-// fixture.
+// Sender-side sanity (the `published` log) is also checked, but that alone
+// is not the invariant: an adapter could clone into `published` correctly
+// and still mutate on the wire.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -41,20 +41,81 @@ async fn b4_envelope_preservation() {
     let mock = MockTransport::new();
     let (_identity, chain) = build_tagged_chain(3, vec!["t1".into()]);
 
+    // Subscribe BEFORE publishing so the subscriber sees every fan-out.
+    // A no-op filter (both dimensions `None`) matches every message —
+    // Invariant 4 is a byte-level guarantee, orthogonal to filter content.
+    let (_handle, mut stream) = mock
+        .subscribe(TopicFilter::default())
+        .await
+        .expect("subscribe on mock transport");
+
     for msg in &chain {
         mock.publish(msg).await.expect("publish ok");
     }
 
+    // Collect the subscriber deliveries within a bounded timeout so a broken
+    // fan-out does not hang the test indefinitely.
+    let mut delivered: Vec<Message> = Vec::new();
+    let collect = async {
+        while let Some(m) = stream.next().await {
+            delivered.push(m);
+            if delivered.len() >= chain.len() {
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(2), collect)
+        .await
+        .expect("subscribe delivery must complete within 2s");
+
+    assert_eq!(
+        delivered.len(),
+        chain.len(),
+        "subscriber must receive every published message"
+    );
+
+    // End-to-end envelope check: the subscriber's view of each message must
+    // be byte-identical to the original. This is the load-bearing Invariant
+    // 4 assertion — mutations in the subscribe/fan-out path would show up
+    // here, not in the `published` log.
+    for before in &chain {
+        let after = delivered
+            .iter()
+            .find(|m| m.hash == before.hash)
+            .unwrap_or_else(|| {
+                panic!(
+                    "subscriber did not deliver message with hash {} \
+                     (author={}, seq={})",
+                    before.hash, before.author.0, before.sequence
+                )
+            });
+
+        // Byte-identical JSON serialization — canonical Serde ordering
+        // means this comparison is the strongest lower bound short of memcmp.
+        let before_bytes = serde_json::to_vec(before).expect("serialize before");
+        let after_bytes = serde_json::to_vec(after).expect("serialize after");
+        assert_eq!(
+            before_bytes, after_bytes,
+            "envelope mutated between publish and subscriber delivery: \
+             author={} seq={}",
+            before.author.0, before.sequence
+        );
+
+        // Hash and signature MUST survive the wire exactly.
+        assert_eq!(before.hash, after.hash, "hash field mutated");
+        assert_eq!(before.signature, after.signature, "signature field mutated");
+    }
+
+    // Sender-side sanity: the `published` log also matches. This is a
+    // weaker check than the subscriber comparison above but guards against
+    // a `publish` implementation that corrupts its own record.
     let captured = mock.published();
     assert_eq!(
         captured.len(),
         chain.len(),
         "published log must record every publish attempt"
     );
-
     for (before, after) in chain.iter().zip(captured.iter()) {
-        // Byte-identical JSON serialization — canonical Serde ordering means
-        // this comparison is the strongest lower bound short of memcmp.
         let before_bytes = serde_json::to_vec(before).expect("serialize before");
         let after_bytes = serde_json::to_vec(after).expect("serialize after");
         assert_eq!(
@@ -63,10 +124,6 @@ async fn b4_envelope_preservation() {
              author={} seq={}",
             before.author.0, before.sequence
         );
-
-        // Hash and signature MUST survive the wire exactly.
-        assert_eq!(before.hash, after.hash, "hash field mutated");
-        assert_eq!(before.signature, after.signature, "signature field mutated");
     }
 }
 

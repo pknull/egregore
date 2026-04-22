@@ -421,6 +421,47 @@ async fn b7_shutdown_drains() {
     );
 }
 
+/// Companion to B.7: when the shutdown deadline expires while publishes
+/// remain inflight, `shutdown` MUST return `Err` — not `Ok` — so callers
+/// can distinguish "drained cleanly" from "bailed with stuck work." Before
+/// this guarantee, a stuck transport looked identical to a healthy one.
+///
+/// Construction: 5 slow-ack publishes (~50ms each) against a 1ms deadline.
+/// The deadline fires before any publish can finish, so shutdown must
+/// return Err and report nonzero inflight in its error message.
+#[tokio::test]
+async fn b7_shutdown_errors_on_missed_deadline() {
+    let mock = MockTransport::new();
+    let (_identity, chain) = build_chain(5);
+    mock.set_slow_ack(true);
+
+    let mut handles = Vec::new();
+    for msg in &chain {
+        let t = Arc::clone(&mock);
+        let msg = msg.clone();
+        handles.push(tokio::spawn(async move { t.publish(&msg).await }));
+    }
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Absurdly short deadline: publishes take ~50ms; this can't complete.
+    let result = mock.shutdown(Duration::from_millis(1)).await;
+    assert!(
+        result.is_err(),
+        "shutdown with insufficient deadline MUST return Err, got {result:?}"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("deadline exceeded"),
+        "error message must identify the deadline miss: {err_msg}"
+    );
+
+    // Let the publishes drain so the test doesn't leak slow-ack tasks.
+    for h in handles {
+        let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // B.1a smoke — Gossip loopback end-to-end reachability.
 //

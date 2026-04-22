@@ -798,10 +798,7 @@ mod tests {
             .expect("message_count readable");
         assert_eq!(before, 1, "baseline: engine stored the signed message");
 
-        transport
-            .publish(&msg)
-            .await
-            .expect("transport publish ok");
+        transport.publish(&msg).await.expect("transport publish ok");
 
         let after = engine
             .store()

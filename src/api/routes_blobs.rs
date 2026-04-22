@@ -95,11 +95,9 @@ pub async fn download_blob(
         })?;
 
     match data {
-        Some(bytes) => Ok((
-            [(header::CONTENT_TYPE, "application/octet-stream")],
-            bytes,
-        )
-            .into_response()),
+        Some(bytes) => {
+            Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response())
+        }
         None => Err(response::err::<()>(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",

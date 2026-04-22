@@ -507,16 +507,14 @@ async fn tool_mesh(state: &AppState) -> ToolCallResult {
 async fn tool_blob_upload(args: Value, state: &AppState) -> ToolCallResult {
     let content_b64 = match args.get("content_base64").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
-        None => {
-            return ToolCallResult::error("Missing required argument: content_base64".into())
-        }
+        None => return ToolCallResult::error("Missing required argument: content_base64".into()),
     };
 
-    let data = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &content_b64)
-    {
-        Ok(d) => d,
-        Err(e) => return ToolCallResult::error(format!("Invalid base64: {e}")),
-    };
+    let data =
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &content_b64) {
+            Ok(d) => d,
+            Err(e) => return ToolCallResult::error(format!("Invalid base64: {e}")),
+        };
 
     if data.len() > 100 * 1024 * 1024 {
         return ToolCallResult::error("Blob exceeds 100 MB limit".into());

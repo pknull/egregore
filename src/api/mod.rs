@@ -216,8 +216,7 @@ pub fn router_with_mcp(state: AppState, mcp_enabled: bool) -> Router {
         )
         .route(
             "/v1/blobs",
-            post(routes_blobs::upload_blob)
-                .layer(DefaultBodyLimit::max(100 * 1024 * 1024)), // 100 MB for blob uploads
+            post(routes_blobs::upload_blob).layer(DefaultBodyLimit::max(100 * 1024 * 1024)), // 100 MB for blob uploads
         )
         .route("/v1/blobs/:hash", get(routes_blobs::download_blob))
         .route("/v1/blobs/:hash/info", get(routes_blobs::blob_info));

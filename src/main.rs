@@ -646,17 +646,14 @@ async fn main() -> anyhow::Result<()> {
     // spawns below so the node has a valid Profile on its own feed before
     // accepting peer connections.
     //
-    // TTL is hardcoded to `DEFAULT_PROFILE_TTL_DAYS` for now; Step 14 will
-    // replace the constant with a `config.profile_ttl_days` read.
-    //
     // The clock is shared (as `Arc<dyn Clock>`) with the Step 13 refresh task
     // spawned immediately below. In production both use a `SystemClock`; the
     // indirection keeps time mockable in tests for the refresh task.
     let clock: Arc<dyn egregore::feed::profile_lifecycle::Clock> =
         Arc::new(egregore::feed::profile_lifecycle::SystemClock);
     {
-        use egregore::feed::profile_lifecycle::{ensure_valid_profile, DEFAULT_PROFILE_TTL_DAYS};
-        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &*clock)?;
+        use egregore::feed::profile_lifecycle::ensure_valid_profile;
+        ensure_valid_profile(&engine, &identity, config.profile_ttl_days, &*clock)?;
     }
 
     // Phase 1 Step 13: re-publish scheduler. Polls every hour (plan §6.4);
@@ -667,15 +664,16 @@ async fn main() -> anyhow::Result<()> {
     // The task is spawned and forgotten; it runs for the life of the process.
     // A transient per-tick failure is logged and the loop continues.
     {
-        use egregore::feed::profile_lifecycle::{run_profile_refresh, DEFAULT_PROFILE_TTL_DAYS};
+        use egregore::feed::profile_lifecycle::run_profile_refresh;
         let refresh_engine = engine.clone();
         let refresh_identity = identity.clone();
         let refresh_clock = clock.clone();
+        let refresh_ttl_days = config.profile_ttl_days;
         tokio::spawn(async move {
             run_profile_refresh(
                 refresh_engine,
                 refresh_identity,
-                DEFAULT_PROFILE_TTL_DAYS,
+                refresh_ttl_days,
                 refresh_clock,
                 std::time::Duration::from_secs(3600),
             )

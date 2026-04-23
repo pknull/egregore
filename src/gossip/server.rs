@@ -96,7 +96,46 @@ pub async fn run_server_with_push_cancellable(
     registry: Option<Arc<ConnectionRegistry>>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let listener = TcpListener::bind(&config.bind_addr).await?;
+    run_server_with_push_cancellable_ready(config, engine, registry, cancel, None).await
+}
+
+/// Variant of `run_server_with_push_cancellable` that signals bind completion
+/// via a `oneshot::Sender<std::io::Result<()>>`. `GossipTransport::start` uses
+/// this to surface TCP bind failures synchronously instead of silently in a
+/// detached background task.
+///
+/// Signal semantics:
+/// - On successful bind, the sender is fired with `Ok(())` before the accept
+///   loop starts.
+/// - On bind failure, the sender is fired with the underlying `io::Error`
+///   clone (via `to_string`) wrapped in `Err(io::Error)` and the function
+///   returns the original error.
+/// - If the caller does not care about the ready signal, pass `None`.
+pub async fn run_server_with_push_cancellable_ready(
+    config: ServerConfig,
+    engine: Arc<FeedEngine>,
+    registry: Option<Arc<ConnectionRegistry>>,
+    cancel: CancellationToken,
+    ready: Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>,
+) -> Result<()> {
+    let listener = match TcpListener::bind(&config.bind_addr).await {
+        Ok(l) => {
+            if let Some(tx) = ready {
+                // Receiver may have dropped (caller timed out waiting); that
+                // is not a server error — proceed with the accept loop.
+                let _ = tx.send(Ok(()));
+            }
+            l
+        }
+        Err(e) => {
+            if let Some(tx) = ready {
+                // Clone error kind + message into a fresh io::Error so the
+                // original can be returned from this fn.
+                let _ = tx.send(Err(std::io::Error::new(e.kind(), e.to_string())));
+            }
+            return Err(e.into());
+        }
+    };
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     tracing::info!(
         addr = %config.bind_addr,

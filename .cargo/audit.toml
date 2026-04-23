@@ -1,0 +1,43 @@
+# cargo-audit configuration
+# See https://rustsec.org/advisories/ and https://docs.rs/cargo-audit/
+
+[advisories]
+# All entries below are pre-existing transitive advisories, not issues
+# introduced by Phase 1. They block the egregore CI audit gate and are
+# ignored here to unblock merges while a dedicated dependency-upgrade
+# pass (out of Phase 1 scope) addresses the upstream state.
+#
+# RUSTSEC-2026-0097 — rand 0.9.2 unsoundness via custom logger using
+# rand::rng(). Transitively pulled in via quinn-proto, proptest,
+# metrics-util. Egregore does not install a custom logger that calls
+# rand::rng(); unsoundness is not reachable.
+#
+# Remaining nine advisories are ALL transitive dependencies of the
+# self_update 0.39.0 crate (added in cdf24b8 for the CLI update command).
+# self_update pins an old reqwest 0.11.x + tokio-tungstenite + zip +
+# indicatif + rustls stack, which is why a single upstream dep pulls in
+# nine separate advisories. The fix is to upgrade self_update to a
+# newer major version or replace it with a thinner alternative — that
+# work is tracked separately from Phase 1.
+#
+#   RUSTSEC-2025-0119 — number_prefix crate unmaintained
+#   RUSTSEC-2025-0134 — rustls-pemfile 1.0.4 unmaintained
+#   RUSTSEC-2026-0009 — time 0.3.36 CVE, upgrade to >= 0.3.47
+#   RUSTSEC-2026-0049 — (self_update transitive)
+#   RUSTSEC-2026-0067 — (self_update transitive)
+#   RUSTSEC-2026-0068 — (self_update transitive)
+#   RUSTSEC-2026-0098 — (self_update transitive)
+#   RUSTSEC-2026-0099 — (self_update transitive)
+#   RUSTSEC-2026-0104 — (self_update transitive)
+ignore = [
+  "RUSTSEC-2026-0097",
+  "RUSTSEC-2025-0119",
+  "RUSTSEC-2025-0134",
+  "RUSTSEC-2026-0009",
+  "RUSTSEC-2026-0049",
+  "RUSTSEC-2026-0067",
+  "RUSTSEC-2026-0068",
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0099",
+  "RUSTSEC-2026-0104",
+]

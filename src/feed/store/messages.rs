@@ -222,6 +222,34 @@ impl FeedStore {
         .transpose()
     }
 
+    /// Get the most-recent message on `author`'s feed with the given
+    /// `content_type`, ordered by **highest sequence** (not timestamp).
+    ///
+    /// Used by Profile lifecycle (RFC 0001 §11.2): timestamp-based selection
+    /// would let a peer dominate Profile lookup by backdating or future-dating
+    /// a signed Profile message. Sequence ordering is the append-only
+    /// monotonic axis of a feed and closes that hole.
+    pub fn get_latest_by_content_type(
+        &self,
+        author: &PublicId,
+        content_type: &str,
+    ) -> Result<Option<Message>> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT raw_json FROM messages
+             WHERE author = ?1 AND content_type = ?2
+             ORDER BY sequence DESC LIMIT 1",
+            params![author.0, content_type],
+            |row| {
+                let json: String = row.get(0)?;
+                Ok(json)
+            },
+        )
+        .optional()?
+        .map(|json| serde_json::from_str(&json).map_err(EgreError::from))
+        .transpose()
+    }
+
     /// Get feed messages with pagination.
     pub fn query_messages(&self, query: &FeedQuery) -> Result<Vec<Message>> {
         let conn = self.conn();

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context};
 use base64::Engine;
@@ -187,6 +187,35 @@ pub fn handle_command(
         Command::Identity { export } => {
             let view = identity_view(&ctx.identity, *export);
             output.emit(&view, || format_identity_view(&view, *export))?;
+            Ok(true)
+        }
+        Command::RotateKey {
+            reason,
+            effective_at,
+        } => {
+            handle_rotate_key(ctx, output, reason, effective_at.as_deref())?;
+            Ok(true)
+        }
+        Command::Publish {
+            content,
+            file,
+            content_type,
+            topic,
+            tag,
+            relates,
+            schema_id,
+        } => {
+            handle_publish(
+                ctx,
+                output,
+                content,
+                file,
+                content_type,
+                topic,
+                tag,
+                relates,
+                schema_id,
+            )?;
             Ok(true)
         }
         Command::Update { .. } => Ok(false),
@@ -892,6 +921,225 @@ fn format_identity_view(view: &IdentityView, export_secret: bool) -> String {
     lines.join("\n")
 }
 
+fn handle_rotate_key(
+    ctx: &CliContext,
+    output: OutputMode,
+    reason: &str,
+    effective_at: Option<&str>,
+) -> anyhow::Result<()> {
+    use egregore::feed::content_types::Content;
+    use egregore::feed::engine::FeedEngine;
+
+    let old_identity = &ctx.identity;
+    let old_pub_id = old_identity.public_id();
+
+    // Generate a new keypair
+    let new_identity = Identity::generate();
+    let new_pub_id = new_identity.public_id();
+
+    // Build key_rotation content
+    let effective = effective_at
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+    let rotation_content = Content::KeyRotation {
+        old_key: old_pub_id.0.clone(),
+        new_key: new_pub_id.0.clone(),
+        reason: Some(reason.to_string()),
+        effective_at: Some(effective),
+    };
+
+    // Publish signed with the OLD key
+    let engine = FeedEngine::new(ctx.store.clone());
+    let message = engine.publish(
+        old_identity,
+        rotation_content.to_value(),
+        None,
+        vec!["key_rotation".to_string()],
+    )?;
+
+    // Save the new key to the identity directory
+    let identity_dir = ctx.config.identity_dir();
+    new_identity.save_unencrypted(&identity_dir.join("secret.key"))?;
+    // Update public key file
+    fs::write(identity_dir.join("public.key"), new_pub_id.0.as_bytes())?;
+
+    #[derive(Serialize)]
+    struct RotateResult {
+        old_key: String,
+        new_key: String,
+        message_hash: String,
+    }
+
+    let result = RotateResult {
+        old_key: old_pub_id.0.clone(),
+        new_key: new_pub_id.0.clone(),
+        message_hash: message.hash.clone(),
+    };
+
+    output.emit(&result, || {
+        format!(
+            "Key rotated successfully.\n  Old: {}\n  New: {}\n  Message: {}",
+            result.old_key, result.new_key, result.message_hash
+        )
+    })?;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_publish(
+    ctx: &CliContext,
+    output: OutputMode,
+    content_arg: &Option<String>,
+    file: &Option<PathBuf>,
+    content_type: &str,
+    topic: &Option<String>,
+    tags: &[String],
+    relates: &Option<String>,
+    schema_id: &Option<String>,
+) -> anyhow::Result<()> {
+    use egregore::feed::engine::FeedEngine;
+
+    // 1. Resolve raw content string
+    let raw = resolve_content(content_arg, file)?;
+
+    // 2. Build content JSON value
+    let content_value = build_content_json(&raw, content_type)?;
+
+    // 3. Collect tags (topic + explicit tags)
+    let mut all_tags: Vec<String> = tags.to_vec();
+    if let Some(topic) = topic {
+        if !all_tags.contains(topic) {
+            all_tags.insert(0, topic.clone());
+        }
+    }
+
+    // 4. Publish via FeedEngine
+    let engine = FeedEngine::new(ctx.store.clone());
+    let message = engine.publish_with_schema(
+        &ctx.identity,
+        content_value,
+        schema_id.clone(),
+        relates.clone(),
+        all_tags,
+    )?;
+
+    // 5. Output
+    output.emit(&message, || format!("Published: {}", message.hash))?;
+    Ok(())
+}
+
+/// Resolve content from either positional arg or --file.
+fn resolve_content(content_arg: &Option<String>, file: &Option<PathBuf>) -> anyhow::Result<String> {
+    match (content_arg, file) {
+        (Some(text), None) => Ok(text.clone()),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read content file: {}", path.display())),
+        (None, None) => bail!("provide content as argument or --file"),
+        (Some(_), Some(_)) => unreachable!("clap enforces mutual exclusivity"),
+    }
+}
+
+/// Build the content JSON value from raw text and content type.
+///
+/// If the raw string is valid JSON and already has a "type" field, use it as-is.
+/// If the raw string is valid JSON without a "type" field, inject the content_type.
+/// If the raw string is not valid JSON, wrap it in a typed envelope.
+fn build_content_json(raw: &str, content_type: &str) -> anyhow::Result<serde_json::Value> {
+    // Try parsing as JSON first
+    if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(raw) {
+        if let Some(obj) = json.as_object_mut() {
+            // Inject "type" if not already present
+            obj.entry("type".to_string())
+                .or_insert_with(|| serde_json::Value::String(content_type.to_string()));
+        }
+        return Ok(json);
+    }
+
+    // Plain text: wrap in a typed envelope
+    Ok(build_text_envelope(raw, content_type))
+}
+
+/// Build a content envelope for plain text based on content type.
+fn build_text_envelope(text: &str, content_type: &str) -> serde_json::Value {
+    match content_type {
+        "insight" => serde_json::json!({
+            "type": "insight",
+            "title": truncate_title(text, 80),
+            "observation": text,
+        }),
+        "annotation" => serde_json::json!({
+            "type": "annotation",
+            "text": text,
+        }),
+        other => serde_json::json!({
+            "type": other,
+            "text": text,
+        }),
+    }
+}
+
+fn truncate_title(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        text.to_string()
+    } else {
+        let truncated = &text[..text.floor_char_boundary(max_len.saturating_sub(3))];
+        format!("{truncated}...")
+    }
+}
+
+#[allow(dead_code)]
+/// Resolve an author's current identity by following key_rotation messages.
+///
+/// Walks the chain of `key_rotation` content types published by the given author.
+/// If the author has rotated their key, returns the most recent `new_key`.
+/// Otherwise returns the original author unchanged.
+pub fn resolve_identity(store: &FeedStore, author: &PublicId) -> PublicId {
+    use egregore::feed::models::FeedQuery;
+
+    let query = FeedQuery {
+        author: Some(author.clone()),
+        content_type: Some("key_rotation".to_string()),
+        limit: Some(200),
+        ..Default::default()
+    };
+
+    let messages = match store.query_messages(&query) {
+        Ok(msgs) => msgs,
+        Err(_) => return author.clone(),
+    };
+
+    // Messages are ordered by timestamp DESC, so the first one is the most recent.
+    // Walk the chain: if old_key matches author, the new_key is the successor.
+    // Then check if new_key itself was rotated, and so on.
+    let mut current = author.clone();
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(current.0.clone());
+
+    loop {
+        let mut found_next = false;
+        for msg in &messages {
+            let old_key = msg.content.get("old_key").and_then(|v| v.as_str());
+            let new_key = msg.content.get("new_key").and_then(|v| v.as_str());
+
+            if let (Some(old), Some(new)) = (old_key, new_key) {
+                if old == current.0 && !seen.contains(new) {
+                    current = PublicId(new.to_string());
+                    seen.insert(new.to_string());
+                    found_next = true;
+                    break;
+                }
+            }
+        }
+        if !found_next {
+            break;
+        }
+    }
+
+    current
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,5 +1164,51 @@ mod tests {
     #[test]
     fn schema_file_name_sanitizes_nested_content_types() {
         assert_eq!(schema_file_name("nested/path", 2), "nested_path.v2.json");
+    }
+
+    #[test]
+    fn resolve_content_from_arg() {
+        let result = resolve_content(&Some("hello".to_string()), &None).unwrap();
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn resolve_content_neither_arg_nor_file() {
+        let result = resolve_content(&None, &None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_content_json_plain_text_insight() {
+        let value = build_content_json("observed something", "insight").unwrap();
+        assert_eq!(value["type"], "insight");
+        assert_eq!(value["observation"], "observed something");
+    }
+
+    #[test]
+    fn build_content_json_existing_json_preserves_type() {
+        let json = r#"{"type": "custom", "data": 42}"#;
+        let value = build_content_json(json, "insight").unwrap();
+        assert_eq!(value["type"], "custom"); // Does NOT override
+    }
+
+    #[test]
+    fn build_content_json_json_without_type_injects() {
+        let json = r#"{"data": 42}"#;
+        let value = build_content_json(json, "annotation").unwrap();
+        assert_eq!(value["type"], "annotation"); // Injected
+    }
+
+    #[test]
+    fn truncate_title_short_text_unchanged() {
+        assert_eq!(truncate_title("short", 80), "short");
+    }
+
+    #[test]
+    fn truncate_title_long_text_truncated() {
+        let long = "a".repeat(100);
+        let result = truncate_title(&long, 80);
+        assert!(result.len() <= 80);
+        assert!(result.ends_with("..."));
     }
 }

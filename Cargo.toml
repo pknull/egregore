@@ -6,7 +6,7 @@ name = "egregore"
 version = "1.2.4"
 edition = "2021"
 description = "SSB-inspired decentralized knowledge sharing for LLMs"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 authors = ["pknull"]
 
 [dependencies]
@@ -25,6 +25,7 @@ argon2 = "0.5"
 sha2 = "0.10"
 hmac = "0.12"
 curve25519-dalek = { version = "4.1", features = ["serde"] }
+subtle = "2.6"
 
 # Storage
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -66,6 +67,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Streaming
 async-stream = "0.3"
+async-trait = "0.1"
 futures = "0.3"
 
 # HTTP client (for adapters/examples)
@@ -82,6 +84,9 @@ jsonschema = "0.29"
 
 # Concurrent hashmap for connection registry
 dashmap = "6.0"
+
+# Non-poisoning synchronization primitives
+parking_lot = "0.12"
 
 # URL encoding
 urlencoding = "2.1"
@@ -110,6 +115,7 @@ tempfile = "3.0"
 tokio-test = "0.4"
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
+proptest = "1"
 
 [profile.release]
 opt-level = 3

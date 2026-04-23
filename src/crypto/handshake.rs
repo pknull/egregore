@@ -172,8 +172,18 @@ impl ClientHandshakeStep3 {
             });
         }
 
-        let sig_bytes: [u8; 64] = payload[..64].try_into().unwrap();
-        let server_pk_bytes: [u8; 32] = payload[64..96].try_into().unwrap();
+        let sig_bytes: [u8; 64] =
+            payload[..64]
+                .try_into()
+                .map_err(|_| EgreError::HandshakeFailed {
+                    reason: "server auth signature wrong size".into(),
+                })?;
+        let server_pk_bytes: [u8; 32] =
+            payload[64..96]
+                .try_into()
+                .map_err(|_| EgreError::HandshakeFailed {
+                    reason: "server auth public key wrong size".into(),
+                })?;
 
         let server_vk =
             ed25519_dalek::VerifyingKey::from_bytes(&server_pk_bytes).map_err(|_| {
@@ -299,8 +309,18 @@ impl ServerHandshakeStep2 {
             });
         }
 
-        let sig_bytes: [u8; 64] = payload[..64].try_into().unwrap();
-        let client_pk_bytes: [u8; 32] = payload[64..96].try_into().unwrap();
+        let sig_bytes: [u8; 64] =
+            payload[..64]
+                .try_into()
+                .map_err(|_| EgreError::HandshakeFailed {
+                    reason: "client auth signature wrong size".into(),
+                })?;
+        let client_pk_bytes: [u8; 32] =
+            payload[64..96]
+                .try_into()
+                .map_err(|_| EgreError::HandshakeFailed {
+                    reason: "client auth public key wrong size".into(),
+                })?;
 
         let client_vk =
             ed25519_dalek::VerifyingKey::from_bytes(&client_pk_bytes).map_err(|_| {

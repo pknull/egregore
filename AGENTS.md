@@ -34,8 +34,10 @@ The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`).
 | `identity/` | Ed25519 keypair, signing, Argon2id encryption | `keys.rs`, `signing.rs`, `encryption.rs` |
 | `crypto/` | SHS handshake, Box Stream, Private Box | `handshake.rs`, `box_stream.rs`, `private_box.rs` |
 | `feed/` | Message lifecycle: publish, ingest, query, search | `engine.rs`, `models.rs`, `content_types.rs` |
+| `feed/profile_lifecycle.rs` | Profile TTL self-enforce, peer soft filter, refresh scheduler (Phase 1; RFC 0001 §11.2) | — |
 | `feed/store/` | SQLite persistence, FTS5 search | `mod.rs`, `messages.rs`, `peers.rs` |
 | `gossip/` | Encrypted TCP replication, LAN discovery | `client.rs`, `server.rs`, `replication.rs`, `discovery.rs` |
+| `transport/` | `Transport` trait layer + `GossipTransport` adapter (Phase 1; RFC 0001 §5) | `mod.rs`, `trait_def.rs`, `gossip.rs`, `health.rs`, `filter.rs`, `subscription.rs` |
 | `api/` | Axum HTTP routes + embedded MCP server | `routes_*.rs`, `mcp.rs`, `mcp_tools.rs` |
 
 ## Testing

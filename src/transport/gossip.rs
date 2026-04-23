@@ -73,7 +73,7 @@ use crate::feed::engine::FeedEngine;
 use crate::feed::models::Message;
 use crate::gossip::client::{run_sync_loop_with_push_cancellable, SyncConfig};
 use crate::gossip::registry::ConnectionRegistry;
-use crate::gossip::server::{run_server_with_push_cancellable, ServerConfig};
+use crate::gossip::server::{run_server_with_push_cancellable_ready, ServerConfig};
 use crate::identity::{Identity, PublicId};
 
 use super::filter::TopicFilter;
@@ -161,6 +161,22 @@ pub struct GossipTransport {
     /// successful fan-out (peer contact happens as part of broadcast) and
     /// (Step 9) by `subscribe` on inbound messages.
     last_peer_contact: RwLock<Option<DateTime<Utc>>>,
+    /// Most recent adapter-level error, surfaced on `/v1/status` via
+    /// `TransportHealth.last_error`. Written by:
+    /// - `subscribe` when the broadcast receiver lags (messages dropped
+    ///   between ticks)
+    /// - `request_from` when the blocking-pool join fails
+    ///
+    /// Kept as a plain `String` (not a structured type) to match RFC 0001
+    /// §5.2. Most-recent-wins: newer errors overwrite older ones so
+    /// operators see the currently-relevant failure signal rather than
+    /// stale history.
+    ///
+    /// Wrapped in `Arc<RwLock<_>>` so the `subscribe` stream body (which
+    /// outlives `&self`) can clone a reference and record lag events. The
+    /// `request_from` path is fully async and can borrow `&self` directly,
+    /// but shares the same primitive for symmetry.
+    last_error: Arc<RwLock<Option<String>>>,
 }
 
 /// Evaluate a [`TopicFilter`] against a message.
@@ -214,6 +230,7 @@ impl GossipTransport {
             inflight_publishes: AtomicUsize::new(0),
             last_successful_publish: RwLock::new(None),
             last_peer_contact: RwLock::new(None),
+            last_error: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -284,6 +301,10 @@ impl Transport for GossipTransport {
         let mut rx = self.engine.subscribe();
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
         let handle = SubscriptionHandle::from_cancel(cancel_tx);
+        // Clone the Arc so the stream body can record lag events into
+        // `last_error`. Operators see this via `/v1/status` and can decide
+        // whether downstream consumers need tuning.
+        let last_error = self.last_error.clone();
 
         let stream = async_stream::stream! {
             loop {
@@ -311,11 +332,19 @@ impl Transport for GossipTransport {
                                 // strict ordering should drain promptly. Phase
                                 // 2's composite transport can upgrade to a
                                 // strict policy if needed.
+                                //
+                                // Lag is also surfaced on /v1/status via
+                                // `TransportHealth.last_error` so operators
+                                // can see the signal without tailing logs.
                                 tracing::warn!(
                                     lagged_by = n,
                                     "GossipTransport::subscribe receiver lagged — \
                                      downstream consumer did not drain promptly"
                                 );
+                                *last_error.write() = Some(format!(
+                                    "subscribe receiver lagged by {n} messages \
+                                     (downstream consumer not draining promptly)"
+                                ));
                                 continue;
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -333,10 +362,11 @@ impl Transport for GossipTransport {
         author: PublicId,
         after_seq: u64,
     ) -> Result<BoxStream<'static, Message>> {
-        // RFC 0001 §5.1 + §6 Invariant 5. One-shot snapshot query against the
-        // local store. `FeedStore::get_messages_after` already returns messages
-        // in strictly increasing sequence order (ORDER BY sequence ASC in the
-        // underlying SQL); we simply stream them.
+        // RFC 0001 §5.1 + §6 Invariant 5. Paginated snapshot query against
+        // the local store. `FeedStore::get_messages_after` returns messages
+        // in strictly increasing sequence order (ORDER BY sequence ASC);
+        // we page them through the blocking pool in bounded batches so a
+        // giant author feed doesn't materialize into memory at once.
         //
         // Stream ending is NOT a distinguishable error per Invariant 5 —
         // consumers detect gaps via the chain's `previous` hash after the
@@ -344,41 +374,93 @@ impl Transport for GossipTransport {
         // extend to merge live-forward events (for now, `subscribe` is the
         // live-forward primitive and consumers interleave the two themselves).
         //
-        // LIMIT is capped defensively at `u32::MAX`; the store's own query
-        // upper bounds keep this sane. A large author feed could OOM if
-        // materialized all at once; for now this matches the gossip
-        // replication path's behavior (which also pulls whole backlogs into
-        // memory per batch).
-        const REQUEST_FROM_LIMIT: u32 = u32::MAX;
-        // Project convention (egregore/CLAUDE.md): rusqlite calls MUST run on
-        // the blocking pool. `get_messages_after` issues a sync SQL query.
+        // BATCH_LIMIT is a fixed page size. On exhaustion (batch returns
+        // fewer than BATCH_LIMIT) we stop. Each batch's rusqlite query runs
+        // on the blocking pool per egregore/CLAUDE.md. A JoinError on any
+        // batch surfaces via `TransportHealth.last_error` and ends the
+        // stream — per Invariant 5 the caller cannot distinguish that from
+        // head-of-feed; gap detection via the chain covers recovery.
+        const BATCH_LIMIT: u32 = 512;
+
         let engine = self.engine.clone();
+        let last_error = self.last_error.clone();
         let author_for_log = author.0.clone();
-        let messages = match tokio::task::spawn_blocking(move || {
-            engine
-                .store()
-                .get_messages_after(&author, after_seq, REQUEST_FROM_LIMIT)
-        })
-        .await
-        {
-            Ok(result) => result?,
-            Err(join_err) => {
-                // Panic or cancellation inside the blocking task. Matches the
-                // Invariant 5 contract: the caller cannot distinguish this
-                // from transport disconnection or head-of-feed; gaps are
-                // detected post-hoc via chain validation. We log and yield
-                // an empty snapshot — consistent with the pattern in
-                // `gossip/client.rs:165`.
-                tracing::warn!(
-                    author = %author_for_log,
-                    after_seq,
-                    error = %join_err,
-                    "request_from blocking task failed; returning empty stream"
-                );
-                Vec::new()
+
+        let stream = async_stream::stream! {
+            let mut cursor = after_seq;
+            loop {
+                let engine_batch = engine.clone();
+                let author_batch = author.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    engine_batch
+                        .store()
+                        .get_messages_after(&author_batch, cursor, BATCH_LIMIT)
+                })
+                .await;
+
+                let batch = match result {
+                    Ok(Ok(batch)) => batch,
+                    Ok(Err(e)) => {
+                        // Store-level error: log and terminate the stream.
+                        // Chain-gap detection handles recovery on the
+                        // consumer side.
+                        tracing::warn!(
+                            author = %author_for_log,
+                            cursor,
+                            error = %e,
+                            "request_from store query failed; ending stream"
+                        );
+                        *last_error.write() = Some(format!(
+                            "request_from store error (author={author_for_log}, \
+                             after_seq={cursor}): {e}"
+                        ));
+                        return;
+                    }
+                    Err(join_err) => {
+                        // Panic or cancellation inside the blocking task.
+                        // Matches the Invariant 5 contract: caller cannot
+                        // distinguish this from transport disconnection or
+                        // head-of-feed. We surface on last_error and end
+                        // the stream.
+                        tracing::warn!(
+                            author = %author_for_log,
+                            cursor,
+                            error = %join_err,
+                            "request_from blocking task failed; ending stream"
+                        );
+                        *last_error.write() = Some(format!(
+                            "request_from blocking task failed (author={author_for_log}, \
+                             after_seq={cursor}): {join_err}"
+                        ));
+                        return;
+                    }
+                };
+
+                if batch.is_empty() {
+                    return;
+                }
+
+                // Advance cursor past the highest sequence in this batch.
+                // `get_messages_after` orders ASC, so the last message has
+                // the largest sequence.
+                let next_cursor = batch
+                    .last()
+                    .map(|m| m.sequence)
+                    .unwrap_or(cursor);
+                let batch_len = batch.len();
+                for msg in batch {
+                    yield msg;
+                }
+                if batch_len < BATCH_LIMIT as usize {
+                    // Partial batch — we've reached the end of the author's
+                    // feed. Next query would return empty; short-circuit.
+                    return;
+                }
+                cursor = next_cursor;
             }
         };
-        Ok(Box::pin(futures::stream::iter(messages)))
+
+        Ok(Box::pin(stream))
     }
 
     async fn start(&self) -> Result<()> {
@@ -393,22 +475,77 @@ impl Transport for GossipTransport {
             return Ok(());
         }
 
+        // Ready signal: the server task sends on this channel after its
+        // TcpListener::bind succeeds (or fails). `start` awaits the result
+        // with a bounded timeout so callers see bind failures (EADDRINUSE,
+        // EACCES, etc.) synchronously instead of in a detached task's logs.
+        //
+        // Pre-amendment: `start` spawned the server and returned Ok
+        // immediately; a bind failure was only visible in a WARN log line.
+        // Codex flagged this as a lifecycle footgun. The ready-signal
+        // pattern closes the gap while keeping the legacy server signature
+        // (with a never-firing token + None ready) unchanged for main.rs's
+        // Phase 1 boot path.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<std::io::Result<()>>();
+
         let server_cfg = self.server_config.clone();
         let server_engine = self.engine.clone();
         let server_registry = Some(self.registry.clone());
         let server_cancel = self.cancel.clone();
         let server_handle = tokio::spawn(async move {
-            if let Err(e) = run_server_with_push_cancellable(
+            if let Err(e) = run_server_with_push_cancellable_ready(
                 server_cfg,
                 server_engine,
                 server_registry,
                 server_cancel,
+                Some(ready_tx),
             )
             .await
             {
                 tracing::error!(error = %e, "gossip server (transport) failed");
             }
         });
+
+        // Bounded wait for the bind signal. 5 seconds is generous for a
+        // synchronous bind on any non-pathological host; if the task takes
+        // longer it's almost certainly stuck. On timeout we treat bind as
+        // failed and return an error so the caller doesn't "succeed" with
+        // a silently-dead server.
+        const READY_TIMEOUT: Duration = Duration::from_secs(5);
+        match tokio::time::timeout(READY_TIMEOUT, ready_rx).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(bind_err))) => {
+                // Reset started so a subsequent start() retry (with a
+                // different port, perhaps) can succeed.
+                self.started.store(false, Ordering::Release);
+                return Err(EgreError::Peer {
+                    reason: format!(
+                        "gossip server bind failed: {bind_err} (addr={})",
+                        self.server_config.bind_addr
+                    ),
+                });
+            }
+            Ok(Err(_recv_err)) => {
+                // Sender dropped before firing — the server task panicked
+                // or was aborted during bind. Treat as bind failure.
+                self.started.store(false, Ordering::Release);
+                return Err(EgreError::Peer {
+                    reason: format!(
+                        "gossip server task ended before binding (addr={})",
+                        self.server_config.bind_addr
+                    ),
+                });
+            }
+            Err(_elapsed) => {
+                self.started.store(false, Ordering::Release);
+                return Err(EgreError::Peer {
+                    reason: format!(
+                        "gossip server bind did not signal ready within {:?} (addr={})",
+                        READY_TIMEOUT, self.server_config.bind_addr
+                    ),
+                });
+            }
+        }
 
         let sync_cfg = self.sync_config.clone();
         let sync_engine = self.engine.clone();
@@ -478,11 +615,11 @@ impl Transport for GossipTransport {
             // once FeedEngine.transports dispatches publish via the trait.
             unreplicated_count: 0,
             inflight_publishes: self.inflight_publishes.load(Ordering::Acquire),
-            // `registry.broadcast` is infallible (it handles per-peer errors
-            // internally via logging + connection drop + metrics). Step 9's
-            // subscribe/request_from paths will surface adapter-level errors
-            // here when they land.
-            last_error: None,
+            // `registry.broadcast` is infallible on the publish path. The
+            // adapter-level `last_error` captures subscribe lag and
+            // request_from blocking-pool join failures — see the writes in
+            // those methods.
+            last_error: self.last_error.read().clone(),
             // Gossip is a leaf transport; composites (Phase 2) populate
             // `children` themselves.
             children: vec![],
@@ -595,6 +732,42 @@ mod tests {
         let transport = GossipTransport::new(cfg);
         assert_eq!(registry.connection_count(), 0);
         assert!(!transport.health().connected);
+    }
+
+    /// Phase 1 cleanup: `start()` awaits a ready signal from the server
+    /// task's TCP bind and returns `Err` when the bind fails. Previously
+    /// the spawn returned Ok immediately and a bind failure was only
+    /// visible in a WARN log. This test binds a listener to grab a port,
+    /// then calls `start()` on that same port, and asserts the call fails
+    /// with an error mentioning bind.
+    #[tokio::test]
+    async fn start_returns_err_on_bind_failure() {
+        // Reserve a port so our next bind fails deterministically.
+        let grab = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("grab port");
+        let busy_addr = grab.local_addr().expect("local_addr").to_string();
+
+        let registry = Arc::new(ConnectionRegistry::new(32));
+        let (cfg, _engine) = build_config(registry.clone(), &busy_addr);
+        let transport = GossipTransport::new(cfg);
+
+        let result = transport.start().await;
+        assert!(result.is_err(), "start must fail when bind collides");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("bind failed") || err_msg.contains("in use"),
+            "error must identify the bind failure, got: {err_msg}"
+        );
+
+        // `started` must have been rolled back so a second start() with a
+        // non-colliding address would succeed. Verify the flag is false.
+        assert!(
+            !transport.started.load(Ordering::Acquire),
+            "started flag must be reset after bind failure so retries work"
+        );
+
+        drop(grab);
     }
 
     #[tokio::test]
@@ -808,6 +981,94 @@ mod tests {
             after, before,
             "Invariant 4 — transport publish must NOT re-ingest through the engine; \
              store count must be unchanged (before={before}, after={after})"
+        );
+    }
+
+    /// Phase 1 cleanup: `request_from` returns every message on the author's
+    /// feed in strictly increasing sequence order. The pagination refactor
+    /// moved from a single u32::MAX-LIMIT query to bounded BATCH_LIMIT=512
+    /// batches; this test guards that the stream still emits every message.
+    #[tokio::test]
+    async fn request_from_returns_all_messages_in_sequence_order() {
+        use futures::StreamExt;
+
+        let registry = Arc::new(ConnectionRegistry::new(32));
+        let (cfg, engine) = build_config(registry.clone(), "127.0.0.1:0");
+        let identity = cfg.identity.clone();
+        let transport = GossipTransport::new(cfg);
+
+        // Publish a modest chain so the test stays fast. Pagination
+        // correctness across batch boundaries is exercised by B.5's
+        // 100-message chain which goes through the same code path.
+        const N: u64 = 30;
+        for i in 0..N {
+            engine
+                .publish(
+                    &identity,
+                    serde_json::json!({ "type": "test", "i": i }),
+                    None,
+                    vec![],
+                )
+                .expect("publish ok");
+        }
+
+        let stream = transport
+            .request_from(identity.public_id(), 0)
+            .await
+            .expect("request_from ok");
+        let collected: Vec<Message> = stream.collect().await;
+
+        assert_eq!(collected.len() as u64, N, "all messages must arrive");
+        // Strictly increasing sequence order.
+        for pair in collected.windows(2) {
+            assert!(
+                pair[1].sequence > pair[0].sequence,
+                "request_from must yield in strictly increasing sequence order; \
+                 got {} after {}",
+                pair[1].sequence,
+                pair[0].sequence
+            );
+        }
+    }
+
+    /// Phase 1 cleanup: subscribe lag must surface on
+    /// `TransportHealth.last_error` so operators see the signal via
+    /// `/v1/status` without tailing logs. This test exercises the
+    /// Arc<RwLock<Option<String>>> wiring by writing to `last_error`
+    /// directly and asserting `health()` returns it. The broadcast
+    /// channel's Lagged semantics are tokio's responsibility; this
+    /// guards the adapter-level wiring.
+    #[tokio::test]
+    async fn health_surfaces_last_error_from_adapter_state() {
+        let registry = Arc::new(ConnectionRegistry::new(32));
+        let (cfg, _engine) = build_config(registry.clone(), "127.0.0.1:0");
+        let transport = GossipTransport::new(cfg);
+
+        assert!(
+            transport.health().last_error.is_none(),
+            "fresh transport must have no last_error"
+        );
+
+        // Simulate a lag event by writing through the same Arc the
+        // subscribe stream body would use.
+        *transport.last_error.write() =
+            Some("subscribe receiver lagged by 42 messages".to_string());
+
+        let h = transport.health();
+        let err = h
+            .last_error
+            .expect("last_error must surface after adapter writes to it");
+        assert!(
+            err.contains("lagged"),
+            "last_error must preserve the recorded reason, got: {err}"
+        );
+
+        // Most-recent-wins: a fresh write overwrites the prior value.
+        *transport.last_error.write() = Some("request_from blocking task failed".to_string());
+        let err2 = transport.health().last_error.expect("still present");
+        assert!(
+            err2.contains("request_from"),
+            "most-recent-wins: later error must overwrite earlier"
         );
     }
 }

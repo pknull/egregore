@@ -188,6 +188,51 @@ enum Command {
         #[arg(long)]
         export: bool,
     },
+
+    /// Rotate the node's identity keypair
+    RotateKey {
+        /// Reason for key rotation
+        #[arg(long, default_value = "manual rotation")]
+        reason: String,
+
+        /// When the new key becomes effective (ISO 8601). Defaults to now.
+        #[arg(long)]
+        effective_at: Option<String>,
+    },
+
+    /// Publish a signed message to the local feed (no daemon required)
+    Publish {
+        /// Message content (text or JSON string).
+        /// Mutually exclusive with --file.
+        content: Option<String>,
+
+        /// Read content from a file (JSON or plain text).
+        /// Mutually exclusive with positional content.
+        #[arg(long, conflicts_with = "content")]
+        file: Option<PathBuf>,
+
+        /// Content type for the message envelope.
+        /// Determines the "type" field in the content JSON.
+        #[arg(long, default_value = "insight")]
+        content_type: String,
+
+        /// Topic tag for the message.
+        #[arg(long)]
+        topic: Option<String>,
+
+        /// Additional tags (repeatable: --tag a --tag b).
+        #[arg(long)]
+        tag: Vec<String>,
+
+        /// Hash of a related message (for threading).
+        #[arg(long)]
+        relates: Option<String>,
+
+        /// Schema identifier (e.g., "insight/v1").
+        /// If omitted, inferred from content type.
+        #[arg(long)]
+        schema_id: Option<String>,
+    },
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
@@ -351,8 +396,6 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
     if cli.mdns {
         config.mdns_discovery = true;
     }
-
-    config.validate()?;
 
     Ok(config)
 }
@@ -537,6 +580,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Validate full config for daemon startup (admin subcommands returned early above)
+    config.validate()?;
+
     // Load or generate identity
     let identity_dir = config.identity_dir();
     let identity = if cli.passphrase {
@@ -593,6 +639,48 @@ async fn main() -> anyhow::Result<()> {
     };
     tracing::info!(schemas_dir = %schemas_dir.display(), "custom schemas directory");
 
+    // Phase 1 Step 11: startup self-enforce per RFC 0001 §11.2. Publishes a
+    // fresh Profile if none exists, is undated, has expired, or is within the
+    // 7-day refresh window. Returns an error if publish fails; the node
+    // refuses to start in that case. Must complete before the gossip server
+    // spawns below so the node has a valid Profile on its own feed before
+    // accepting peer connections.
+    //
+    // The clock is shared (as `Arc<dyn Clock>`) with the Step 13 refresh task
+    // spawned immediately below. In production both use a `SystemClock`; the
+    // indirection keeps time mockable in tests for the refresh task.
+    let clock: Arc<dyn egregore::feed::profile_lifecycle::Clock> =
+        Arc::new(egregore::feed::profile_lifecycle::SystemClock);
+    {
+        use egregore::feed::profile_lifecycle::ensure_valid_profile;
+        ensure_valid_profile(&engine, &identity, config.profile_ttl_days, &*clock)?;
+    }
+
+    // Phase 1 Step 13: re-publish scheduler. Polls every hour (plan §6.4);
+    // when the Profile enters the 7-day refresh window or expires,
+    // `ensure_valid_profile` re-publishes. This guards the case where a node
+    // stays up for months — the startup self-enforce above only runs once.
+    //
+    // The task is spawned and forgotten; it runs for the life of the process.
+    // A transient per-tick failure is logged and the loop continues.
+    {
+        use egregore::feed::profile_lifecycle::run_profile_refresh;
+        let refresh_engine = engine.clone();
+        let refresh_identity = identity.clone();
+        let refresh_clock = clock.clone();
+        let refresh_ttl_days = config.profile_ttl_days;
+        tokio::spawn(async move {
+            run_profile_refresh(
+                refresh_engine,
+                refresh_identity,
+                refresh_ttl_days,
+                refresh_clock,
+                std::time::Duration::from_secs(3600),
+            )
+            .await;
+        });
+    }
+
     // Start hook executor if configured
     if let Some(executor) = HookExecutor::new(config.hooks.clone()) {
         let hook_count = config.hooks.iter().filter(|h| h.is_active()).count();
@@ -624,6 +712,9 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Initialize blob store
+    let blob_store = egregore::blob::BlobStore::new(&config.data_dir);
+
     // Build and optionally start API server.
     let api_server = if config.api_enabled {
         let state = api::AppState {
@@ -632,6 +723,7 @@ async fn main() -> anyhow::Result<()> {
             config: Arc::new(config.clone()),
             started_at,
             mcp_registry: api::mcp_registry::create_registry(),
+            blob_store: blob_store.clone(),
         };
         let app = if config.mcp_enabled {
             api::router(state)
@@ -680,23 +772,27 @@ async fn main() -> anyhow::Result<()> {
     // Start gossip server
     let gossip_bind = format!("{}:{}", config.gossip_bind, config.gossip_port);
     tracing::info!(bind = %gossip_bind, "gossip server starting");
-    let gossip_net_key = config.network_key_bytes();
-    let gossip_identity = identity.clone();
+    // Build the server config once so the Phase-1 `GossipTransport` (attached
+    // below) and the existing gossip-server spawn site can share it without
+    // drifting. `ServerConfig` derives `Clone`, so cloning for each consumer
+    // is free.
+    let server_config = gossip::server::ServerConfig {
+        bind_addr: gossip_bind,
+        network_key: config.network_key_bytes(),
+        identity: identity.clone(),
+        push_enabled: config.push_enabled,
+        max_persistent_connections: config.max_persistent_connections,
+    };
     let gossip_engine = engine.clone();
     let server_registry = registry.clone();
-    let server_push_enabled = config.push_enabled;
-    let server_max_conns = config.max_persistent_connections;
+    let spawn_server_config = server_config.clone();
     tokio::spawn(async move {
-        let server_config = gossip::server::ServerConfig {
-            bind_addr: gossip_bind,
-            network_key: gossip_net_key,
-            identity: gossip_identity,
-            push_enabled: server_push_enabled,
-            max_persistent_connections: server_max_conns,
-        };
-        if let Err(e) =
-            gossip::server::run_server_with_push(server_config, gossip_engine, server_registry)
-                .await
+        if let Err(e) = gossip::server::run_server_with_push(
+            spawn_server_config,
+            gossip_engine,
+            server_registry,
+        )
+        .await
         {
             tracing::error!(error = %e, "gossip server failed");
         }
@@ -715,9 +811,43 @@ async fn main() -> anyhow::Result<()> {
 
     let sync_engine = engine.clone();
     let sync_registry = registry.clone();
+    let spawn_sync_config = sync_config.clone();
     tokio::spawn(async move {
-        gossip::client::run_sync_loop_with_push(sync_config, sync_engine, sync_registry).await;
+        gossip::client::run_sync_loop_with_push(spawn_sync_config, sync_engine, sync_registry)
+            .await;
     });
+
+    // Phase 1 Step 5: construct a `GossipTransport` and attach it to the
+    // engine. The transport's `start()` is NOT called — the existing spawn
+    // sites above continue to own the wire fan-out path via
+    // `event_tx → PushManager → registry.broadcast`. Attaching here lets
+    // `engine.transport_count()` and `engine.transport_health()` report the
+    // transport for Phase 2 and for the WARN log in Step 8.
+    //
+    // When `config.push_enabled == false`, there is no `ConnectionRegistry`
+    // (it is only created in the `push_enabled` branch above), so we skip
+    // attachment. This matches the pre-Phase-1 reality: a node without push
+    // had no transport abstraction in the first place, so leaving
+    // `transport_count() == 0` preserves zero observable change.
+    if let Some(gossip_registry) = registry.as_ref() {
+        let transport: Arc<dyn egregore::transport::Transport> =
+            Arc::new(egregore::transport::gossip::GossipTransport::new(
+                egregore::transport::gossip::GossipTransportConfig {
+                    registry: gossip_registry.clone(),
+                    identity: identity.clone(),
+                    engine: engine.clone(),
+                    server_config,
+                    sync_config,
+                },
+            ));
+        engine.attach_transport(transport);
+    }
+
+    // RFC 0002 §4 Principle 7: emit WARN line if this node is running with
+    // ≥ 2 transports (emergent bridge mode). No-op when `transport_count() < 2`,
+    // which is the Phase 1 default. Placed after attach and before LAN/mDNS
+    // discovery spawns so operators see the line before inbound traffic starts.
+    egregore::transport::announce_if_multi_transport(&engine);
 
     // Start LAN discovery if enabled
     if config.lan_discovery {
@@ -1010,5 +1140,81 @@ mod tests {
             Command::Identity { export } => assert!(export),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_publish_with_all_flags() {
+        let cli = Cli::try_parse_from([
+            "egregore",
+            "--json",
+            "--data-dir",
+            "/tmp/test",
+            "publish",
+            "--content-type",
+            "annotation",
+            "--topic",
+            "reasoning",
+            "--tag",
+            "test",
+            "--relates",
+            "abc123",
+            "Some content here",
+        ])
+        .unwrap();
+
+        assert!(cli.json);
+        match cli.command.unwrap() {
+            Command::Publish {
+                content,
+                file,
+                content_type,
+                topic,
+                tag,
+                relates,
+                schema_id,
+            } => {
+                assert_eq!(content.as_deref(), Some("Some content here"));
+                assert!(file.is_none());
+                assert_eq!(content_type, "annotation");
+                assert_eq!(topic.as_deref(), Some("reasoning"));
+                assert_eq!(tag, vec!["test".to_string()]);
+                assert_eq!(relates.as_deref(), Some("abc123"));
+                assert!(schema_id.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_publish_with_file() {
+        let cli = Cli::try_parse_from([
+            "egregore",
+            "publish",
+            "--file",
+            "results.json",
+            "--content-type",
+            "annotation",
+        ])
+        .unwrap();
+
+        match cli.command.unwrap() {
+            Command::Publish { content, file, .. } => {
+                assert!(content.is_none());
+                assert_eq!(file.unwrap().to_str().unwrap(), "results.json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_publish_with_both_content_and_file() {
+        let result = Cli::try_parse_from([
+            "egregore",
+            "publish",
+            "--file",
+            "results.json",
+            "Some content",
+        ]);
+        assert!(result.is_err());
     }
 }

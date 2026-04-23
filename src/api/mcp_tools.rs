@@ -96,6 +96,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "content": {
                         "description": "JSON content to publish (any valid JSON)"
                     },
+                    "encrypt_for": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Public IDs of recipients for Private Box encryption (optional). When provided, the content is encrypted so only the listed recipients (and the sender) can read it. Each entry must be in @<base64>.ed25519 format."
+                    },
                     "relates": {
                         "type": "string",
                         "description": "Hash of a related message (optional, for threading)"
@@ -236,6 +241,37 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         },
+        ToolDefinition {
+            name: "egregore_blob_upload",
+            description: "Upload a blob to the content-addressed blob store. \
+                Content must be base64-encoded (since MCP is JSON-based). \
+                Returns the SHA-256 hash and size.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content_base64": {
+                        "type": "string",
+                        "description": "Base64-encoded binary content to store"
+                    }
+                },
+                "required": ["content_base64"]
+            }),
+        },
+        ToolDefinition {
+            name: "egregore_blob_info",
+            description: "Get metadata about a blob by its SHA-256 hash. \
+                Returns hash, size, and creation time if the blob exists.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "hash": {
+                        "type": "string",
+                        "description": "SHA-256 hex hash of the blob"
+                    }
+                },
+                "required": ["hash"]
+            }),
+        },
     ]
 }
 
@@ -252,6 +288,8 @@ pub async fn dispatch_tool(name: &str, args: Value, state: &AppState) -> ToolCal
         "egregore_follow" => tool_follow(args, state).await,
         "egregore_unfollow" => tool_unfollow(args, state).await,
         "egregore_mesh" => tool_mesh(state).await,
+        "egregore_blob_upload" => tool_blob_upload(args, state).await,
+        "egregore_blob_info" => tool_blob_info(args, state).await,
         _ => ToolCallResult::error(format!("Unknown tool: {name}")),
     }
 }
@@ -268,10 +306,23 @@ fn tool_identity(state: &AppState) -> ToolCallResult {
 }
 
 async fn tool_publish(args: Value, state: &AppState) -> ToolCallResult {
-    let content = match args.get("content") {
+    let mut content = match args.get("content") {
         Some(c) if !c.is_null() => c.clone(),
         _ => return ToolCallResult::error("Missing required argument: content".into()),
     };
+
+    // Merge top-level encrypt_for into content for Private Box encryption.
+    // The engine's prepare_for_publish extracts encrypt_for from the content object.
+    if let Some(encrypt_for) = args.get("encrypt_for") {
+        if let Some(obj) = content.as_object_mut() {
+            obj.insert("encrypt_for".to_string(), encrypt_for.clone());
+        } else {
+            return ToolCallResult::error(
+                "encrypt_for requires content to be a JSON object".into(),
+            );
+        }
+    }
+
     let relates = args
         .get("relates")
         .and_then(|v| v.as_str())
@@ -451,4 +502,48 @@ async fn tool_unfollow(args: Value, state: &AppState) -> ToolCallResult {
 async fn tool_mesh(state: &AppState) -> ToolCallResult {
     let mesh = routes_mesh::build_mesh_health(state).await;
     ToolCallResult::text(serde_json::to_string_pretty(&mesh).unwrap())
+}
+
+async fn tool_blob_upload(args: Value, state: &AppState) -> ToolCallResult {
+    let content_b64 = match args.get("content_base64").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return ToolCallResult::error("Missing required argument: content_base64".into()),
+    };
+
+    let data =
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &content_b64) {
+            Ok(d) => d,
+            Err(e) => return ToolCallResult::error(format!("Invalid base64: {e}")),
+        };
+
+    if data.len() > 100 * 1024 * 1024 {
+        return ToolCallResult::error("Blob exceeds 100 MB limit".into());
+    }
+
+    let blob_store = state.blob_store.clone();
+    let result = tokio::task::spawn_blocking(move || blob_store.put(&data)).await;
+
+    match result {
+        Ok(Ok(info)) => ToolCallResult::text(serde_json::to_string_pretty(&info).unwrap()),
+        Ok(Err(e)) => ToolCallResult::error(format!("Failed to store blob: {e}")),
+        Err(_) => ToolCallResult::error("Blob storage task failed".into()),
+    }
+}
+
+async fn tool_blob_info(args: Value, state: &AppState) -> ToolCallResult {
+    let hash = match args.get("hash").and_then(|v| v.as_str()) {
+        Some(h) => h.to_string(),
+        None => return ToolCallResult::error("Missing required argument: hash".into()),
+    };
+
+    let blob_store = state.blob_store.clone();
+    let h = hash.clone();
+    let result = tokio::task::spawn_blocking(move || blob_store.info(&h)).await;
+
+    match result {
+        Ok(Ok(Some(info))) => ToolCallResult::text(serde_json::to_string_pretty(&info).unwrap()),
+        Ok(Ok(None)) => ToolCallResult::error(format!("Blob not found: {hash}")),
+        Ok(Err(e)) => ToolCallResult::error(format!("Failed to read blob info: {e}")),
+        Err(_) => ToolCallResult::error("Blob info task failed".into()),
+    }
 }

@@ -184,12 +184,15 @@ mod tests {
     fn test_state() -> AppState {
         let store = FeedStore::open_memory().unwrap();
         let engine = FeedEngine::new(store);
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_store = crate::blob::BlobStore::new(tmp.path());
         AppState {
             identity: Identity::generate(),
             engine: Arc::new(engine),
             config: Arc::new(Config::default()),
             started_at: Instant::now(),
             mcp_registry: crate::api::mcp_registry::create_registry(),
+            blob_store,
         }
     }
 
@@ -290,7 +293,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let body = body.unwrap();
         let tools = body["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 13);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"egregore_status"));
         assert!(names.contains(&"egregore_publish"));
@@ -299,6 +302,8 @@ mod tests {
         assert!(names.contains(&"egregore_peers"));
         assert!(names.contains(&"egregore_add_peer"));
         assert!(names.contains(&"egregore_remove_peer"));
+        assert!(names.contains(&"egregore_blob_upload"));
+        assert!(names.contains(&"egregore_blob_info"));
         assert!(names.contains(&"egregore_follows"));
         assert!(names.contains(&"egregore_follow"));
         assert!(names.contains(&"egregore_unfollow"));
@@ -658,5 +663,63 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tool_publish_encrypt_for_produces_private_box() {
+        let state = test_state();
+        let recipient = Identity::generate();
+
+        // Publish with encrypt_for as a top-level MCP argument
+        let app = router(state.clone());
+        let (status, body) = rpc_post(
+            app,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 20,
+                "method": "tools/call",
+                "params": {
+                    "name": "egregore_publish",
+                    "arguments": {
+                        "content": {
+                            "type": "message",
+                            "text": "secret via mcp"
+                        },
+                        "encrypt_for": [recipient.public_id().0]
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body = body.unwrap();
+        assert_eq!(body["result"]["isError"], false);
+
+        // Verify stored message is a private_box envelope
+        let app = router(state.clone());
+        let (_, body) = rpc_post(
+            app,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {
+                    "name": "egregore_query",
+                    "arguments": { "limit": 10 }
+                }
+            }),
+        )
+        .await;
+        let body = body.unwrap();
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        let msgs: Vec<Value> = serde_json::from_str(text).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["content"]["type"], "private_box");
+        assert!(msgs[0]["content"]["box"].is_string());
+        assert_eq!(
+            msgs[0]["schema_id"].as_str(),
+            Some("private_box/v1"),
+            "schema_id should be private_box/v1"
+        );
     }
 }

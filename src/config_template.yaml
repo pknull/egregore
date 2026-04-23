@@ -177,6 +177,13 @@ retention_interval_secs: 3600
 # Default: 604800 (7 days)
 tombstone_max_age_secs: 604800
 
+# Profile TTL in days (RFC 0001 §11.2).
+# Fresh Profiles are published with valid_until = now + profile_ttl_days.
+# A re-publish scheduler rotates the Profile as it approaches expiration.
+# Must be > 0 and <= 180.
+# Default: 90
+# profile_ttl_days: 90
+
 # Retention policies are configured via the HTTP API:
 #
 #   GET    /v1/retention/policies       - List all policies

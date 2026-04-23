@@ -62,3 +62,15 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      - name: Audit dependencies
+        run: cargo audit

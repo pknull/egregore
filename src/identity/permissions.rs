@@ -5,7 +5,7 @@
 //! On Windows, restricts ACL to owner and SYSTEM only.
 
 use std::path::Path;
-use tracing::warn;
+use tracing::error;
 
 use crate::error::Result;
 
@@ -22,10 +22,10 @@ pub fn secure_private_key(path: &Path) -> Result<()> {
     match secure_private_key_impl(path) {
         Ok(()) => Ok(()),
         Err(e) => {
-            warn!(
+            error!(
                 path = %path.display(),
                 error = %e,
-                "Failed to set restrictive permissions on private key file"
+                "Failed to set restrictive permissions on private key file — key may be world-readable"
             );
             Ok(())
         }

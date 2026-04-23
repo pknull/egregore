@@ -7,9 +7,10 @@ use serde::Serialize;
 use crate::config::Config;
 use crate::error::Result;
 use crate::feed::engine::FeedEngine;
+use crate::feed::profile_lifecycle::{peer_profile_validity, SystemClock};
 use crate::gossip::health::{PeerHealthStatus, DIRECT_OBSERVATION_MARKER};
 use crate::gossip::registry::ConnectionRegistry;
-use crate::identity::Identity;
+use crate::identity::{Identity, PublicId};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeStatusMessage {
@@ -36,6 +37,12 @@ pub struct NodeStatusPeerHealth {
     pub peer: String,
     pub status: String,
     pub lag_msgs: u64,
+    /// RFC 0001 §11.2 soft-filter flag: `true` when the peer's most-recent
+    /// Profile has `valid_until < now`. The peer is NOT removed from the
+    /// status — expiration is a trust/freshness signal, not a connectivity
+    /// gate. Undated (pre-upgrade peer) and Absent both render as `false`.
+    #[serde(default)]
+    pub profile_expired: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,12 +138,34 @@ pub fn build_node_status(
     let (msgs_in_last_hour, msgs_out_last_hour) =
         store.message_flow_counts_since(&(now - Duration::hours(1)), &identity.public_id())?;
 
+    // RFC 0001 §11.2 peer-side soft filter: surface `profile_expired` per peer.
+    // The peer is NEVER removed from the status — expiration is a
+    // trust/freshness signal, not a connectivity gate. Undated (pre-upgrade)
+    // peers render as `profile_expired: false` (§6.1 deliberate asymmetry).
+    // On lookup error, default to `false` to avoid falsely flagging peers
+    // because of a transient store error.
+    let clock = SystemClock;
     let mut health: Vec<NodeStatusPeerHealth> = peer_health
         .into_values()
-        .map(|entry| NodeStatusPeerHealth {
-            peer: entry.peer,
-            status: entry.status,
-            lag_msgs: entry.lag_msgs,
+        .map(|entry| {
+            let peer_id = PublicId(entry.peer.clone());
+            let profile_expired = match peer_profile_validity(engine, &peer_id, &clock) {
+                Ok(v) => v.is_expired(),
+                Err(e) => {
+                    tracing::warn!(
+                        peer_id = %entry.peer,
+                        error = %e,
+                        "peer_profile_validity lookup failed; defaulting profile_expired=false"
+                    );
+                    false
+                }
+            };
+            NodeStatusPeerHealth {
+                peer: entry.peer,
+                status: entry.status,
+                lag_msgs: entry.lag_msgs,
+                profile_expired,
+            }
         })
         .collect();
     health.sort_by(|a, b| a.peer.cmp(&b.peer));

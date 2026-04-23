@@ -38,30 +38,38 @@ src/
     box_stream.rs     Box Stream encrypted framing
     private_box.rs    Private Box multi-recipient encryption
   feed/
-    engine.rs         Publish (sign+chain), ingest (verify+validate), query, search
-    models.rs         Message struct, FeedQuery, UnsignedMessage
-    content_types.rs  Structured content enum (insight, annotation, etc.)
-    schema.rs         Schema registry with JSON Schema validation
+    engine.rs           Publish (sign+chain), ingest (verify+validate), query, search
+    models.rs           Message struct, FeedQuery, UnsignedMessage
+    content_types.rs    Structured content enum (insight, profile, etc.); BrokerDetails (Phase 1 RFC 0001 §11.2)
+    profile_lifecycle.rs  Profile TTL self-enforce + peer soft filter + refresh scheduler + Clock abstraction
+    schema.rs           Schema registry with JSON Schema validation
     store/
-      mod.rs          SQLite schema, initialization, FTS5 setup, retention
-      messages.rs     Message CRUD, chain validation, search, topic filtering
-      peers.rs        Peer storage, follows
-      health.rs       Peer health tracking
-      groups.rs       Consumer groups, membership, offset tracking
+      mod.rs            SQLite schema, initialization, FTS5 setup, retention
+      messages.rs       Message CRUD, chain validation, search, topic filtering; get_latest_by_content_type (sequence-ordered lookup for Profile)
+      peers.rs          Peer storage, follows
+      health.rs         Peer health tracking
+      groups.rs         Consumer groups, membership, offset tracking
+  transport/
+    mod.rs              Transport trait + announce_if_multi_transport warn shim (RFC 0001 §5, Phase 1)
+    trait_def.rs        Four-method Transport trait with seven invariants
+    filter.rs           TopicFilter (author + tag predicates)
+    subscription.rs     Opaque SubscriptionHandle (drop-cancels)
+    health.rs           TransportHealth struct + aggregate helper for composite
+    gossip.rs           GossipTransport adapter wrapping the gossip/ stack via delegation
   gossip/
-    connection.rs     SHS handshake over TCP, then Box Stream
-    replication.rs    Have/Want/Messages/Done + Push/Subscribe/SubscribeAck protocol
-    client.rs         Sync loop (merge CLI+DB+discovered peers, sync each)
-    server.rs         TCP listener with semaphore + optional auth callback
-    discovery.rs      UDP LAN peer discovery with burst announcements
-    peers.rs          Peer address type
-    health.rs         Gossip-level health metrics
-    registry.rs       ConnectionRegistry for persistent connections (DashMap)
-    push.rs           PushManager for broadcasting to connected peers
-    persistent.rs     PersistentConnectionTask for handling push connections
-    backoff.rs        Exponential backoff with jitter for reconnection
-    bloom.rs          Bloom filter summaries for sync efficiency
-    flow_control.rs   Credit-based backpressure and rate limiting
+    connection.rs       SHS handshake over TCP, then Box Stream
+    replication.rs      Have/Want/Messages/Done + Push/Subscribe/SubscribeAck protocol
+    client.rs           Sync loop + run_sync_loop_with_push_cancellable (Phase 1 OQ-5)
+    server.rs           TCP listener + run_server_with_push_cancellable_ready (ready-signal variant)
+    discovery.rs        UDP LAN peer discovery with burst announcements
+    peers.rs            Peer address type
+    health.rs           Gossip-level health metrics
+    registry.rs         ConnectionRegistry for persistent connections (DashMap)
+    push.rs             PushManager for broadcasting to connected peers (Phase 2: retired)
+    persistent.rs       PersistentConnectionTask for handling push connections
+    backoff.rs          Exponential backoff with jitter for reconnection
+    bloom.rs            Bloom filter summaries for sync efficiency
+    flow_control.rs     Credit-based backpressure and rate limiting
   api/
     mod.rs            Axum router setup
     response.rs       Standard API response envelope

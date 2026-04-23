@@ -2,10 +2,9 @@
 # See https://rustsec.org/advisories/ and https://docs.rs/cargo-audit/
 
 [advisories]
-# Seven pre-existing transitive advisories remain after the self_update
-# 0.44 upgrade. They are ignored here to unblock CI while addressing
-# remaining upstream-only issues through dep tree updates that exceed
-# Phase 1 scope.
+# Five pre-existing upstream advisories remain. Reduced from seven via
+# a cargo update of the transitive tar dep from 0.4.44 → 0.4.45
+# (self_update 0.44's `tar = "0.4"` constraint accepts the patch).
 #
 # RAND UNSOUNDNESS (upstream):
 #   RUSTSEC-2026-0097 — rand 0.8.x / 0.9.x is unsound with a custom
@@ -15,31 +14,20 @@
 #   from our code.
 #
 # rustls-webpki 0.103.9 (four advisories, pulled in via rustls 0.23.x
-# from the reqwest/self_update TLS stack):
+# from the reqwest/self_update TLS stack). The fix lands in
+# rustls-webpki 0.104.x, currently only available as a pre-release
+# (0.104.0-alpha.7 as of 2026-04-23). Upgrading requires rustls 0.24+
+# (also pre-release) with coordinated tokio-rustls / hyper-rustls /
+# reqwest alignment. Revisit when the 0.104.x line reaches stable:
 #   RUSTSEC-2026-0049 — CRL matching-logic bug (CRLs incorrectly not
 #     considered authoritative by Distribution Point)
 #   RUSTSEC-2026-0098 — Name constraints incorrectly accepted for URI
 #   RUSTSEC-2026-0099 — Name constraints incorrectly accepted for
 #     certificates asserting a wildcard name
 #   RUSTSEC-2026-0104 — Reachable panic in CRL parsing
-#   Resolution: upgrade rustls to a version that pulls rustls-webpki
-#   0.104+. Requires coordination with tokio-rustls + hyper-rustls +
-#   reqwest version alignment.
-#
-# tar 0.4.44 (two advisories, pulled in via self_update's archive-tar
-# feature):
-#   RUSTSEC-2026-0067 — `unpack_in` can chmod arbitrary directories by
-#     following symlinks
-#   RUSTSEC-2026-0068 — tar-rs incorrectly ignores PAX size headers if
-#     header size is nonzero
-#   Resolution: either upgrade to tar 0.5.x (when self_update picks it
-#   up upstream) or remove the archive-tar feature if ZIP-only updates
-#   are acceptable for the egregore release channel.
 ignore = [
   "RUSTSEC-2026-0097",
   "RUSTSEC-2026-0049",
-  "RUSTSEC-2026-0067",
-  "RUSTSEC-2026-0068",
   "RUSTSEC-2026-0098",
   "RUSTSEC-2026-0099",
   "RUSTSEC-2026-0104",

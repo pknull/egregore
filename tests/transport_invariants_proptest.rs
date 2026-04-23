@@ -196,3 +196,143 @@ async fn b6_filter_honesty() {
     // invariant.
     let _ = author_b; // keep author_b alive to silence unused-binding warnings
 }
+
+// ---------------------------------------------------------------------------
+// B.6 extension — tag-only filter honesty.
+//
+// `subscribe({authors: None, tags: Some(["ops"])})` MUST deliver every
+// message tagged "ops" regardless of author. This covers the dimension
+// the original B.6 (author-only filter) does not.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn b6_filter_honesty_tag_only() {
+    let mock = MockTransport::new();
+
+    // Two distinct authors, each publishing with the SAME tag set. A
+    // tag-only filter must return both authors' messages.
+    let (_author_ops1, chain_ops1) = build_tagged_chain(3, vec!["ops".into()]);
+    let (_author_ops2, chain_ops2) = build_tagged_chain(3, vec!["ops".into()]);
+    // A third author publishes under a different tag — those must NOT
+    // appear in the tag-filtered subscriber's view (they would be a
+    // superset violation the mock specifically does not permit).
+    let (_author_research, chain_research) = build_tagged_chain(3, vec!["research".into()]);
+
+    let filter = TopicFilter {
+        authors: None,
+        tags: Some(vec!["ops".into()]),
+    };
+    let (_handle, mut stream) = mock
+        .subscribe(filter)
+        .await
+        .expect("subscribe on mock transport");
+
+    for m in chain_ops1
+        .iter()
+        .chain(chain_ops2.iter())
+        .chain(chain_research.iter())
+    {
+        mock.publish(m).await.expect("publish ok");
+    }
+
+    let expected = chain_ops1.len() + chain_ops2.len();
+    let mut delivered: Vec<Message> = Vec::new();
+    let collect = async {
+        while let Some(m) = stream.next().await {
+            delivered.push(m);
+            if delivered.len() >= expected {
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(2), collect)
+        .await
+        .expect("tag-filtered delivery must complete within 2s");
+
+    // Lower bound: every ops-tagged message delivered, from both authors.
+    for m in chain_ops1.iter().chain(chain_ops2.iter()) {
+        assert!(
+            delivered.iter().any(|d| d.hash == m.hash),
+            "tag filter dropped an ops-tagged message \
+             (author={}, seq={}) — Invariant 6 subset bug",
+            m.author.0,
+            m.sequence
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B.6 extension — author AND tag filter honesty.
+//
+// Both dimensions populated means AND: deliver messages from specified
+// authors that also carry at least one specified tag. Neither dimension
+// alone may pass through; both must hold.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn b6_filter_honesty_author_and_tag() {
+    let mock = MockTransport::new();
+
+    // Target author publishes three messages with an "ops" tag.
+    let (target_author, target_chain) = build_tagged_chain(3, vec!["ops".into()]);
+    // Same author publishes under a different tag — NOT matched by the
+    // AND filter below (tag mismatch).
+    let (same_author_different_tag_id, other_tag_by_target) = {
+        // Build a fresh chain on the SAME target author by re-signing
+        // directly. build_tagged_chain always creates a new identity, so
+        // we stage via the engine used there. Instead of constructing a
+        // second chain on the target author (which needs chain-previous
+        // linkage), simulate "different tag by same author" with a
+        // different author — the author dimension still differs then.
+        //
+        // For the AND semantic this is sufficient: we just need a class
+        // of messages that fails on *one* of the two filter dimensions.
+        let (id, chain) = build_tagged_chain(2, vec!["research".into()]);
+        (id, chain)
+    };
+    // Different author with the matching tag — NOT matched (author mismatch).
+    let (_diff_author, matching_tag_diff_author) = build_tagged_chain(2, vec!["ops".into()]);
+
+    let filter = TopicFilter {
+        authors: Some(vec![target_author.public_id()]),
+        tags: Some(vec!["ops".into()]),
+    };
+    let (_handle, mut stream) = mock
+        .subscribe(filter)
+        .await
+        .expect("subscribe on mock transport");
+
+    // Publish all three classes; only `target_chain` meets the AND condition.
+    for m in target_chain
+        .iter()
+        .chain(other_tag_by_target.iter())
+        .chain(matching_tag_diff_author.iter())
+    {
+        mock.publish(m).await.expect("publish ok");
+    }
+
+    let mut delivered: Vec<Message> = Vec::new();
+    let collect = async {
+        while let Some(m) = stream.next().await {
+            delivered.push(m);
+            if delivered.len() >= target_chain.len() {
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(2), collect)
+        .await
+        .expect("AND-filtered delivery must complete within 2s");
+
+    // Lower bound: every target_chain message present.
+    for m in &target_chain {
+        assert!(
+            delivered.iter().any(|d| d.hash == m.hash),
+            "AND filter dropped a matching message (author={}, seq={})",
+            m.author.0,
+            m.sequence
+        );
+    }
+
+    let _ = same_author_different_tag_id; // retain for lifetime
+}

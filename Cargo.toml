@@ -43,7 +43,7 @@ clap = { version = "4.4", features = ["derive"] }
 rpassword = "7.0"
 
 # Self-update
-self_update = { version = "0.39", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "rustls"] }
+self_update = { version = "0.44", default-features = false, features = ["reqwest", "archive-tar", "archive-zip", "compression-flate2", "rustls"] }
 
 # Logging
 tracing = "0.1"

@@ -169,8 +169,7 @@ pub(crate) async fn run_egress(
                         error = %e,
                         "composite egress: ack_after_publish failed"
                     );
-                    *dir.last_error.write() =
-                        Some("source ack_after_publish error".to_string());
+                    *dir.last_error.write() = Some("source ack_after_publish error".to_string());
                 }
             }
             // Gossip-sourced: source_id's bus_children slot is None —
@@ -242,10 +241,7 @@ mod tests {
     impl Transport for MockDest {
         async fn publish(&self, msg: &Message) -> Result<()> {
             self.published.lock().push(msg.clone());
-            self.publish_outcomes
-                .lock()
-                .pop_front()
-                .unwrap_or(Ok(()))
+            self.publish_outcomes.lock().pop_front().unwrap_or(Ok(()))
         }
         async fn subscribe(
             &self,
@@ -253,11 +249,7 @@ mod tests {
         ) -> Result<(SubscriptionHandle, BoxStream<'static, Message>)> {
             unreachable!("MockDest is publish-only")
         }
-        async fn request_from(
-            &self,
-            _a: PublicId,
-            _s: u64,
-        ) -> Result<BoxStream<'static, Message>> {
+        async fn request_from(&self, _a: PublicId, _s: u64) -> Result<BoxStream<'static, Message>> {
             unreachable!()
         }
         async fn start(&self) -> Result<()> {
@@ -491,8 +483,7 @@ mod tests {
         // removal. The bus-specific ack call is exercised in the
         // integration smoke test (Step 13).
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> =
-            Arc::new(vec![None, None, None]);
+        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None, None]);
         let cancel = CancellationToken::new();
 
         let msg = sample_message("@a.ed25519", 1);
@@ -519,11 +510,7 @@ mod tests {
         dir.egress_wake.notify_one();
 
         // Wait for destination publish.
-        let hit = eventually(
-            || dest.published().len() == 1,
-            Duration::from_secs(2),
-        )
-        .await;
+        let hit = eventually(|| dest.published().len() == 1, Duration::from_secs(2)).await;
         assert!(hit);
 
         // After destination-1 resolved, barrier still has pending=1
@@ -669,7 +656,10 @@ mod tests {
 
         cancel.cancel();
         let result = tokio::time::timeout(Duration::from_secs(2), egress).await;
-        assert!(result.is_ok(), "egress must exit promptly when cancel fires");
+        assert!(
+            result.is_ok(),
+            "egress must exit promptly when cancel fires"
+        );
     }
 
     #[tokio::test]
@@ -777,8 +767,7 @@ mod tests {
         let dest1 = MockDest::new();
         let dest2 = MockDest::new();
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> =
-            Arc::new(vec![None, None, None]);
+        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None, None]);
         let cancel = CancellationToken::new();
 
         let msg = sample_message("@a.ed25519", 1);
@@ -796,15 +785,7 @@ mod tests {
             let buses = bus_children.clone();
             let cancel = cancel.clone();
             tokio::spawn(async move {
-                run_egress(
-                    1,
-                    dest as Arc<dyn Transport>,
-                    dir,
-                    bars,
-                    buses,
-                    cancel,
-                )
-                .await;
+                run_egress(1, dest as Arc<dyn Transport>, dir, bars, buses, cancel).await;
             })
         };
         let e2 = {
@@ -814,15 +795,7 @@ mod tests {
             let buses = bus_children.clone();
             let cancel = cancel.clone();
             tokio::spawn(async move {
-                run_egress(
-                    2,
-                    dest as Arc<dyn Transport>,
-                    dir,
-                    bars,
-                    buses,
-                    cancel,
-                )
-                .await;
+                run_egress(2, dest as Arc<dyn Transport>, dir, bars, buses, cancel).await;
             })
         };
         dir1.egress_wake.notify_one();

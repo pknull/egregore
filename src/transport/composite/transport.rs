@@ -250,11 +250,12 @@ impl Transport for CompositeTransport {
         let mut pumps = Vec::with_capacity(self.children.len());
         for (idx, child) in self.children.iter().enumerate() {
             let (child_handle, child_stream) =
-                child.subscribe(filter.clone()).await.map_err(|e| {
-                    EgreError::Peer {
+                child
+                    .subscribe(filter.clone())
+                    .await
+                    .map_err(|e| EgreError::Peer {
                         reason: format!("composite subscribe: child {idx} failed: {e}"),
-                    }
-                })?;
+                    })?;
             pumps.push((child_handle, child_stream));
         }
 
@@ -391,8 +392,15 @@ impl Transport for CompositeTransport {
             let barriers = self.ack_barriers.clone();
             let cancel = self.cancel.clone();
             ingress_handles.push(tokio::spawn(async move {
-                super::ingress::run_ingress(source_id, source, dirs, barriers, num_children, cancel)
-                    .await;
+                super::ingress::run_ingress(
+                    source_id,
+                    source,
+                    dirs,
+                    barriers,
+                    num_children,
+                    cancel,
+                )
+                .await;
             }));
         }
         *self.ingress_handles.lock().await = Some(ingress_handles);
@@ -779,7 +787,10 @@ mod tests {
         ])
         .unwrap();
         let msg = sample_message("@alice.ed25519", 1);
-        composite.publish(&msg).await.expect("publish should succeed");
+        composite
+            .publish(&msg)
+            .await
+            .expect("publish should succeed");
         assert_eq!(mock_a.published().len(), 1);
         assert_eq!(mock_b.published().len(), 1);
         assert_eq!(mock_c.published().len(), 1);
@@ -935,11 +946,7 @@ mod tests {
             };
             Ok((handle, Box::pin(stream)))
         }
-        async fn request_from(
-            &self,
-            _a: PublicId,
-            _s: u64,
-        ) -> Result<BoxStream<'static, Message>> {
+        async fn request_from(&self, _a: PublicId, _s: u64) -> Result<BoxStream<'static, Message>> {
             Ok(Box::pin(stream::iter(Vec::<Message>::new())))
         }
         async fn start(&self) -> Result<()> {
@@ -1086,7 +1093,10 @@ mod tests {
                 .entry((0, PublicId("@a.ed25519".into())))
                 .or_default();
             for seq in 1..=4 {
-                entry.queue.push(Arc::new(sample_message("@a.ed25519", seq))).unwrap();
+                entry
+                    .queue
+                    .push(Arc::new(sample_message("@a.ed25519", seq)))
+                    .unwrap();
             }
         }
         *composite.directions[1].oldest_queued_at.write() =

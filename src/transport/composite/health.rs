@@ -7,8 +7,10 @@
 //! construction of the returned struct.
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
+use crate::transport::bus::BusTransport;
 use crate::transport::health::BridgeQueuesHealth;
 
 use super::direction::{DirectionState, BRIDGE_QUEUE_HIGH_WATERMARK};
@@ -19,9 +21,18 @@ use super::direction::{DirectionState, BRIDGE_QUEUE_HIGH_WATERMARK};
 /// `"mock"`) copied from the child's own `TransportHealth.backend` so the
 /// rendered JSON stays consistent with the child's self-reported backend
 /// string.
+///
+/// `bus_handle` — Wave 4 Step 22 retcon: when the child is a bus
+/// transport, the canonical `self_echo_total` counter lives on the bus
+/// adapter itself (amendment §C.4 re-interpretation; self-echo is a
+/// bus-layer concern, not a direction concern). Pass `Some(bus)` for
+/// bus children so the aggregate reflects the live counter; pass `None`
+/// for gossip/other children and the fallback `DirectionState.self_echo_total`
+/// (always zero in practice) is used.
 pub(crate) fn compute_bridge_queues_health(
     dir: &DirectionState,
     destination: &str,
+    bus_handle: Option<&Arc<BusTransport>>,
 ) -> BridgeQueuesHealth {
     // Snapshot the queue map under a short lock. We compute depth_total
     // and authors_active from the same snapshot so the two numbers stay
@@ -70,13 +81,22 @@ pub(crate) fn compute_bridge_queues_health(
     // ensures a mis-routed write can't leak here.
     let last_error = dir.last_error.read().clone().map(sanitize_error_surface);
 
+    // Self-echo total: bus children read from BusTransport (canonical
+    // source, amendment §C.4 Wave 4 retcon). Non-bus children surface the
+    // direction-scoped counter, which is always zero since self-echo only
+    // applies to bus-sourced deliveries.
+    let self_echo_total = match bus_handle {
+        Some(bus) => bus.self_echo_total(),
+        None => dir.self_echo_total.load(Ordering::Relaxed),
+    };
+
     BridgeQueuesHealth {
         destination: destination.to_string(),
         depth_total,
         authors_backpressured,
         authors_active,
         backpressure_events_total: dir.backpressure_events.load(Ordering::Relaxed),
-        self_echo_total: dir.self_echo_total.load(Ordering::Relaxed),
+        self_echo_total,
         oldest_queued_age_secs,
         publish_in_flight_age_secs,
         ack_on_error_total: dir.ack_on_error_total.load(Ordering::Relaxed),
@@ -141,7 +161,7 @@ mod tests {
     #[test]
     fn bridge_queues_health_empty_reports_zeros() {
         let dir = DirectionState::new();
-        let h = compute_bridge_queues_health(&dir, "gossip");
+        let h = compute_bridge_queues_health(&dir, "gossip", None);
         assert_eq!(h.destination, "gossip");
         assert_eq!(h.depth_total, 0);
         assert_eq!(h.authors_active, 0);
@@ -160,7 +180,7 @@ mod tests {
         let dir = DirectionState::new();
         seed(&dir, "@a.ed25519", 3);
         seed(&dir, "@b.ed25519", 5);
-        let h = compute_bridge_queues_health(&dir, "bus");
+        let h = compute_bridge_queues_health(&dir, "bus", None);
         assert_eq!(h.depth_total, 8);
         assert_eq!(h.authors_active, 2);
         assert_eq!(h.authors_backpressured, 0, "below high watermark");
@@ -171,7 +191,7 @@ mod tests {
         let dir = DirectionState::new();
         seed(&dir, "@a.ed25519", BRIDGE_QUEUE_HIGH_WATERMARK as u64);
         seed(&dir, "@b.ed25519", 10);
-        let h = compute_bridge_queues_health(&dir, "gossip");
+        let h = compute_bridge_queues_health(&dir, "gossip", None);
         assert_eq!(h.authors_backpressured, 1, "@a at high watermark");
         assert_eq!(h.authors_active, 2);
     }
@@ -183,7 +203,7 @@ mod tests {
         *dir.oldest_queued_at.write() = Some(Instant::now() - Duration::from_secs(5));
         *dir.publish_in_flight_since.write() = Some(Instant::now() - Duration::from_secs(2));
 
-        let h = compute_bridge_queues_health(&dir, "bus");
+        let h = compute_bridge_queues_health(&dir, "bus", None);
         assert!(
             h.oldest_queued_age_secs.unwrap() >= 5,
             "oldest_queued_age_secs reflects armed timestamp"
@@ -198,10 +218,11 @@ mod tests {
     fn bridge_queues_health_counters_snapshot_atomics() {
         let dir = DirectionState::new();
         dir.backpressure_events.store(7, Ordering::Relaxed);
+        // Non-bus child: self_echo falls back to DirectionState.
         dir.self_echo_total.store(3, Ordering::Relaxed);
         dir.ack_on_error_total.store(11, Ordering::Relaxed);
         dir.nats_redelivery_total.store(2, Ordering::Relaxed);
-        let h = compute_bridge_queues_health(&dir, "bus");
+        let h = compute_bridge_queues_health(&dir, "bus", None);
         assert_eq!(h.backpressure_events_total, 7);
         assert_eq!(h.self_echo_total, 3);
         assert_eq!(h.ack_on_error_total, 11);
@@ -214,7 +235,7 @@ mod tests {
         // Pretend some upstream writer accidentally stuffed a long string.
         let long = "x".repeat(300);
         *dir.last_error.write() = Some(long);
-        let h = compute_bridge_queues_health(&dir, "bus");
+        let h = compute_bridge_queues_health(&dir, "bus", None);
         let le = h.last_error.unwrap();
         assert!(
             le.ends_with("...[truncated]"),
@@ -227,7 +248,7 @@ mod tests {
     #[test]
     fn bridge_queues_health_serializes_with_serde_omit_when_none() {
         let dir = DirectionState::new();
-        let h = compute_bridge_queues_health(&dir, "gossip");
+        let h = compute_bridge_queues_health(&dir, "gossip", None);
         let json = serde_json::to_string(&h).unwrap();
         assert!(
             !json.contains("oldest_queued_age_secs"),

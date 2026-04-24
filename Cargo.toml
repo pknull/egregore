@@ -85,6 +85,10 @@ jsonschema = "0.29"
 # Concurrent hashmap for connection registry
 dashmap = "6.0"
 
+# NATS JetStream client (Phase 2 bus transport)
+# `nkeys` feature is required for credentials-file authentication (RL3).
+async-nats = { version = "0.47", default-features = false, features = ["jetstream", "server_2_11", "nkeys"] }
+
 # Non-poisoning synchronization primitives
 parking_lot = "0.12"
 

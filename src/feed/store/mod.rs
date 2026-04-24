@@ -15,6 +15,7 @@ mod groups;
 mod health;
 mod messages;
 mod peers;
+pub mod pending;
 pub mod retention;
 
 pub use groups::{

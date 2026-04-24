@@ -133,9 +133,7 @@ pub async fn tick(
         if let Some(last) = row.last_attempt_at {
             let window = exponential_backoff(row.attempt_count);
             let elapsed = now.signed_duration_since(last);
-            let elapsed_duration = elapsed
-                .to_std()
-                .unwrap_or(Duration::ZERO);
+            let elapsed_duration = elapsed.to_std().unwrap_or(Duration::ZERO);
             if elapsed_duration < window {
                 continue;
             }
@@ -144,13 +142,11 @@ pub async fn tick(
         // Load the source message from the store (on the blocking pool).
         let engine_load = engine.clone();
         let hash = row.message_hash.clone();
-        let msg_opt = tokio::task::spawn_blocking(move || {
-            engine_load.store().get_message(&hash)
-        })
-        .await
-        .map_err(|e| EgreError::Config {
-            reason: format!("retry scheduler: spawn_blocking load failed: {e}"),
-        })??;
+        let msg_opt = tokio::task::spawn_blocking(move || engine_load.store().get_message(&hash))
+            .await
+            .map_err(|e| EgreError::Config {
+                reason: format!("retry scheduler: spawn_blocking load failed: {e}"),
+            })??;
 
         match msg_opt {
             None => {
@@ -321,9 +317,7 @@ mod tests {
         // Build a pending row that references a hash NOT in messages table.
         let store = FeedStore::open_memory().unwrap();
         let ghost_msg = crate::feed::store::make_test_message("@alice.ed25519", 1, None);
-        store
-            .pending_forwarding_enqueue("bus", &ghost_msg)
-            .unwrap();
+        store.pending_forwarding_enqueue("bus", &ghost_msg).unwrap();
         // NOTE: insert_message NOT called — message is "missing".
         let engine = Arc::new(FeedEngine::new(store));
 

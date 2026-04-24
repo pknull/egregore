@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::response;
 use crate::api::AppState;
+use crate::transport::health::TransportHealth;
 
 #[derive(Serialize)]
 pub struct PeerInfo {
@@ -65,6 +66,16 @@ pub struct StatusInfo {
     /// Health indicators for subsystems. Null or absent means healthy (backward compat).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<HealthIndicators>,
+
+    /// Phase 2 Wave 5 Step 24: transport health from
+    /// `engine.transport_health()`. Present when `transport_count() >= 1`.
+    /// Composite deployments carry `TransportHealth.children` with per-child
+    /// `BridgeQueuesHealth` (RFC 0002 §8.4). Pre-Phase-2 deployments (no
+    /// transports attached; test harnesses) omit the field entirely — the
+    /// `#[serde(default, skip_serializing_if = "Option::is_none")]` pair
+    /// preserves byte-for-byte compatibility with the pre-Phase-2 shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<TransportHealth>,
 }
 
 /// Aggregate peers from all sources (CLI, address table, known_peers) with deduplication.
@@ -269,6 +280,12 @@ pub async fn build_status(state: &AppState) -> StatusInfo {
         })
     };
 
+    // Phase 2 Wave 5 Step 24: surface transport health when at least one
+    // transport is attached. `transport_health()` returns None for
+    // test harnesses that don't attach a transport; the optional field
+    // is omitted from the JSON in that case (see serde attribute).
+    let transport = state.engine.transport_health();
+
     StatusInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         identity: state.identity.public_id().0,
@@ -280,6 +297,7 @@ pub async fn build_status(state: &AppState) -> StatusInfo {
         follow_count,
         uptime_secs: uptime,
         health,
+        transport,
     }
 }
 
@@ -313,6 +331,7 @@ mod tests {
             follow_count: 0,
             uptime_secs: 0,
             health: None,
+            transport: None,
         };
         let json = serde_json::to_value(&status).unwrap();
         assert!(
@@ -339,6 +358,7 @@ mod tests {
                     error: "db locked".to_string(),
                 },
             }),
+            transport: None,
         };
         let json = serde_json::to_value(&status).unwrap();
         let health = json
@@ -358,5 +378,138 @@ mod tests {
         })
         .unwrap();
         assert_eq!(degraded["degraded"]["error"], "test error");
+    }
+
+    // ------------------------------------------------------------------
+    // Step 24 — /v1/status exposes `transport: Option<TransportHealth>`.
+    // The field is `None` when no transports are attached (the test-harness
+    // case); `Some(..)` when `engine.transport_count() >= 1`. This mirrors
+    // the `engine.transport_health()` contract exercised in
+    // `src/feed/engine.rs` Step 5 tests.
+    // ------------------------------------------------------------------
+
+    use crate::api::mcp_registry;
+    use crate::blob::BlobStore;
+    use crate::config::Config;
+    use crate::feed::engine::FeedEngine;
+    use crate::feed::store::FeedStore;
+    use crate::identity::Identity;
+    use crate::transport::health::TransportHealth;
+    use crate::transport::{filter::TopicFilter, subscription::SubscriptionHandle, Transport};
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// Minimal inline mock transport — canned `health()` response; other
+    /// trait methods unreachable here because `build_status` only consumes
+    /// `engine.transport_health()`.
+    struct StatusInlineMockTransport {
+        health: TransportHealth,
+    }
+
+    #[async_trait]
+    impl Transport for StatusInlineMockTransport {
+        async fn publish(&self, _msg: &crate::feed::models::Message) -> crate::error::Result<()> {
+            unimplemented!(
+                "StatusInlineMockTransport::publish — not exercised by build_status tests"
+            )
+        }
+        async fn subscribe(
+            &self,
+            _filter: TopicFilter,
+        ) -> crate::error::Result<(
+            SubscriptionHandle,
+            BoxStream<'static, crate::feed::models::Message>,
+        )> {
+            unimplemented!(
+                "StatusInlineMockTransport::subscribe — not exercised by build_status tests"
+            )
+        }
+        async fn request_from(
+            &self,
+            _author: crate::identity::PublicId,
+            _after_seq: u64,
+        ) -> crate::error::Result<BoxStream<'static, crate::feed::models::Message>> {
+            unimplemented!(
+                "StatusInlineMockTransport::request_from — not exercised by build_status tests"
+            )
+        }
+        async fn start(&self) -> crate::error::Result<()> {
+            Ok(())
+        }
+        async fn shutdown(&self, _deadline: Duration) -> crate::error::Result<()> {
+            Ok(())
+        }
+        fn health(&self) -> TransportHealth {
+            self.health.clone()
+        }
+    }
+
+    fn test_app_state_with_engine(engine: Arc<FeedEngine>) -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_store = BlobStore::new(tmp.path());
+        AppState {
+            identity: Identity::generate(),
+            engine,
+            config: Arc::new(Config::default()),
+            started_at: Instant::now(),
+            mcp_registry: mcp_registry::create_registry(),
+            blob_store,
+        }
+    }
+
+    #[tokio::test]
+    async fn build_status_includes_transport_when_attached() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = Arc::new(FeedEngine::new(store));
+
+        // Attach one mock transport reporting connected=true. Single-transport
+        // path: `transport_health()` returns that child's health verbatim.
+        engine.attach_transport(Arc::new(StatusInlineMockTransport {
+            health: TransportHealth {
+                connected: true,
+                backend: "mock-gossip",
+                last_successful_publish: None,
+                last_peer_contact: None,
+                unreplicated_count: 0,
+                inflight_publishes: 0,
+                last_error: None,
+                children: vec![],
+                bridge_queues: None,
+            },
+        }));
+
+        let state = test_app_state_with_engine(engine);
+        let status = build_status(&state).await;
+
+        let transport = status
+            .transport
+            .expect("transport attached => /v1/status.transport is Some");
+        assert_eq!(transport.backend, "mock-gossip");
+        assert!(transport.connected);
+    }
+
+    #[tokio::test]
+    async fn build_status_omits_transport_when_no_transports() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = Arc::new(FeedEngine::new(store));
+        // Do NOT attach any transport — test harness case.
+
+        let state = test_app_state_with_engine(engine);
+        let status = build_status(&state).await;
+
+        assert!(
+            status.transport.is_none(),
+            "no transports attached => transport field is None (preserves Phase 1 shape)"
+        );
+
+        // Confirm the field is omitted from JSON output (byte-for-byte
+        // compatibility with pre-Phase-2 consumers).
+        let json = serde_json::to_value(&status).unwrap();
+        assert!(
+            json.get("transport").is_none(),
+            "transport field must be omitted from JSON when None; got: {json}"
+        );
     }
 }

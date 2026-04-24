@@ -232,3 +232,200 @@ fn messages_from_expired_peer_still_ingest() {
     assert_eq!(stored.hash, content_msg.hash);
     assert_eq!(stored.author, peer_identity.public_id());
 }
+
+// ----------------------------------------------------------------------
+// Phase 2 Wave 5 Step 25 — node_status/v1 lock-step with TransportHealth.
+// Same pattern as the profile_expired lock-step test above: the Rust
+// struct's `transport_health` field MUST be permitted by the embedded
+// JSON Schema (src/feed/schema.rs), including the nested
+// `BridgeQueuesHealth` sub-schema for composite/bridge deployments.
+// ----------------------------------------------------------------------
+
+use egregore::transport::health::{BridgeQueuesHealth, TransportHealth};
+
+#[tokio::test]
+async fn node_status_with_transport_health_validates_against_schema() {
+    // Constructs a fully-populated `TransportHealth` — including
+    // composite children with `bridge_queues` — and asserts
+    // `publish_with_schema("node_status/v1", ...)` accepts it.
+    //
+    // This exercises the deepest branch of the schema: the
+    // `$defs/transport_health` recursive reference (`children[]`) and
+    // the `$defs/bridge_queues_health` branch for per-direction metrics.
+    let self_identity = Identity::generate();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "egregore_step25_with_th_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let store = FeedStore::open_memory().unwrap();
+    // Use with_schemas_dir so default schemas (including updated
+    // node_status/v1) get written into a fresh dir and loaded.
+    let engine = FeedEngine::with_schemas_dir(store, &temp_dir);
+
+    let now = Utc::now();
+    let child_bus = TransportHealth {
+        connected: true,
+        backend: "nats",
+        last_successful_publish: Some(now),
+        last_peer_contact: Some(now),
+        unreplicated_count: 3,
+        inflight_publishes: 1,
+        last_error: None,
+        children: vec![],
+        bridge_queues: Some(BridgeQueuesHealth {
+            destination: "nats".to_string(),
+            depth_total: 12,
+            authors_backpressured: 0,
+            authors_active: 2,
+            backpressure_events_total: 0,
+            self_echo_total: 4,
+            oldest_queued_age_secs: Some(7),
+            publish_in_flight_age_secs: Some(1),
+            ack_on_error_total: 0,
+            nats_redelivery_total: 0,
+            last_error: None,
+        }),
+    };
+    let child_gossip = TransportHealth {
+        connected: true,
+        backend: "gossip",
+        last_successful_publish: Some(now),
+        last_peer_contact: Some(now),
+        unreplicated_count: 0,
+        inflight_publishes: 0,
+        last_error: None,
+        children: vec![],
+        bridge_queues: Some(BridgeQueuesHealth {
+            destination: "gossip".to_string(),
+            depth_total: 0,
+            authors_backpressured: 0,
+            authors_active: 0,
+            backpressure_events_total: 0,
+            self_echo_total: 0,
+            oldest_queued_age_secs: None,
+            publish_in_flight_age_secs: None,
+            ack_on_error_total: 0,
+            nats_redelivery_total: 0,
+            last_error: None,
+        }),
+    };
+    let composite = TransportHealth {
+        connected: true,
+        backend: "composite",
+        last_successful_publish: Some(now),
+        last_peer_contact: Some(now),
+        unreplicated_count: 3,
+        inflight_publishes: 1,
+        last_error: None,
+        children: vec![child_bus, child_gossip],
+        bridge_queues: None,
+    };
+
+    let status = egregore::status::NodeStatusMessage {
+        msg_type: "node_status".to_string(),
+        node: self_identity.public_id().0,
+        ts: now,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_secs: 42,
+        peers: egregore::status::NodeStatusPeers {
+            connected: 0,
+            known: 0,
+            health: vec![],
+        },
+        storage: egregore::status::NodeStatusStorage {
+            bytes: 0,
+            message_count: 0,
+            feed_count: 0,
+        },
+        throughput: egregore::status::NodeStatusThroughput {
+            msgs_in_last_hour: 0,
+            msgs_out_last_hour: 0,
+        },
+        transport_health: Some(composite),
+    };
+
+    let status_json = serde_json::to_value(&status).expect("serialize node_status");
+
+    // Load-bearing assertion: schema accepts full TransportHealth shape.
+    let message = engine
+        .publish_with_schema(
+            &self_identity,
+            status_json,
+            Some("node_status/v1".to_string()),
+            None,
+            vec!["node_status".to_string()],
+        )
+        .expect("node_status with full TransportHealth must pass schema validation");
+    assert_eq!(message.schema_id.as_deref(), Some("node_status/v1"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn node_status_without_transport_health_still_valid() {
+    // Back-compat guardrail: a node_status message WITHOUT the new
+    // `transport_health` field (the Phase-1 shape) MUST still validate.
+    // `#[serde(default, skip_serializing_if = "Option::is_none")]` +
+    // the schema's `transport_health` NOT appearing in `required` are
+    // the load-bearing bits this test pins.
+    let self_identity = Identity::generate();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "egregore_step25_without_th_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let store = FeedStore::open_memory().unwrap();
+    let engine = FeedEngine::with_schemas_dir(store, &temp_dir);
+
+    let status = egregore::status::NodeStatusMessage {
+        msg_type: "node_status".to_string(),
+        node: self_identity.public_id().0,
+        ts: Utc::now(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_secs: 0,
+        peers: egregore::status::NodeStatusPeers {
+            connected: 0,
+            known: 0,
+            health: vec![],
+        },
+        storage: egregore::status::NodeStatusStorage {
+            bytes: 0,
+            message_count: 0,
+            feed_count: 0,
+        },
+        throughput: egregore::status::NodeStatusThroughput {
+            msgs_in_last_hour: 0,
+            msgs_out_last_hour: 0,
+        },
+        transport_health: None,
+    };
+
+    let status_json = serde_json::to_value(&status).expect("serialize node_status");
+    // Confirm the None serializes to "field absent" (not "null").
+    assert!(
+        status_json.get("transport_health").is_none(),
+        "transport_health: None must be omitted from JSON; got: {status_json}"
+    );
+
+    let message = engine
+        .publish_with_schema(
+            &self_identity,
+            status_json,
+            Some("node_status/v1".to_string()),
+            None,
+            vec!["node_status".to_string()],
+        )
+        .expect("node_status without transport_health must pass schema validation (back-compat)");
+    assert_eq!(message.schema_id.as_deref(), Some("node_status/v1"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

@@ -207,6 +207,7 @@ mod tests {
                 follow_count: 0,
                 uptime_secs: 0,
                 health: None,
+                transport: None,
             },
             peers: vec![],
             health: None,
@@ -232,6 +233,7 @@ mod tests {
                 follow_count: 0,
                 uptime_secs: 0,
                 health: None,
+                transport: None,
             },
             peers: vec![],
             health: Some(HealthIndicators {

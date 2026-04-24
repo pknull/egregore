@@ -228,6 +228,14 @@ pub struct Config {
     /// Default: 90.
     #[serde(default = "default_profile_ttl_days")]
     pub profile_ttl_days: u32,
+    /// Optional bus (NATS JetStream) transport configuration — Phase 2.
+    ///
+    /// When `Some(..)`, `Config::validate` enforces TLS, credential
+    /// permissions, and `max_ack_pending` bounds via
+    /// `BusConfig::validate`. When `None` (the default), the node runs in
+    /// single-transport gossip mode exactly as in Phase 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus: Option<crate::transport::bus::BusConfig>,
 }
 
 fn default_retention_interval_secs() -> u64 {
@@ -327,6 +335,7 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             otlp: OtlpConfig::default(),
             profile_ttl_days: default_profile_ttl_days(),
+            bus: None,
         }
     }
 }
@@ -499,6 +508,13 @@ impl Config {
                 "profile_ttl_days must be ≤ 180 (was {})",
                 self.profile_ttl_days
             );
+        }
+        // Bus (Phase 2) validation — optional; delegates to BusConfig::validate
+        // when present so the TLS + credentials + ack bounds checks live next
+        // to the struct that defines them.
+        if let Some(bus) = &self.bus {
+            bus.validate()
+                .with_context(|| "bus configuration failed validation")?;
         }
         Ok(())
     }
@@ -969,5 +985,59 @@ mod tests {
             ..Config::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    // ============ BUS CONFIG INTEGRATION TESTS (Phase 2 Wave 1 Step 2) ============
+
+    #[test]
+    fn config_default_has_no_bus_block() {
+        let config = Config::default();
+        assert!(
+            config.bus.is_none(),
+            "default Config must have bus = None for Phase-1 parity"
+        );
+    }
+
+    #[test]
+    fn config_parses_without_bus_field() {
+        // Backward-compat guard: pre-Phase-2 YAML (no `bus:` key) must parse.
+        let yaml = "data_dir: ./data\nport: 7654\ngossip_port: 7655\ngossip_interval_secs: 300\nnetwork_key: test\npeers: []\nlan_discovery: false\ndiscovery_port: 7656\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.bus.is_none());
+    }
+
+    #[test]
+    fn validate_rejects_config_with_invalid_bus() {
+        // When a bus block is present but invalid (plaintext URL), the
+        // top-level Config::validate must surface the bus error.
+        let config = Config {
+            api_auth_token: Some("test-token".to_string()),
+            bus: Some(crate::transport::bus::BusConfig {
+                url: "nats://plaintext.invalid:4222".to_string(),
+                credentials_path: PathBuf::from("/nonexistent"),
+                stream_name: "egregore-feed".to_string(),
+                consumer_name: None,
+                broker: crate::transport::bus::BrokerConfigInput {
+                    operator_name: "ACME".to_string(),
+                    jurisdiction: "CH".to_string(),
+                    disclosure_policy: "https://x.example/p".to_string(),
+                    tenancy: "shared".to_string(),
+                    broker_endpoint: "x.example:4222".to_string(),
+                    backend: "nats".to_string(),
+                },
+                max_ack_pending: 512,
+                ack_wait_secs: None,
+                expected_publish_latency_ms: 200,
+            }),
+            ..Config::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("plaintext bus URL must fail top-level validate");
+        assert!(
+            err.to_string().contains("bus") || err.chain().any(|c| c.to_string().contains("TLS")),
+            "error must mention bus/TLS, got chain: {:?}",
+            err.chain().map(|c| c.to_string()).collect::<Vec<_>>()
+        );
     }
 }

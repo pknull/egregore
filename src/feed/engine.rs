@@ -5,7 +5,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::Utc;
 use parking_lot::RwLock;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::error::{EgreError, Result};
 use crate::feed::models::{FeedQuery, Message, UnsignedMessage};
@@ -18,6 +18,29 @@ use crate::transport::{Transport, TransportHealth};
 
 /// Maximum serialized content size in bytes (64 KB).
 const MAX_CONTENT_SIZE: usize = 64 * 1024;
+
+/// Phase 2 Wave 4 amendment §C.8: ticket describing a locally-authored
+/// publish that the `publish_dispatcher` task will hand to the effective
+/// transport. The `pending_transports` list is populated by `publish_full`
+/// when it synchronously enqueued rows under those transport ids before
+/// sending this ticket — the dispatcher itself does not re-enqueue.
+///
+/// Keeping `Arc<Message>` matches the broadcast channel's payload shape
+/// used elsewhere in the engine; the ticket is cheap to clone and the
+/// dispatcher consumes it once.
+#[derive(Clone)]
+pub struct DispatchTicket {
+    /// The locally-authored, signed message to dispatch.
+    pub message: Arc<Message>,
+    /// Transport ids (currently only `"bus"`) for which `publish_full`
+    /// has already written a durable pending-forwarding row. The
+    /// dispatcher calls `effective_transport.publish` which — for bus —
+    /// will idempotently re-enqueue (INSERT OR IGNORE per amendment §G.2)
+    /// and then attempt the JetStream round trip. If the dispatcher is
+    /// saturated and the ticket was dropped, the pending rows cover
+    /// recovery via the retry scheduler.
+    pub pending_transports: Vec<&'static str>,
+}
 
 /// Feed engine: append with chain validation, read, verify, search.
 ///
@@ -38,6 +61,28 @@ pub struct FeedEngine {
     /// Read paths are low-frequency (startup log, health snapshot); RwLock
     /// overhead is irrelevant.
     transports: RwLock<Vec<Arc<dyn Transport>>>,
+    /// Phase 2 Wave 4 Step 21: bounded mpsc to the `publish_dispatcher` task.
+    ///
+    /// `publish_full` writes pending-forwarding rows synchronously BEFORE
+    /// sending on this channel (amendment §C.8). On
+    /// `TrySendError::Full` the call logs WARN and continues: durability
+    /// is preserved via the pending row and the retry scheduler drains
+    /// it on its own interval. On `TrySendError::Closed` (dispatcher
+    /// task exited) the same recovery applies.
+    ///
+    /// Capacity 64 is tuned for typical publish rates — lower than
+    /// `event_tx`'s 1024 broadcast capacity because (a) publishes are
+    /// durably stored in `messages` + `pending_forwarding` before we
+    /// touch this channel and (b) backpressure via `Full` is observable
+    /// (WARN log + pending rows climbing) rather than silent.
+    ///
+    /// Wrapped in `RwLock<Option<_>>` for interior-mutability attachment
+    /// after `Arc::new(engine)`: main.rs creates the channel, wires the
+    /// sender via `set_dispatch_sender`, and owns the Receiver for the
+    /// dispatcher task. When `None`, `publish_full` still runs the
+    /// durable pre-enqueue but skips the ticket send (gossip-only
+    /// deployments hit this path with no pending rows created).
+    local_publish_tx: RwLock<Option<mpsc::Sender<DispatchTicket>>>,
 }
 
 impl FeedEngine {
@@ -54,6 +99,7 @@ impl FeedEngine {
             event_tx,
             schema_registry,
             transports: RwLock::new(Vec::new()),
+            local_publish_tx: RwLock::new(None),
         }
     }
 
@@ -235,7 +281,100 @@ impl FeedEngine {
             })?;
 
         self.emit(&message);
+
+        // Phase 2 Wave 4 Step 21 (amendment §C.8 + §G.2):
+        //
+        // 1. Durable pending enqueue — synchronously write a
+        //    `pending_forwarding` row for every transport that requires
+        //    durable retry. Currently only `"bus"`; gossip has implicit
+        //    Have/Want recovery so no pending row is needed.
+        //
+        //    The idempotent `INSERT OR IGNORE` in
+        //    `pending_forwarding_enqueue` (amendment §G.2) means
+        //    `BusTransport::publish_internal`'s own enqueue is a no-op
+        //    when the dispatcher later handles this ticket — no
+        //    duplicate-key errors, no race.
+        //
+        // 2. Ticket send — hand a `DispatchTicket` to the dispatcher
+        //    via the bounded mpsc. `try_send` is intentional: on `Full`
+        //    we log WARN and return the stored `Message` to the caller.
+        //    Durability is preserved because the pending row exists and
+        //    the retry scheduler will drain it on its own interval.
+        let pending_transports = self.collect_pending_transports();
+        if pending_transports.contains(&"bus") {
+            // Logged at trace level; audit-scrubbed (A2): the hash is a
+            // content-address, not PII, matching the gossip log posture.
+            if let Err(e) = self.store.pending_forwarding_enqueue("bus", &message) {
+                tracing::warn!(
+                    hash = %message.hash,
+                    error = %e,
+                    "publish_full: pending_forwarding_enqueue failed; \
+                     dispatcher will still attempt delivery"
+                );
+            }
+        }
+        if let Some(tx) = self.local_publish_tx.read().as_ref() {
+            let ticket = DispatchTicket {
+                message: Arc::new(message.clone()),
+                pending_transports,
+            };
+            match tx.try_send(ticket) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        hash = %message.hash,
+                        "publish_dispatcher mpsc full; relying on pending_forwarding retry"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::warn!(
+                        hash = %message.hash,
+                        "publish_dispatcher mpsc closed; publish durably stored but won't dispatch \
+                         until restart"
+                    );
+                }
+            }
+        }
+        // No dispatcher wired = single-transport gossip-legacy path still
+        // works (PushManager reads event_tx). PushManager retirement is
+        // Step 23.
+
         Ok(message)
+    }
+
+    /// Determine which attached transport backends require durable pending
+    /// tracking for a freshly-published message. Wave 4 Step 21 only
+    /// recognizes `"bus"`; future backends can extend the match here.
+    ///
+    /// Implementation note: we query `health().backend` on each attached
+    /// transport. The call is cheap (a handful of atomic loads per
+    /// `GossipTransport`/`BusTransport::health`) and the transports lock
+    /// is read-only.
+    fn collect_pending_transports(&self) -> Vec<&'static str> {
+        let guard = self.transports.read();
+        let mut out: Vec<&'static str> = Vec::new();
+        for t in guard.iter() {
+            match t.health().backend {
+                "bus" => {
+                    if !out.contains(&"bus") {
+                        out.push("bus");
+                    }
+                }
+                "composite" => {
+                    // Composite surfaces its children's backends via
+                    // `health().children`. If any child is bus, the
+                    // composite is a bus-bearing transport and we need a
+                    // pending row.
+                    for child in t.health().children {
+                        if child.backend == "bus" && !out.contains(&"bus") {
+                            out.push("bus");
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     /// Verify and insert a message received from another feed.
@@ -514,6 +653,22 @@ impl FeedEngine {
     /// Get a single message by hash.
     pub fn get_message(&self, hash: &str) -> Result<Option<Message>> {
         self.store.get_message(hash)
+    }
+
+    /// Wire a sender to the `publish_dispatcher` task (Phase 2 Wave 4 Step 21).
+    ///
+    /// Called once by `main.rs` after the dispatcher task has been spawned
+    /// with the matching receiver. Subsequent calls overwrite the sender —
+    /// use with care (production wiring is once-at-boot).
+    ///
+    /// Publishers that arrive before this setter call (e.g. first-boot
+    /// profile self-publish) do NOT block: `publish_full` still writes
+    /// pending rows and returns `Ok(Message)`; the dispatcher simply
+    /// doesn't see a ticket for them. Startup ordering in `main.rs` puts
+    /// `set_dispatch_sender` before the effective transport's `start()`
+    /// call so steady-state publishes flow through the dispatcher.
+    pub fn set_dispatch_sender(&self, tx: mpsc::Sender<DispatchTicket>) {
+        *self.local_publish_tx.write() = Some(tx);
     }
 
     /// Attach a transport to this engine. Appends to the transport list.
@@ -1644,5 +1799,171 @@ mod tests {
         );
         assert_eq!(agg.backend, "composite");
         assert_eq!(agg.children.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // Step 21 — `local_publish_tx` bounded mpsc + synchronous pending
+    // enqueue in `publish_full`. These exercise the behavior described in
+    // amendment §C.8 + §G.2: a bus-bearing deployment writes a durable
+    // pending row before the ticket send; on mpsc Full the publish still
+    // returns Ok and the pending row is authoritative.
+    // ------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_full_enqueues_pending_when_bus_transport_attached() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new(store);
+        let identity = Identity::generate();
+
+        engine.attach_transport(InlineMock::new(true, "bus"));
+
+        let msg = engine
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 1}),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        // Pending row must exist for "bus" because a bus-backend
+        // transport is attached.
+        let pending = engine.store().pending_forwarding_list("bus", 10).unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "bus-attached publish must create a pending_forwarding row"
+        );
+        assert_eq!(pending[0].message_hash, msg.hash);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_full_does_not_enqueue_pending_when_no_bus() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new(store);
+        let identity = Identity::generate();
+
+        // Only gossip attached — no pending row should be created.
+        engine.attach_transport(InlineMock::new(true, "gossip"));
+
+        engine
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 1}),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        let count = engine.store().pending_forwarding_count("bus").unwrap();
+        assert_eq!(
+            count, 0,
+            "gossip-only deployment must not enqueue pending rows; got {count}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_full_sends_dispatch_ticket_when_channel_attached() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new(store);
+        let identity = Identity::generate();
+
+        engine.attach_transport(InlineMock::new(true, "bus"));
+
+        let (tx, mut rx) = mpsc::channel::<DispatchTicket>(4);
+        engine.set_dispatch_sender(tx);
+
+        let msg = engine
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 1}),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        // Dispatcher receives exactly one ticket whose message is the
+        // freshly-published one and whose pending_transports contains bus.
+        let ticket = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("dispatcher recv must not time out")
+            .expect("dispatcher channel must not close");
+        assert_eq!(ticket.message.hash, msg.hash);
+        assert!(
+            ticket.pending_transports.contains(&"bus"),
+            "ticket must name 'bus' as a durable-pending transport; got: {:?}",
+            ticket.pending_transports
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_full_continues_on_dispatch_mpsc_full() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new(store);
+        let identity = Identity::generate();
+
+        engine.attach_transport(InlineMock::new(true, "bus"));
+
+        // Capacity 1 and we never recv: the first publish fills the
+        // channel; the second hits TrySendError::Full and must still
+        // return Ok (pending row is authoritative — amendment §C.8).
+        let (tx, _rx) = mpsc::channel::<DispatchTicket>(1);
+        engine.set_dispatch_sender(tx);
+
+        let _m1 = engine
+            .publish(
+                &identity,
+                serde_json::json!({"type": "t", "n": 1}),
+                None,
+                vec![],
+            )
+            .expect("first publish fills the mpsc");
+        let _m2 = engine
+            .publish(
+                &identity,
+                serde_json::json!({"type": "t", "n": 2}),
+                None,
+                vec![],
+            )
+            .expect("second publish must return Ok even when mpsc is Full");
+
+        // Both publishes created durable pending rows — that's the
+        // recovery channel when the dispatcher is saturated.
+        let count = engine.store().pending_forwarding_count("bus").unwrap();
+        assert_eq!(
+            count, 2,
+            "both publishes must have durable pending rows; got {count}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_full_continues_on_dispatch_mpsc_closed() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new(store);
+        let identity = Identity::generate();
+
+        engine.attach_transport(InlineMock::new(true, "bus"));
+
+        // Create the channel, wire the sender, then drop the receiver —
+        // any subsequent `try_send` returns `Closed`. publish_full must
+        // still return Ok (same recovery posture as Full).
+        let (tx, rx) = mpsc::channel::<DispatchTicket>(4);
+        engine.set_dispatch_sender(tx);
+        drop(rx);
+
+        let msg = engine
+            .publish(
+                &identity,
+                serde_json::json!({"type": "test", "n": 1}),
+                None,
+                vec![],
+            )
+            .expect("publish must return Ok even when dispatcher channel is closed");
+
+        // Pending row still exists — the retry scheduler will pick it up
+        // on next tick.
+        let pending = engine.store().pending_forwarding_list("bus", 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_hash, msg.hash);
     }
 }

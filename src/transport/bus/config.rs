@@ -131,6 +131,25 @@ pub struct BrokerConfigInput {
     pub backend: String,
 }
 
+impl From<BrokerConfigInput> for crate::feed::content_types::BrokerDetails {
+    fn from(src: BrokerConfigInput) -> Self {
+        Self {
+            operator_name: src.operator_name,
+            jurisdiction: src.jurisdiction,
+            disclosure_policy: src.disclosure_policy,
+            tenancy: src.tenancy,
+            broker_endpoint: src.broker_endpoint,
+            backend: src.backend,
+        }
+    }
+}
+
+impl From<&BrokerConfigInput> for crate::feed::content_types::BrokerDetails {
+    fn from(src: &BrokerConfigInput) -> Self {
+        src.clone().into()
+    }
+}
+
 impl BusConfig {
     /// Compute the effective `ack_wait` duration.
     ///

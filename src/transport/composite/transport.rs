@@ -494,9 +494,31 @@ impl Transport for CompositeTransport {
         }
     }
 
+    /// Per RFC 0002 §8.4: aggregate `TransportHealth.aggregate(...)` across
+    /// children, with each child's `bridge_queues` populated from the
+    /// matching `DirectionState` snapshot.
+    ///
+    /// The top-level `TransportHealth.bridge_queues` is always `None` — the
+    /// field describes queue state for a destination, not an aggregate.
+    /// Each child's `bridge_queues` describes its INBOUND queues
+    /// (`directions[j]`: messages going TO child `j` from every other child).
     fn health(&self) -> TransportHealth {
-        // Step 20 implementation.
-        unimplemented!("CompositeTransport::health lands in Wave 3 Step 20")
+        let children: Vec<TransportHealth> = self
+            .children
+            .iter()
+            .enumerate()
+            .map(|(j, child)| {
+                let mut child_health = child.health();
+                let destination = child_health.backend;
+                child_health.bridge_queues = Some(super::health::compute_bridge_queues_health(
+                    &self.directions[j],
+                    destination,
+                ));
+                child_health
+            })
+            .collect();
+
+        TransportHealth::aggregate("composite", children)
     }
 }
 
@@ -689,6 +711,7 @@ mod tests {
                 inflight_publishes: 0,
                 last_error: None,
                 children: vec![],
+                bridge_queues: None,
             }
         }
     }
@@ -937,6 +960,7 @@ mod tests {
                 inflight_publishes: 0,
                 last_error: None,
                 children: vec![],
+                bridge_queues: None,
             }
         }
     }
@@ -1009,6 +1033,164 @@ mod tests {
         drop(ingress);
 
         let _ = composite.shutdown(Duration::from_millis(200)).await;
+    }
+
+    // ---- Step 20 tests: health aggregation ----
+
+    #[tokio::test]
+    async fn health_empty_queues_reports_zero_depth_and_no_aging() {
+        let (mock_a, _tx_a) = FullMock::new(16);
+        let (mock_b, _tx_b) = FullMock::new(16);
+        let composite = Arc::new(
+            CompositeTransport::new(vec![
+                ChildSpec::gossip(mock_a as Arc<_>),
+                ChildSpec::gossip(mock_b as Arc<_>),
+            ])
+            .unwrap(),
+        );
+        let h = composite.health();
+        assert_eq!(h.backend, "composite");
+        assert_eq!(h.children.len(), 2);
+        for child_h in &h.children {
+            let bq = child_h
+                .bridge_queues
+                .as_ref()
+                .expect("composite children must carry bridge_queues");
+            assert_eq!(bq.depth_total, 0);
+            assert_eq!(bq.authors_active, 0);
+            assert!(bq.oldest_queued_age_secs.is_none());
+            assert!(bq.publish_in_flight_age_secs.is_none());
+        }
+        assert!(
+            h.bridge_queues.is_none(),
+            "top-level aggregate never has its own bridge_queues"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_with_queued_messages_reports_depth_and_oldest_age() {
+        let (mock_a, _tx_a) = FullMock::new(16);
+        let (mock_b, _tx_b) = FullMock::new(16);
+        let composite = Arc::new(
+            CompositeTransport::new(vec![
+                ChildSpec::gossip(mock_a as Arc<_>),
+                ChildSpec::gossip(mock_b as Arc<_>),
+            ])
+            .unwrap(),
+        );
+
+        // Manually seed directions[1] (destination = mock_b) with 4 messages.
+        {
+            let mut queues = composite.directions[1].queues.lock();
+            let entry = queues
+                .entry((0, PublicId("@a.ed25519".into())))
+                .or_default();
+            for seq in 1..=4 {
+                entry.queue.push(Arc::new(sample_message("@a.ed25519", seq))).unwrap();
+            }
+        }
+        *composite.directions[1].oldest_queued_at.write() =
+            Some(std::time::Instant::now() - Duration::from_secs(3));
+
+        let h = composite.health();
+        // Child index 1 is the destination with queued work.
+        let bq = h.children[1].bridge_queues.as_ref().unwrap();
+        assert_eq!(bq.depth_total, 4);
+        assert_eq!(bq.authors_active, 1);
+        assert!(bq.oldest_queued_age_secs.unwrap() >= 3);
+
+        // Child index 0 is empty.
+        let bq0 = h.children[0].bridge_queues.as_ref().unwrap();
+        assert_eq!(bq0.depth_total, 0);
+    }
+
+    #[tokio::test]
+    async fn health_during_publish_reports_in_flight_age() {
+        let (mock_a, _tx_a) = FullMock::new(16);
+        let (mock_b, _tx_b) = FullMock::new(16);
+        let composite = Arc::new(
+            CompositeTransport::new(vec![
+                ChildSpec::gossip(mock_a as Arc<_>),
+                ChildSpec::gossip(mock_b as Arc<_>),
+            ])
+            .unwrap(),
+        );
+        *composite.directions[1].publish_in_flight_since.write() =
+            Some(std::time::Instant::now() - Duration::from_secs(4));
+        let h = composite.health();
+        let bq = h.children[1].bridge_queues.as_ref().unwrap();
+        assert!(
+            bq.publish_in_flight_age_secs.unwrap() >= 4,
+            "armed publish_in_flight_since must surface as age"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_aggregates_backpressure_events_counter() {
+        let (mock_a, _tx_a) = FullMock::new(16);
+        let (mock_b, _tx_b) = FullMock::new(16);
+        let composite = Arc::new(
+            CompositeTransport::new(vec![
+                ChildSpec::gossip(mock_a as Arc<_>),
+                ChildSpec::gossip(mock_b as Arc<_>),
+            ])
+            .unwrap(),
+        );
+        composite.directions[1]
+            .backpressure_events
+            .store(42, Ordering::Relaxed);
+        let h = composite.health();
+        let bq = h.children[1].bridge_queues.as_ref().unwrap();
+        assert_eq!(bq.backpressure_events_total, 42);
+    }
+
+    #[tokio::test]
+    async fn health_serializes_with_serde_default_fields_omitted_when_none() {
+        let (mock_a, _tx_a) = FullMock::new(16);
+        let (mock_b, _tx_b) = FullMock::new(16);
+        let composite = Arc::new(
+            CompositeTransport::new(vec![
+                ChildSpec::gossip(mock_a as Arc<_>),
+                ChildSpec::gossip(mock_b as Arc<_>),
+            ])
+            .unwrap(),
+        );
+        let h = composite.health();
+        let json = serde_json::to_string(&h).unwrap();
+        // Top-level bridge_queues is None → omitted. Children have
+        // Some(bridge_queues) → present on each child.
+        assert!(json.contains("\"bridge_queues\""));
+        assert!(
+            !json.contains("oldest_queued_age_secs"),
+            "None option must be omitted in empty-queue snapshot; got: {json}"
+        );
+        assert!(
+            !json.contains("publish_in_flight_age_secs"),
+            "None option must be omitted; got: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_health_top_level_aggregates_children_connected_via_existing_helper() {
+        // Aggregation rule: logical-AND on connected. One disconnected child
+        // must produce a disconnected composite.
+        let (mock_a, _tx_a) = FullMock::new(16);
+        let (mock_b, _tx_b) = FullMock::new(16);
+        // Both mocks report connected=true by default.
+        let composite = Arc::new(
+            CompositeTransport::new(vec![
+                ChildSpec::gossip(mock_a.clone() as Arc<_>),
+                ChildSpec::gossip(mock_b.clone() as Arc<_>),
+            ])
+            .unwrap(),
+        );
+        let h = composite.health();
+        assert!(h.connected, "all children connected → composite connected");
+        assert_eq!(h.children.len(), 2);
+        assert_eq!(h.backend, "composite");
+        // Children keep their own backend strings unchanged.
+        assert_eq!(h.children[0].backend, "mock");
+        assert_eq!(h.children[1].backend, "mock");
     }
 
     #[tokio::test]

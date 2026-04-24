@@ -305,6 +305,7 @@ impl Transport for MockTransport {
             inflight_publishes: self.inflight.load(Ordering::Acquire),
             last_error: None,
             children: vec![],
+            bridge_queues: None,
         }
     }
 }

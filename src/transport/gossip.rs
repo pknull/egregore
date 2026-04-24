@@ -623,6 +623,11 @@ impl Transport for GossipTransport {
             // Gossip is a leaf transport; composites (Phase 2) populate
             // `children` themselves.
             children: vec![],
+            // Gossip is a leaf transport — no per-direction bridge queue
+            // state to report. The composite (if any) fills this field on
+            // the gossip child's health snapshot before returning to the
+            // caller.
+            bridge_queues: None,
         }
     }
 }

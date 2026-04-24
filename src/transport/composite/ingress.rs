@@ -35,7 +35,6 @@ use super::direction::{AckBarrier, DirectionState, TransportId};
 /// Exits cleanly when the source subscription stream ends (Invariant 5
 /// stream-end) or when `cancel` is fired. Holds no locks across `.await`
 /// beyond the tiny critical sections inside `push_to_destination`.
-#[allow(dead_code)] // wired by CompositeTransport::start in Step 19
 pub(crate) async fn run_ingress(
     source_id: TransportId,
     source_transport: Arc<dyn Transport>,
@@ -95,7 +94,6 @@ pub(crate) async fn run_ingress(
 /// Fan one source message out to every destination queue.
 ///
 /// Splits out so the cancel-aware `select!` body stays tight.
-#[allow(dead_code)] // called by run_ingress; wired in Step 19
 async fn forward_one(
     source_id: TransportId,
     msg: Message,
@@ -159,7 +157,6 @@ async fn forward_one(
 /// `.notified().await`. If another thread happens to push between the
 /// wake and the retry, our retry will simply observe that the queue is
 /// again/still full and re-await.
-#[allow(dead_code)] // called by forward_one; wired in Step 19
 async fn push_to_destination(
     dir: Arc<DirectionState>,
     source_id: TransportId,

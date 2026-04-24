@@ -29,7 +29,6 @@ use super::direction::{AckBarrier, DirectionState, TransportId};
 /// error and proceed, because the durable-local-ingest precondition
 /// guarantees the message is in local SQLite and `request_from` will
 /// serve it later.
-#[allow(dead_code)] // wired by CompositeTransport::start in Step 19
 pub(crate) async fn run_egress(
     dest_id: TransportId,
     dest_transport: Arc<dyn Transport>,

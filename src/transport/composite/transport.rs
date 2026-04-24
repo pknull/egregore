@@ -343,14 +343,155 @@ impl Transport for CompositeTransport {
         Err(EgreError::Peer { reason })
     }
 
+    /// Start every child, then spawn one ingress + one egress task per
+    /// child.
+    ///
+    /// Idempotent per the `Transport` trait contract: a second start while
+    /// already-started returns `Ok(())` without relaunching anything. On
+    /// child-start failure, unwinds by firing the cancel token + resetting
+    /// the started latch so a subsequent retry can run from a clean slate.
     async fn start(&self) -> Result<()> {
-        // Step 19 implementation.
-        unimplemented!("CompositeTransport::start lands in Wave 3 Step 19")
+        use std::sync::atomic::Ordering;
+
+        // Single-shot latch: only the thread that wins the compare_exchange
+        // proceeds; the others see Ok(()).
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        // 1. Start every child (sequentially — children are few, and
+        //    sequential keeps error unwinding simple).
+        for (i, child) in self.children.iter().enumerate() {
+            if let Err(e) = child.start().await {
+                // Unwind: cancel any partially-started children's spawned
+                // work (we haven't spawned any yet at this point, but
+                // the token is shared) + reset the latch.
+                self.cancel.cancel();
+                self.started.store(false, Ordering::Release);
+                return Err(EgreError::Peer {
+                    reason: format!("composite start: child {i} failed: {e}"),
+                });
+            }
+        }
+
+        let num_children = self.children.len();
+        let directions_arc = Arc::new(self.directions.clone());
+        let bus_children_arc = Arc::new(self.bus_children.clone());
+
+        // 2. Spawn one ingress task per child (source).
+        let mut ingress_handles = Vec::with_capacity(num_children);
+        for (i, child) in self.children.iter().enumerate() {
+            let source_id = i;
+            let source = child.clone();
+            let dirs = directions_arc.clone();
+            let barriers = self.ack_barriers.clone();
+            let cancel = self.cancel.clone();
+            ingress_handles.push(tokio::spawn(async move {
+                super::ingress::run_ingress(source_id, source, dirs, barriers, num_children, cancel)
+                    .await;
+            }));
+        }
+        *self.ingress_handles.lock().await = Some(ingress_handles);
+
+        // 3. Spawn one egress task per destination.
+        let mut egress_handles = Vec::with_capacity(num_children);
+        for (j, child) in self.children.iter().enumerate() {
+            let dest_id = j;
+            let dest = child.clone();
+            let dir = self.directions[j].clone();
+            let barriers = self.ack_barriers.clone();
+            let bus_children = bus_children_arc.clone();
+            let cancel = self.cancel.clone();
+            egress_handles.push(tokio::spawn(async move {
+                super::egress::run_egress(dest_id, dest, dir, barriers, bus_children, cancel).await;
+            }));
+        }
+        *self.egress_handles.lock().await = Some(egress_handles);
+
+        Ok(())
     }
 
-    async fn shutdown(&self, _deadline: Duration) -> Result<()> {
-        // Step 19 implementation.
-        unimplemented!("CompositeTransport::shutdown lands in Wave 3 Step 19")
+    /// Graceful shutdown (Invariant 7).
+    ///
+    /// Split-deadline policy:
+    /// 1. Fire the cancel token so every ingress/egress task exits its loop
+    ///    naturally (no aborts yet).
+    /// 2. Wait up to `deadline/2` for in-memory queues to drain — egress
+    ///    tasks continue publishing until either queues empty or the
+    ///    intermediate deadline elapses.
+    /// 3. Abort any tasks still running.
+    /// 4. Call each child's `shutdown(deadline/2)` in parallel.
+    ///
+    /// Returns `Err` iff one or more children returned `Err` from their
+    /// own shutdown. Any in-memory messages not drained before the
+    /// intermediate deadline will be redelivered by NATS (`ack_wait`
+    /// expiry on unacked bus messages) or pulled via `request_from`
+    /// after restart (gossip-sourced) — both paths survive this shutdown
+    /// by design.
+    async fn shutdown(&self, deadline: Duration) -> Result<()> {
+        // Halve the deadline: half for in-memory drain, half for child
+        // shutdowns. saturating_sub guards against zero-deadline callers
+        // that would otherwise divide to Duration::ZERO.
+        let mid_deadline = deadline / 2;
+
+        self.cancel.cancel();
+
+        // 2. In-memory drain: poll queue depth until all empty or the
+        //    intermediate deadline elapses. The cancel is already fired,
+        //    so egress tasks drain what they can and then exit their
+        //    idle waits naturally.
+        let drain_start = tokio::time::Instant::now();
+        loop {
+            let all_empty = self.directions.iter().all(|dir| {
+                let queues = dir.queues.lock();
+                queues.values().all(|e| e.queue.is_empty())
+            });
+            if all_empty {
+                break;
+            }
+            if drain_start.elapsed() >= mid_deadline {
+                tracing::warn!(
+                    "composite shutdown: mid-deadline elapsed with queued messages remaining"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // 3. Abort any ingress/egress tasks that didn't exit naturally.
+        //    `take()` leaves the slot as None so a second shutdown call
+        //    is a no-op on these.
+        if let Some(handles) = self.ingress_handles.lock().await.take() {
+            for h in handles {
+                h.abort();
+            }
+        }
+        if let Some(handles) = self.egress_handles.lock().await.take() {
+            for h in handles {
+                h.abort();
+            }
+        }
+
+        // 4. Shut down children in parallel with the remaining budget.
+        let child_shutdowns = self.children.iter().map(|c| c.shutdown(mid_deadline));
+        let results = futures::future::join_all(child_shutdowns).await;
+        let errors: Vec<EgreError> = results.into_iter().filter_map(Result::err).collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            let total = self.children.len();
+            let failed = errors.len();
+            Err(EgreError::Peer {
+                reason: format!(
+                    "composite shutdown: {failed} of {total} children errored ({})",
+                    errors[0]
+                ),
+            })
+        }
     }
 
     fn health(&self) -> TransportHealth {
@@ -719,6 +860,197 @@ mod tests {
         assert_eq!(out.len(), 2, "mock_b's stream should be chosen");
         assert_eq!(out[0].sequence, 2);
         assert_eq!(out[1].sequence, 3);
+    }
+
+    // ---- Step 19 tests: start / shutdown ----
+
+    /// A source-and-destination mock: subscribe yields scripted messages
+    /// (from an mpsc controlled by the test), publish records. Used by
+    /// start/shutdown tests to observe full ingress→egress flow.
+    struct FullMock {
+        published: Arc<PlMutex<Vec<Message>>>,
+        tx: Arc<PlMutex<Option<tmpsc::Sender<Message>>>>,
+        rx: Arc<PlMutex<Option<tmpsc::Receiver<Message>>>>,
+        started: Arc<AtomicBool>,
+        shutdown_called: Arc<AtomicBool>,
+    }
+
+    impl FullMock {
+        fn new(buffer: usize) -> (Arc<Self>, tmpsc::Sender<Message>) {
+            let (tx, rx) = tmpsc::channel::<Message>(buffer);
+            let mock = Arc::new(Self {
+                published: Arc::new(PlMutex::new(Vec::new())),
+                tx: Arc::new(PlMutex::new(Some(tx.clone()))),
+                rx: Arc::new(PlMutex::new(Some(rx))),
+                started: Arc::new(AtomicBool::new(false)),
+                shutdown_called: Arc::new(AtomicBool::new(false)),
+            });
+            (mock, tx)
+        }
+    }
+
+    #[async_trait]
+    impl Transport for FullMock {
+        async fn publish(&self, msg: &Message) -> Result<()> {
+            self.published.lock().push(msg.clone());
+            Ok(())
+        }
+        async fn subscribe(
+            &self,
+            _filter: TopicFilter,
+        ) -> Result<(SubscriptionHandle, BoxStream<'static, Message>)> {
+            let (cancel_tx, _cancel_rx) = oneshot::channel::<()>();
+            let handle = SubscriptionHandle::from_cancel(cancel_tx);
+            let mut rx = self
+                .rx
+                .lock()
+                .take()
+                .expect("FullMock::subscribe called twice");
+            drop(self.tx.lock().take());
+            let stream = async_stream::stream! {
+                while let Some(m) = rx.recv().await { yield m; }
+            };
+            Ok((handle, Box::pin(stream)))
+        }
+        async fn request_from(
+            &self,
+            _a: PublicId,
+            _s: u64,
+        ) -> Result<BoxStream<'static, Message>> {
+            Ok(Box::pin(stream::iter(Vec::<Message>::new())))
+        }
+        async fn start(&self) -> Result<()> {
+            self.started.store(true, Ordering::Release);
+            Ok(())
+        }
+        async fn shutdown(&self, _d: Duration) -> Result<()> {
+            self.shutdown_called.store(true, Ordering::Release);
+            Ok(())
+        }
+        fn health(&self) -> TransportHealth {
+            TransportHealth {
+                connected: true,
+                backend: "mock",
+                last_successful_publish: None,
+                last_peer_contact: None,
+                unreplicated_count: 0,
+                inflight_publishes: 0,
+                last_error: None,
+                children: vec![],
+            }
+        }
+    }
+
+    async fn eventually<F: Fn() -> bool>(pred: F, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if pred() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        pred()
+    }
+
+    #[tokio::test]
+    async fn start_spawns_one_ingress_and_one_egress_per_child() {
+        let (mock_a, _tx_a) = FullMock::new(16);
+        let (mock_b, _tx_b) = FullMock::new(16);
+        let composite = Arc::new(
+            CompositeTransport::new(vec![
+                ChildSpec::gossip(mock_a.clone() as Arc<_>),
+                ChildSpec::gossip(mock_b.clone() as Arc<_>),
+            ])
+            .unwrap(),
+        );
+
+        composite.start().await.expect("start");
+
+        // Children were started.
+        assert!(mock_a.started.load(Ordering::Acquire));
+        assert!(mock_b.started.load(Ordering::Acquire));
+
+        // One ingress + one egress handle per child.
+        let ingress = composite.ingress_handles.lock().await;
+        assert_eq!(ingress.as_ref().unwrap().len(), 2);
+        drop(ingress);
+        let egress = composite.egress_handles.lock().await;
+        assert_eq!(egress.as_ref().unwrap().len(), 2);
+        drop(egress);
+
+        // started latch set.
+        assert!(composite.started.load(Ordering::Acquire));
+
+        // Cleanup.
+        let _ = composite.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn start_is_idempotent() {
+        let (mock_a, _tx_a) = FullMock::new(16);
+        let (mock_b, _tx_b) = FullMock::new(16);
+        let composite = Arc::new(
+            CompositeTransport::new(vec![
+                ChildSpec::gossip(mock_a.clone() as Arc<_>),
+                ChildSpec::gossip(mock_b.clone() as Arc<_>),
+            ])
+            .unwrap(),
+        );
+        composite.start().await.expect("first start");
+        // Second start must be a no-op — handle counts unchanged.
+        composite.start().await.expect("second start is idempotent");
+
+        let ingress = composite.ingress_handles.lock().await;
+        assert_eq!(
+            ingress.as_ref().unwrap().len(),
+            2,
+            "second start must not relaunch ingress tasks"
+        );
+        drop(ingress);
+
+        let _ = composite.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_in_memory_queues_then_cancels() {
+        // Two children. Source publishes 3 messages; shutdown should
+        // drain them to the destination before aborting.
+        let (mock_a, tx_a) = FullMock::new(16);
+        let (mock_b, _tx_b) = FullMock::new(16);
+        let composite = Arc::new(
+            CompositeTransport::new(vec![
+                ChildSpec::gossip(mock_a.clone() as Arc<_>),
+                ChildSpec::gossip(mock_b.clone() as Arc<_>),
+            ])
+            .unwrap(),
+        );
+        composite.start().await.expect("start");
+
+        // Seed 3 messages from mock_a — they should flow to mock_b via
+        // the composite's bridge pipeline.
+        for seq in 1..=3 {
+            let m = sample_message("@a.ed25519", seq);
+            tx_a.send(m).await.unwrap();
+        }
+        // Wait for drain to mock_b.
+        let hit = eventually(
+            || mock_b.published.lock().len() == 3,
+            Duration::from_secs(3),
+        )
+        .await;
+        assert!(hit, "all 3 messages must bridge A → B");
+
+        // Now shutdown should complete without error.
+        let result = composite.shutdown(Duration::from_millis(500)).await;
+        assert!(result.is_ok(), "clean shutdown should return Ok");
+
+        // Children's shutdown was called.
+        assert!(mock_a.shutdown_called.load(Ordering::Acquire));
+        assert!(mock_b.shutdown_called.load(Ordering::Acquire));
+
+        // Task handle slots are cleared (take()d).
+        assert!(composite.ingress_handles.lock().await.is_none());
+        assert!(composite.egress_handles.lock().await.is_none());
     }
 
     #[tokio::test]

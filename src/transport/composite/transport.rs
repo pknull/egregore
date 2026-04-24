@@ -518,9 +518,15 @@ impl Transport for CompositeTransport {
             .map(|(j, child)| {
                 let mut child_health = child.health();
                 let destination = child_health.backend;
+                // Wave 4 Step 22 retcon: bus children surface their
+                // canonical self_echo_total counter via the bus handle;
+                // gossip children fall back to `DirectionState`'s
+                // (always-zero) counter.
+                let bus_handle = self.bus_children[j].as_ref();
                 child_health.bridge_queues = Some(super::health::compute_bridge_queues_health(
                     &self.directions[j],
                     destination,
+                    bus_handle,
                 ));
                 child_health
             })

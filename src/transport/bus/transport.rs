@@ -1,20 +1,31 @@
-//! `BusTransport` struct + `Transport` trait skeleton — Phase 2 Wave 1 Step 5.
+//! `BusTransport` — `Transport` adapter over NATS JetStream.
 //!
 //! Holds the NATS client, JetStream context, durable consumer, identity,
 //! and the feed engine reference needed by the durable-local-ingest
-//! precondition (RFC 0002 §8.2 — implemented in Wave 2 Step 10).
+//! precondition (RFC 0002 §8.2).
 //!
-//! Trait methods `publish`, `subscribe`, `request_from` are `todo!()`
-//! here and land in Wave 2 (Steps 9, 10, 11). `start` is an idempotent
-//! no-op marker (the async-nats client connects inside `new`). `shutdown`
-//! drains in-flight publishes up to the deadline and disconnects the
-//! client. `health()` populates from atomics in the adapter's shape.
+//! ## Trait method landing
 //!
-//! Observability mirrors `GossipTransport`'s pattern (inflight_publishes
-//! atomic + last_successful_publish/last_peer_contact RwLocks + last_error
-//! shared `Arc<RwLock<Option<String>>>`). The additional `pending_acks`
-//! map (amendment §C.2, §C.12) holds NATS ack handles keyed by
-//! `message.hash`; `ack_after_publish` / `abandon_ack` (Wave 2) drain it.
+//! - `publish` (Wave 2 Step 9) — enqueue-then-attempt via
+//!   `publish_attempt` (amendments §C.10, §G.2). The retry scheduler
+//!   calls `publish_attempt` directly, bypassing the enqueue step.
+//! - `subscribe` (Wave 2 Step 10) — spawn_blocking ingest, ack-handle
+//!   retention in `pending_acks`, self-echo rule (amendments §C.2,
+//!   §C.4, §C.9).
+//! - `request_from` (Wave 2 Step 11) — `bus_author_seq_index` lookup +
+//!   ephemeral ordered consumer (amendment §C.3).
+//! - `start` is an idempotent no-op marker (the async-nats client
+//!   connects inside `new`).
+//! - `shutdown` drains in-flight publishes up to the deadline.
+//! - `health()` populates from atomics in the adapter's shape.
+//!
+//! ## Observability
+//!
+//! Mirrors `GossipTransport`'s pattern (inflight_publishes atomic +
+//! last_successful_publish/last_peer_contact RwLocks + last_error shared
+//! `Arc<RwLock<Option<String>>>`). The additional `pending_acks` map
+//! (amendment §C.2, §C.12) holds NATS ack handles keyed by
+//! `message.hash`; `ack_after_publish` / `abandon_ack` drain it.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -503,12 +514,101 @@ impl Transport for BusTransport {
 
     async fn request_from(
         &self,
-        _author: PublicId,
-        _after_seq: u64,
+        author: PublicId,
+        after_seq: u64,
     ) -> Result<BoxStream<'static, Message>> {
-        // Wave 2 Step 11 — stream-seq index lookup + ephemeral ordered
-        // consumer (amendment §C.3).
-        todo!("BusTransport::request_from — Wave 2 Step 11")
+        // Amendment §C.3 — index-first lookup, then ephemeral ordered
+        // consumer with FilterSubject + ByStartSequence.
+        //
+        // 1. SQLite index lookup (spawn_blocking): find the first
+        //    stream_seq where (author, author_seq > after_seq). If no
+        //    row: return an empty stream — Invariant 5 says the caller
+        //    cannot distinguish head-of-feed from not-indexed-yet, and
+        //    chain-gap detection handles recovery.
+        let engine = self.engine.clone();
+        let author_for_query = author.0.clone();
+        let start_stream_seq = tokio::task::spawn_blocking(move || {
+            engine
+                .store()
+                .bus_author_seq_index_find_stream_seq(&author_for_query, after_seq)
+        })
+        .await
+        .map_err(|e| EgreError::Peer {
+            reason: format!("bus: bus_author_seq_index join error: {e}"),
+        })??;
+
+        let Some(start_seq) = start_stream_seq else {
+            // No indexed message for this author beyond after_seq. Return
+            // an empty stream rather than an error — the caller's chain-
+            // gap detection on the consumer side will re-request if
+            // needed (Invariant 5).
+            return Ok(Box::pin(futures::stream::empty()));
+        };
+
+        // 2. Ephemeral pull consumer scoped to this author's subject with
+        //    start_sequence set from the index hit. No durable_name =
+        //    ephemeral (auto-cleaned by NATS after inactivity). No ack
+        //    (AckPolicy::None) — request_from is a snapshot read, not a
+        //    subscription; the caller handles dedup via the engine's
+        //    ingest path.
+        let subject = author_subject(&author);
+        let consumer_cfg = async_nats::jetstream::consumer::pull::Config {
+            filter_subject: subject,
+            deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::ByStartSequence {
+                start_sequence: start_seq,
+            },
+            ack_policy: async_nats::jetstream::consumer::AckPolicy::None,
+            ..Default::default()
+        };
+
+        let stream_obj = self
+            .jetstream
+            .get_stream(&self.config.stream_name)
+            .await
+            .map_err(|e| EgreError::Peer {
+                reason: format!("bus: get_stream failed: {e}"),
+            })?;
+
+        let consumer = stream_obj
+            .create_consumer(consumer_cfg)
+            .await
+            .map_err(|e| EgreError::Peer {
+                reason: format!("bus: create ephemeral consumer failed: {e}"),
+            })?;
+
+        let mut messages = consumer.messages().await.map_err(|e| EgreError::Peer {
+            reason: format!("bus: ephemeral consumer messages() failed: {e}"),
+        })?;
+
+        // 3. Stream decoded messages. Deserialization errors end the
+        //    stream (no ack, AckPolicy::None); per Invariant 5 the caller
+        //    cannot distinguish this from head-of-feed so we do not
+        //    surface an error mid-stream — chain-gap detection covers
+        //    recovery.
+        let last_error = self.last_error.clone();
+        let stream = async_stream::stream! {
+            while let Some(next) = messages.next().await {
+                match next {
+                    Ok(nats_msg) => {
+                        match serde_json::from_slice::<Message>(&nats_msg.payload) {
+                            Ok(decoded) => yield decoded,
+                            Err(_e) => {
+                                *last_error.write() =
+                                    Some("bus request_from: malformed payload".to_string());
+                                break;
+                            }
+                        }
+                    }
+                    Err(_e) => {
+                        *last_error.write() =
+                            Some("bus request_from: consumer recv error".to_string());
+                        break;
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
     }
 
     async fn start(&self) -> Result<()> {

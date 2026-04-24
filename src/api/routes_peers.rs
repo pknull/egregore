@@ -395,9 +395,7 @@ mod tests {
     use crate::feed::store::FeedStore;
     use crate::identity::Identity;
     use crate::transport::health::TransportHealth;
-    use crate::transport::{
-        filter::TopicFilter, subscription::SubscriptionHandle, Transport,
-    };
+    use crate::transport::{filter::TopicFilter, subscription::SubscriptionHandle, Transport};
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use std::sync::Arc;
@@ -413,12 +411,17 @@ mod tests {
     #[async_trait]
     impl Transport for StatusInlineMockTransport {
         async fn publish(&self, _msg: &crate::feed::models::Message) -> crate::error::Result<()> {
-            unimplemented!("StatusInlineMockTransport::publish — not exercised by build_status tests")
+            unimplemented!(
+                "StatusInlineMockTransport::publish — not exercised by build_status tests"
+            )
         }
         async fn subscribe(
             &self,
             _filter: TopicFilter,
-        ) -> crate::error::Result<(SubscriptionHandle, BoxStream<'static, crate::feed::models::Message>)> {
+        ) -> crate::error::Result<(
+            SubscriptionHandle,
+            BoxStream<'static, crate::feed::models::Message>,
+        )> {
             unimplemented!(
                 "StatusInlineMockTransport::subscribe — not exercised by build_status tests"
             )

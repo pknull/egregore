@@ -424,9 +424,7 @@ async fn node_status_without_transport_health_still_valid() {
             None,
             vec!["node_status".to_string()],
         )
-        .expect(
-            "node_status without transport_health must pass schema validation (back-compat)",
-        );
+        .expect("node_status without transport_health must pass schema validation (back-compat)");
     assert_eq!(message.schema_id.as_deref(), Some("node_status/v1"));
 
     let _ = std::fs::remove_dir_all(&temp_dir);

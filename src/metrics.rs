@@ -319,8 +319,7 @@ use crate::feed::engine::FeedEngine;
 /// Default poll interval for the transport metrics updater. Chosen to
 /// match the scry `useBusAuthors` polling cadence (§C.14); bridge
 /// gauges and chain-gap metrics share this tick.
-pub const TRANSPORT_METRICS_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(30);
+pub const TRANSPORT_METRICS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Drive the transport metrics families from `engine.transport_health()`
 /// and the store's chain-gap + author-activity projections. Returns
@@ -361,10 +360,8 @@ pub async fn update_transport_metrics_once(engine: &Arc<FeedEngine>) {
 
     // 2. Chain-gap summary → per-author gauges.
     let engine_for_gaps = engine.clone();
-    let chain_result = tokio::task::spawn_blocking(move || {
-        engine_for_gaps.store().get_chain_gap_summary()
-    })
-    .await;
+    let chain_result =
+        tokio::task::spawn_blocking(move || engine_for_gaps.store().get_chain_gap_summary()).await;
     match chain_result {
         Ok(Ok(rows)) => {
             let now = Utc::now();

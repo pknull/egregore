@@ -651,9 +651,25 @@ async fn main() -> anyhow::Result<()> {
     // indirection keeps time mockable in tests for the refresh task.
     let clock: Arc<dyn egregore::feed::profile_lifecycle::Clock> =
         Arc::new(egregore::feed::profile_lifecycle::SystemClock);
+    // Phase 2 Wave 2 Step 12: when `config.bus` is configured, the currently-
+    // deployed broker details take precedence over any prior Profile's
+    // broker field. This ensures operators who switch brokers see the new
+    // details propagate on the next Profile publish (startup or refresh
+    // window). When `config.bus` is None, we pass None — the lifecycle
+    // helper carries the prior Profile's broker forward.
+    let broker_override: Option<egregore::feed::content_types::BrokerDetails> = config
+        .bus
+        .as_ref()
+        .map(|bus_cfg| bus_cfg.broker.clone().into());
     {
         use egregore::feed::profile_lifecycle::ensure_valid_profile;
-        ensure_valid_profile(&engine, &identity, config.profile_ttl_days, &*clock)?;
+        ensure_valid_profile(
+            &engine,
+            &identity,
+            config.profile_ttl_days,
+            &*clock,
+            broker_override.clone(),
+        )?;
     }
 
     // Phase 1 Step 13: re-publish scheduler. Polls every hour (plan §6.4);
@@ -669,6 +685,7 @@ async fn main() -> anyhow::Result<()> {
         let refresh_identity = identity.clone();
         let refresh_clock = clock.clone();
         let refresh_ttl_days = config.profile_ttl_days;
+        let refresh_broker_override = broker_override.clone();
         tokio::spawn(async move {
             run_profile_refresh(
                 refresh_engine,
@@ -676,6 +693,7 @@ async fn main() -> anyhow::Result<()> {
                 refresh_ttl_days,
                 refresh_clock,
                 std::time::Duration::from_secs(3600),
+                refresh_broker_override,
             )
             .await;
         });

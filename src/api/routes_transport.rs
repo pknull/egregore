@@ -133,10 +133,9 @@ pub struct BusAuthorsSummary {
 
 pub async fn get_bus_authors(State(state): State<AppState>) -> impl IntoResponse {
     let engine = state.engine.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        engine.store().bus_author_seq_index_author_summary()
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || engine.store().bus_author_seq_index_author_summary())
+            .await;
 
     match result {
         Ok(Ok(rows)) => {

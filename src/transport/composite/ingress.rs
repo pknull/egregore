@@ -47,18 +47,17 @@ pub(crate) async fn run_ingress(
     // the bridge forwards all signed messages (RL10 revised); per-tag or
     // per-author filtering is a client-layer concern. `.await` here blocks
     // until the child signals readiness.
-    let (_sub_handle, mut stream) =
-        match source_transport.subscribe(TopicFilter::default()).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(
-                    source_id,
-                    error = %e,
-                    "composite ingress: subscribe on source transport failed"
-                );
-                return;
-            }
-        };
+    let (_sub_handle, mut stream) = match source_transport.subscribe(TopicFilter::default()).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                source_id,
+                error = %e,
+                "composite ingress: subscribe on source transport failed"
+            );
+            return;
+        }
+    };
 
     loop {
         tokio::select! {
@@ -157,11 +156,7 @@ async fn forward_one(
 /// `.notified().await`. If another thread happens to push between the
 /// wake and the retry, our retry will simply observe that the queue is
 /// again/still full and re-await.
-async fn push_to_destination(
-    dir: Arc<DirectionState>,
-    source_id: TransportId,
-    msg: Arc<Message>,
-) {
+async fn push_to_destination(dir: Arc<DirectionState>, source_id: TransportId, msg: Arc<Message>) {
     let key = (source_id, msg.author.clone());
 
     loop {
@@ -303,11 +298,7 @@ mod tests {
             drop(self.tx.lock().take());
             Ok((handle, Box::pin(stream)))
         }
-        async fn request_from(
-            &self,
-            _a: PublicId,
-            _s: u64,
-        ) -> Result<BoxStream<'static, Message>> {
+        async fn request_from(&self, _a: PublicId, _s: u64) -> Result<BoxStream<'static, Message>> {
             unreachable!()
         }
         async fn start(&self) -> Result<()> {
@@ -395,7 +386,10 @@ mod tests {
         );
 
         // The next push crosses the watermark.
-        let msg = Arc::new(sample_message("@a.ed25519", BRIDGE_QUEUE_HIGH_WATERMARK as u64));
+        let msg = Arc::new(sample_message(
+            "@a.ed25519",
+            BRIDGE_QUEUE_HIGH_WATERMARK as u64,
+        ));
         push_to_destination(dir.clone(), 0, msg).await;
         assert_eq!(
             dir.backpressure_events.load(Ordering::Relaxed),
@@ -426,9 +420,14 @@ mod tests {
         // Pre-fill to capacity.
         {
             let mut queues = dir.queues.lock();
-            let entry = queues.entry((0, PublicId("@a.ed25519".into()))).or_default();
+            let entry = queues
+                .entry((0, PublicId("@a.ed25519".into())))
+                .or_default();
             for seq in 1..=(BRIDGE_QUEUE_CAPACITY as u64) {
-                entry.queue.push(Arc::new(sample_message("@a.ed25519", seq))).unwrap();
+                entry
+                    .queue
+                    .push(Arc::new(sample_message("@a.ed25519", seq)))
+                    .unwrap();
             }
             assert_eq!(entry.queue.len(), BRIDGE_QUEUE_CAPACITY);
         }
@@ -509,7 +508,10 @@ mod tests {
             Duration::from_secs(2),
         )
         .await;
-        assert!(hit, "ingress must fan out to both destinations and insert barrier");
+        assert!(
+            hit,
+            "ingress must fan out to both destinations and insert barrier"
+        );
 
         let barrier = ack_barriers.get(&expected_hash).unwrap().clone();
         assert_eq!(
@@ -667,8 +669,12 @@ mod tests {
         // queues are separate (source_id, author) pairs → no contention
         // on a single queue.
         for seq in 1..=10 {
-            tx_a.send(sample_message("@alpha.ed25519", seq)).await.unwrap();
-            tx_b.send(sample_message("@beta.ed25519", seq)).await.unwrap();
+            tx_a.send(sample_message("@alpha.ed25519", seq))
+                .await
+                .unwrap();
+            tx_b.send(sample_message("@beta.ed25519", seq))
+                .await
+                .unwrap();
         }
         drop(tx_a);
         drop(tx_b);
@@ -724,11 +730,7 @@ mod tests {
         let hash = msg.hash.clone();
         tx.send(msg).await.unwrap();
 
-        let hit = eventually(
-            || ack_barriers.contains_key(&hash),
-            Duration::from_secs(2),
-        )
-        .await;
+        let hit = eventually(|| ack_barriers.contains_key(&hash), Duration::from_secs(2)).await;
         assert!(hit);
         let barrier = ack_barriers.get(&hash).unwrap().clone();
         assert_eq!(barrier.pending_count.load(Ordering::Acquire), 2);

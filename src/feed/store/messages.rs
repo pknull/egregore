@@ -13,6 +13,21 @@ use crate::identity::PublicId;
 
 use super::{content_type_name, FeedStore};
 
+/// Phase 2 Wave 5 Step 27 (amendment §G.3) — per-author summary of
+/// chain-gap state for the Prometheus metrics updater. One row per
+/// author that has at least one message with `chain_valid = 0` in the
+/// local `messages` table. Rows with `chain_valid = 1` never appear
+/// (the predecessor has been observed and the chain is intact).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainGapRow {
+    pub author: String,
+    /// Count of messages with `chain_valid = 0` for this author.
+    pub gap_count: u64,
+    /// Timestamp of the OLDEST chain-invalid message for this author.
+    /// Feeds `egregore_chain_gap_oldest_seconds{author}`.
+    pub oldest: DateTime<Utc>,
+}
+
 impl FeedStore {
     // ---- Message operations ----
 
@@ -188,6 +203,52 @@ impl FeedStore {
             params![chain_valid as i32, hash],
         )?;
         Ok(())
+    }
+
+    /// Per-author chain-gap summary (amendment §G.3 #2, #3). Returns
+    /// one row per author that has at least one message with
+    /// `chain_valid = 0` in the local store, carrying the count of
+    /// such messages + the timestamp of the oldest one.
+    ///
+    /// Feeds the Prometheus updater in Step 27, which writes
+    /// `egregore_chain_gap_count{author}` and
+    /// `egregore_chain_gap_oldest_seconds{author}` gauges from the
+    /// resulting rows. Authors with no chain_invalid messages are
+    /// omitted; operators rely on the absence of a label (or a
+    /// zero value on a label that was previously set) to distinguish
+    /// healthy from gap-bearing authors.
+    pub fn get_chain_gap_summary(&self) -> Result<Vec<ChainGapRow>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT author, COUNT(*) AS gap_count, MIN(timestamp) AS oldest
+             FROM messages
+             WHERE chain_valid = 0
+             GROUP BY author
+             ORDER BY author",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let author: String = row.get(0)?;
+                let count_i: i64 = row.get(1)?;
+                let oldest_s: String = row.get(2)?;
+                Ok((author, count_i, oldest_s))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        rows.into_iter()
+            .map(|(author, count_i, oldest_s)| {
+                let oldest = DateTime::parse_from_rfc3339(&oldest_s)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|e| EgreError::Config {
+                        reason: format!("invalid messages.timestamp: {oldest_s}: {e}"),
+                    })?;
+                Ok(ChainGapRow {
+                    author,
+                    gap_count: count_i as u64,
+                    oldest,
+                })
+            })
+            .collect()
     }
 
     /// Check if a message's chain is validated.
@@ -880,5 +941,118 @@ mod tests {
 
         assert_eq!(incoming, 1);
         assert_eq!(outgoing, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 2 Wave 5 Step 27 (amendment §G.3) — chain-gap summary.
+    // These tests pin the SQL projection that feeds the Prometheus
+    // `egregore_chain_gap_count{author}` and
+    // `egregore_chain_gap_oldest_seconds{author}` gauges.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn chain_gap_summary_empty_when_all_valid() {
+        // No chain_invalid messages in the store => summary is empty.
+        let store = FeedStore::open_memory().unwrap();
+        let m1 = make_test_message("@alice.ed25519", 1, None);
+        let m2 = make_test_message("@alice.ed25519", 2, Some("hash_@alice.ed25519_1"));
+        store.insert_message(&m1, true).unwrap();
+        store.insert_message(&m2, true).unwrap();
+
+        let summary = store.get_chain_gap_summary().unwrap();
+        assert!(
+            summary.is_empty(),
+            "all messages chain_valid => summary must be empty; got: {summary:?}"
+        );
+    }
+
+    #[test]
+    fn chain_gap_summary_reports_invalid_count_per_author() {
+        // Two authors, each with a mix of valid + invalid messages.
+        let store = FeedStore::open_memory().unwrap();
+        // Alice: one valid, two invalid.
+        store
+            .insert_message(&make_test_message("@alice.ed25519", 1, None), true)
+            .unwrap();
+        store
+            .insert_message(&make_test_message("@alice.ed25519", 5, None), false)
+            .unwrap();
+        store
+            .insert_message(&make_test_message("@alice.ed25519", 6, None), false)
+            .unwrap();
+        // Bob: one invalid.
+        store
+            .insert_message(&make_test_message("@bob.ed25519", 3, None), false)
+            .unwrap();
+
+        let summary = store.get_chain_gap_summary().unwrap();
+        assert_eq!(summary.len(), 2, "two authors with gaps => two rows");
+
+        let alice = summary
+            .iter()
+            .find(|r| r.author == "@alice.ed25519")
+            .expect("alice must appear");
+        assert_eq!(alice.gap_count, 2, "alice has two chain_invalid messages");
+
+        let bob = summary
+            .iter()
+            .find(|r| r.author == "@bob.ed25519")
+            .expect("bob must appear");
+        assert_eq!(bob.gap_count, 1, "bob has one chain_invalid message");
+    }
+
+    #[test]
+    fn chain_gap_summary_reports_oldest_timestamp_per_author() {
+        // Two invalid messages with distinct timestamps; summary must
+        // surface the OLDEST (min) for the oldest_seconds metric.
+        let store = FeedStore::open_memory().unwrap();
+
+        let older = Utc::now() - chrono::Duration::hours(2);
+        let newer = Utc::now() - chrono::Duration::minutes(5);
+        let mut m_old = make_test_message("@alice.ed25519", 10, None);
+        m_old.hash = "hash_@alice.ed25519_10".to_string();
+        m_old.timestamp = older;
+        let mut m_new = make_test_message("@alice.ed25519", 11, None);
+        m_new.hash = "hash_@alice.ed25519_11".to_string();
+        m_new.timestamp = newer;
+
+        store.insert_message(&m_old, false).unwrap();
+        store.insert_message(&m_new, false).unwrap();
+
+        let summary = store.get_chain_gap_summary().unwrap();
+        assert_eq!(summary.len(), 1);
+        let row = &summary[0];
+        assert_eq!(row.gap_count, 2);
+        // Allow minor sub-second drift due to rfc3339 round-trip.
+        assert!(
+            (row.oldest - older).num_seconds().abs() <= 1,
+            "oldest timestamp must be the older message; expected ~{older}, got {}",
+            row.oldest
+        );
+    }
+
+    #[test]
+    fn chain_gap_summary_promotes_when_predecessor_ingests() {
+        // Insert a gap message (chain_valid=false), assert summary has 1.
+        // Then flip chain_valid via `set_chain_valid`, assert the author
+        // drops out of the summary.
+        let store = FeedStore::open_memory().unwrap();
+        let gap = make_test_message("@alice.ed25519", 2, Some("missing-hash"));
+        store.insert_message(&gap, false).unwrap();
+
+        let before = store.get_chain_gap_summary().unwrap();
+        assert_eq!(before.len(), 1, "one author with a gap before promotion");
+        assert_eq!(before[0].gap_count, 1);
+
+        // Simulate predecessor arrival → promotion.
+        store
+            .set_chain_valid("hash_@alice.ed25519_2", true)
+            .unwrap();
+
+        let after = store.get_chain_gap_summary().unwrap();
+        assert!(
+            after.is_empty(),
+            "after promotion, author has zero gaps and drops out; got: {after:?}"
+        );
     }
 }

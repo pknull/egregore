@@ -227,7 +227,11 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "node_status.v1.json",
-        r#"{
+        // Raw string uses `r##"..."##` so the embedded `"#/$defs/..."`
+        // JSON-pointer references inside the schema do not terminate
+        // the Rust string literal early (the `"#` sequence would end
+        // a single-`#` raw string).
+        r##"{
   "content_type": "node_status",
   "version": 1,
   "description": "Operational status published by an egregore node",
@@ -284,11 +288,60 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
           "msgs_out_last_hour": { "type": "integer", "minimum": 0 }
         },
         "additionalProperties": false
-      }
+      },
+      "transport_health": { "$ref": "#/$defs/transport_health" }
     },
-    "additionalProperties": false
+    "additionalProperties": false,
+    "$defs": {
+      "transport_health": {
+        "type": "object",
+        "required": ["connected", "backend", "unreplicated_count", "inflight_publishes"],
+        "properties": {
+          "connected": { "type": "boolean" },
+          "backend": { "type": "string", "minLength": 1 },
+          "last_successful_publish": { "type": "string", "format": "date-time" },
+          "last_peer_contact": { "type": "string", "format": "date-time" },
+          "unreplicated_count": { "type": "integer", "minimum": 0 },
+          "inflight_publishes": { "type": "integer", "minimum": 0 },
+          "last_error": { "type": "string" },
+          "children": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/transport_health" }
+          },
+          "bridge_queues": { "$ref": "#/$defs/bridge_queues_health" }
+        },
+        "additionalProperties": false
+      },
+      "bridge_queues_health": {
+        "type": "object",
+        "required": [
+          "destination",
+          "depth_total",
+          "authors_backpressured",
+          "authors_active",
+          "backpressure_events_total",
+          "self_echo_total",
+          "ack_on_error_total",
+          "nats_redelivery_total"
+        ],
+        "properties": {
+          "destination": { "type": "string", "minLength": 1 },
+          "depth_total": { "type": "integer", "minimum": 0 },
+          "authors_backpressured": { "type": "integer", "minimum": 0 },
+          "authors_active": { "type": "integer", "minimum": 0 },
+          "backpressure_events_total": { "type": "integer", "minimum": 0 },
+          "self_echo_total": { "type": "integer", "minimum": 0 },
+          "oldest_queued_age_secs": { "type": "integer", "minimum": 0 },
+          "publish_in_flight_age_secs": { "type": "integer", "minimum": 0 },
+          "ack_on_error_total": { "type": "integer", "minimum": 0 },
+          "nats_redelivery_total": { "type": "integer", "minimum": 0 },
+          "last_error": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
   }
-}"#,
+}"##,
     ),
 ];
 

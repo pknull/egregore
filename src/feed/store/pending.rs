@@ -56,6 +56,18 @@ pub struct AuthorActivityRow {
     pub last_indexed_at: DateTime<Utc>,
 }
 
+/// Per-author row including the author's highest indexed
+/// `(author_seq, stream_seq)` alongside `last_indexed_at`. Feeds
+/// scry's `/v1/transport/bus/authors` endpoint (amendment §C.14).
+/// Distinct from `AuthorActivityRow` which is author-silence-only.
+#[derive(Debug, Clone)]
+pub struct BusAuthorSummaryRow {
+    pub author: String,
+    pub last_indexed_at: DateTime<Utc>,
+    pub author_seq: u64,
+    pub stream_seq: u64,
+}
+
 /// Stream identity marker (amendment §G.1). Persisted on first index
 /// population; compared against live `stream.info()` on startup.
 #[derive(Debug, Clone)]
@@ -305,6 +317,52 @@ impl FeedStore {
                 Ok(AuthorActivityRow {
                     author,
                     last_indexed_at,
+                })
+            })
+            .collect()
+    }
+
+    /// Per-author summary projecting `(author_seq, stream_seq,
+    /// last_indexed_at)` for the author's highest indexed seq pair.
+    /// Feeds scry's `/v1/transport/bus/authors` endpoint (amendment
+    /// §C.14). Ordered by `last_indexed_at DESC` so operators see the
+    /// most recently active authors first.
+    pub fn bus_author_seq_index_author_summary(&self) -> Result<Vec<BusAuthorSummaryRow>> {
+        let conn = self.conn();
+        // The subquery picks the row with the largest author_seq per
+        // author; we then join with the outer to read stream_seq +
+        // indexed_at from that same row. GROUP BY with MAX(..) +
+        // correlated scan keeps things in a single statement.
+        let mut stmt = conn.prepare(
+            "SELECT i.author, i.author_seq, i.stream_seq, i.indexed_at
+             FROM bus_author_seq_index i
+             INNER JOIN (
+                 SELECT author, MAX(author_seq) AS max_seq
+                 FROM bus_author_seq_index
+                 GROUP BY author
+             ) m ON m.author = i.author AND m.max_seq = i.author_seq
+             ORDER BY i.indexed_at DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let author: String = row.get(0)?;
+                let author_seq_i: i64 = row.get(1)?;
+                let stream_seq_i: i64 = row.get(2)?;
+                let indexed_s: String = row.get(3)?;
+                Ok((author, author_seq_i, stream_seq_i, indexed_s))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        rows.into_iter()
+            .map(|(author, aseq, sseq, s)| {
+                let last_indexed_at = parse_rfc3339(&s).ok_or_else(|| EgreError::Config {
+                    reason: format!("invalid bus_author_seq_index.indexed_at: {s}"),
+                })?;
+                Ok(BusAuthorSummaryRow {
+                    author,
+                    last_indexed_at,
+                    author_seq: aseq as u64,
+                    stream_seq: sseq as u64,
                 })
             })
             .collect()

@@ -1114,6 +1114,15 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(update_interval).await;
             }
         });
+
+        // Phase 2 Wave 5 Step 27 — transport + bridge + chain-gap
+        // gauges. Separate task from the db-size loop because it runs
+        // on a different cadence (30s vs 60s) and reads from two
+        // distinct subsystems (transport_health + store projections).
+        let transport_metrics_engine = engine.clone();
+        tokio::spawn(async move {
+            egregore::metrics::run_transport_metrics_updater(transport_metrics_engine).await;
+        });
     }
 
     if config.node_status_enabled {

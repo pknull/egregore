@@ -33,6 +33,7 @@ pub mod routes_publish;
 pub mod routes_retention;
 pub mod routes_schema;
 pub mod routes_topics;
+pub mod routes_transport;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -219,7 +220,18 @@ pub fn router_with_mcp(state: AppState, mcp_enabled: bool) -> Router {
             post(routes_blobs::upload_blob).layer(DefaultBodyLimit::max(100 * 1024 * 1024)), // 100 MB for blob uploads
         )
         .route("/v1/blobs/:hash", get(routes_blobs::download_blob))
-        .route("/v1/blobs/:hash/info", get(routes_blobs::blob_info));
+        .route("/v1/blobs/:hash/info", get(routes_blobs::blob_info))
+        // Phase 2 Wave 5 Step 26 — scry bridge panel data feeds
+        // (amendment §C.14). Both are read-only observability
+        // endpoints — no auth gate, CSRF-exempt since they're GET-only.
+        .route(
+            "/v1/transport/pending",
+            get(routes_transport::get_transport_pending),
+        )
+        .route(
+            "/v1/transport/bus/authors",
+            get(routes_transport::get_bus_authors),
+        );
 
     // Consumer groups API (advanced feature; off by default).
     let router = if state.config.consumer_groups_enabled {

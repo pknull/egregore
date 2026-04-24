@@ -26,6 +26,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use futures::stream::BoxStream;
+use futures::StreamExt;
 use parking_lot::RwLock;
 
 use crate::error::{EgreError, Result};
@@ -44,6 +45,23 @@ use crate::transport::trait_def::Transport;
 /// Wait interval between inflight-drain polls on shutdown. Short enough
 /// that shutdown is responsive; long enough to avoid a spin loop.
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Evaluate a [`TopicFilter`] against a message — mirrors the helper in
+/// `gossip.rs` so the semantics match across adapters. Invariant 6 permits
+/// superset delivery; a subset is a bug. Returning `true` is always safe.
+fn matches_filter(filter: &TopicFilter, msg: &Message) -> bool {
+    if let Some(authors) = filter.authors.as_ref() {
+        if !authors.iter().any(|a| a == &msg.author) {
+            return false;
+        }
+    }
+    if let Some(tags) = filter.tags.as_ref() {
+        if !tags.iter().any(|t| msg.tags.contains(t)) {
+            return false;
+        }
+    }
+    true
+}
 
 /// `Transport` adapter wrapping NATS JetStream.
 ///
@@ -305,6 +323,32 @@ impl BusTransport {
             }
         }
     }
+
+    /// Ack the NATS consumer message whose `hash` is `message_hash`.
+    /// Called by `CompositeTransport`'s egress after ALL destinations
+    /// have resolved (amendments §A.1 #5, §C.5). No-op if no pending
+    /// ack exists (e.g., the message was already acked or we're
+    /// acking a gossip-sourced message — gossip has no ack equivalent).
+    ///
+    /// Uses `remove()` to both drop the handle and call `.ack()` on it.
+    /// The `DashMap::remove` returns the `(K, V)` tuple on hit.
+    #[allow(dead_code)] // wired by CompositeTransport egress in Wave 3
+    pub async fn ack_after_publish(&self, message_hash: &str) -> Result<()> {
+        if let Some((_, nats_msg)) = self.pending_acks.remove(message_hash) {
+            nats_msg.ack().await.map_err(|_e| EgreError::Peer {
+                reason: "nats ack failed".to_string(),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Release the ack handle for `message_hash` WITHOUT acking. Called
+    /// on shutdown or error paths so NATS `ack_wait` expires and the
+    /// message is redelivered. Amendment §C.2.
+    #[allow(dead_code)] // wired by CompositeTransport egress in Wave 3
+    pub fn abandon_ack(&self, message_hash: &str) {
+        self.pending_acks.remove(message_hash);
+    }
 }
 
 #[async_trait]
@@ -319,11 +363,142 @@ impl Transport for BusTransport {
 
     async fn subscribe(
         &self,
-        _filter: TopicFilter,
+        filter: TopicFilter,
     ) -> Result<(SubscriptionHandle, BoxStream<'static, Message>)> {
-        // Wave 2 Step 10 — durable-local-ingest precondition + ack-handle
-        // map population + self-echo rule (amendments §C.2, §C.4, §C.9).
-        todo!("BusTransport::subscribe — Wave 2 Step 10")
+        // Amendments §C.2, §C.4, §C.9 — durable-local-ingest precondition
+        // before yielding, ack-handle retention, self-echo rule (ack but
+        // do not yield on DuplicateMessage), spawn_blocking for SQLite.
+        //
+        // Cancel shape matches GossipTransport: the returned handle owns
+        // a oneshot sender; dropping it fires the receiver, which the
+        // stream body races against the consumer's next message arrival.
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = SubscriptionHandle::from_cancel(cancel_tx);
+
+        // Clones moved into the 'static stream body. The consumer
+        // supports Clone (see pull::Consumer doc); we avoid taking
+        // ownership of self so BusTransport can hand out many concurrent
+        // subscriptions (e.g., composite ingress + a future observer
+        // panel). The pending_acks map is already wrapped in Arc<DashMap>
+        // on the struct so sharing across concurrent subscriptions Just
+        // Works.
+        let consumer = self.consumer.clone();
+        let engine = self.engine.clone();
+        let last_error = self.last_error.clone();
+        let pending_acks = self.pending_acks.clone();
+        // Note: `last_peer_contact` is not updated from the subscribe
+        // stream body here — it's only written by `publish_attempt` on
+        // successful PubAck. Inbound-traffic liveness is observable via
+        // `pending_acks.len()` + `TransportHealth.unreplicated_count`
+        // from Wave 2+ observability surfaces.
+
+        let stream = async_stream::stream! {
+            // Open the message stream. Errors here are fatal for this
+            // subscription — operators see the failure via last_error +
+            // the stream ending on the caller's next poll.
+            let mut messages = match consumer.messages().await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "bus: consumer.messages() failed");
+                    *last_error.write() = Some("bus consumer open error".to_string());
+                    return;
+                }
+            };
+
+            loop {
+                tokio::select! {
+                    biased;
+                    // Drop-cancel has priority — same shape as GossipTransport.
+                    _ = &mut cancel_rx => break,
+                    next = messages.next() => {
+                        let nats_msg = match next {
+                            None => break,
+                            Some(Err(e)) => {
+                                // Transient recv error — log + continue.
+                                // Killing the loop on every transient
+                                // error would make the subscription
+                                // fragile.
+                                tracing::warn!(
+                                    error = %e,
+                                    "bus: consumer recv error (transient)"
+                                );
+                                *last_error.write() = Some("bus consumer recv error".to_string());
+                                continue;
+                            }
+                            Some(Ok(m)) => m,
+                        };
+
+                        // 1. Deserialize. Malformed → ack + skip (don't
+                        //    let a bad payload cause redelivery loops).
+                        let decoded: Message = match serde_json::from_slice(&nats_msg.payload) {
+                            Ok(m) => m,
+                            Err(_e) => {
+                                // Auditor A2: short code, no payload bytes.
+                                *last_error.write() = Some("bus: malformed payload".to_string());
+                                let _ = nats_msg.ack().await;
+                                continue;
+                            }
+                        };
+
+                        // 2. Filter. Non-match → ack + skip (the consumer
+                        //    is filter_subject=egregore.feed.> by default;
+                        //    per-subscriber filters are applied here).
+                        if !matches_filter(&filter, &decoded) {
+                            let _ = nats_msg.ack().await;
+                            continue;
+                        }
+
+                        // 3. Durable local ingest (spawn_blocking per
+                        //    §C.9). This is the "durable-local-ingest
+                        //    precondition" from RFC 0002 §8.2 — we do
+                        //    not yield to the bridge until we can prove
+                        //    the message is safely stored locally.
+                        let engine_clone = engine.clone();
+                        let decoded_clone = decoded.clone();
+                        let ingest_result = tokio::task::spawn_blocking(
+                            move || engine_clone.ingest(&decoded_clone)
+                        ).await;
+
+                        match ingest_result {
+                            Ok(Ok(())) => {
+                                // Newly stored. Record the ack handle
+                                // keyed by hash (§C.12) BEFORE yielding,
+                                // so CompositeTransport's egress can
+                                // call ack_after_publish once the
+                                // cross-transport forward resolves.
+                                pending_acks.insert(decoded.hash.clone(), nats_msg);
+                                yield decoded;
+                            }
+                            Ok(Err(EgreError::DuplicateMessage { .. })) => {
+                                // §C.4 self-echo rule: the message is
+                                // already in local SQLite (we authored
+                                // it, or a prior redelivery landed it).
+                                // Ack so the broker stops redelivering;
+                                // do NOT yield — the bridge already has
+                                // it and yielding would trigger a
+                                // duplicate cross-transport forward.
+                                let _ = nats_msg.ack().await;
+                            }
+                            Ok(Err(_ingest_err)) => {
+                                // Unrecoverable ingest error (signature
+                                // invalid, schema fail, size cap).
+                                // Ack to break any redelivery loop on a
+                                // bad message. Auditor A2: short code.
+                                *last_error.write() = Some("bus: ingest rejected".to_string());
+                                let _ = nats_msg.ack().await;
+                            }
+                            Err(_join_err) => {
+                                *last_error.write() =
+                                    Some("bus: ingest blocking task failed".to_string());
+                                let _ = nats_msg.ack().await;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok((handle, Box::pin(stream)))
     }
 
     async fn request_from(

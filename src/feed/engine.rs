@@ -360,10 +360,8 @@ impl FeedEngine {
         let mut out: Vec<&'static str> = Vec::new();
         for t in guard.iter() {
             match t.health().backend {
-                "bus" => {
-                    if !out.contains(&"bus") {
-                        out.push("bus");
-                    }
+                "bus" if !out.contains(&"bus") => {
+                    out.push("bus");
                 }
                 "composite" => {
                     // Composite surfaces its children's backends via

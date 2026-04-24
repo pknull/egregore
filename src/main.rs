@@ -874,30 +874,33 @@ async fn main() -> anyhow::Result<()> {
     // aggregation sees it), and retain the concrete Arc for later wiring
     // (the retry scheduler calls `publish_attempt` directly, not via the
     // trait — amendment §C.10).
-    let bus_transport_arc: Option<Arc<egregore::transport::bus::BusTransport>> =
-        if let Some(bus_cfg) = config.bus.as_ref() {
-            let bus_cfg_arc = Arc::new(bus_cfg.clone());
-            match egregore::transport::bus::BusTransport::new(
-                bus_cfg_arc,
-                identity.clone(),
-                engine.clone(),
-            )
-            .await
-            {
-                Ok(bus) => {
-                    let bus_arc = Arc::new(bus);
-                    let bus_as_trait: Arc<dyn egregore::transport::Transport> = bus_arc.clone();
-                    engine.attach_transport(bus_as_trait);
-                    Some(bus_arc)
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "bus transport construction failed; continuing without bus");
-                    None
-                }
+    let bus_transport_arc: Option<Arc<egregore::transport::bus::BusTransport>> = if let Some(
+        bus_cfg,
+    ) =
+        config.bus.as_ref()
+    {
+        let bus_cfg_arc = Arc::new(bus_cfg.clone());
+        match egregore::transport::bus::BusTransport::new(
+            bus_cfg_arc,
+            identity.clone(),
+            engine.clone(),
+        )
+        .await
+        {
+            Ok(bus) => {
+                let bus_arc = Arc::new(bus);
+                let bus_as_trait: Arc<dyn egregore::transport::Transport> = bus_arc.clone();
+                engine.attach_transport(bus_as_trait);
+                Some(bus_arc)
             }
-        } else {
-            None
-        };
+            Err(e) => {
+                tracing::error!(error = %e, "bus transport construction failed; continuing without bus");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // RFC 0002 §4 Principle 7: emit WARN line if this node is running with
     // ≥ 2 transports (emergent bridge mode). No-op when `transport_count() < 2`.

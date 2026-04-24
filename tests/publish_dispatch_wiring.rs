@@ -306,8 +306,7 @@ async fn pushmanager_retirement_behavior_preserved() {
     .await
     .expect("dispatcher should route 10 publishes in < 3s (PushManager retirement parity)");
 
-    let published_hashes: Vec<String> =
-        gossip.published().iter().map(|m| m.hash.clone()).collect();
+    let published_hashes: Vec<String> = gossip.published().iter().map(|m| m.hash.clone()).collect();
     assert_eq!(published_hashes.len(), 10);
     for h in &expected_hashes {
         assert!(

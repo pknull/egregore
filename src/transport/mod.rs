@@ -20,7 +20,7 @@ pub mod subscription;
 pub mod trait_def;
 
 pub use self::filter::TopicFilter;
-pub use self::health::TransportHealth;
+pub use self::health::{BridgeQueuesHealth, TransportHealth};
 pub use self::subscription::SubscriptionHandle;
 pub use self::trait_def::Transport;
 
@@ -107,6 +107,7 @@ mod tests {
                     inflight_publishes: 0,
                     last_error: None,
                     children: vec![],
+                    bridge_queues: None,
                 },
             })
         }

@@ -720,6 +720,9 @@ impl Transport for BusTransport {
             inflight_publishes: self.inflight_publishes.load(Ordering::Acquire),
             last_error: self.last_error.read().clone(),
             children: vec![],
+            // Bus is a leaf transport; a composite wrapping it fills the
+            // bridge_queues field on the bus child's health snapshot.
+            bridge_queues: None,
         }
     }
 }

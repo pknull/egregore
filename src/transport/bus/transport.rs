@@ -196,6 +196,60 @@ impl BusTransport {
         &self.client
     }
 
+    /// Test-only constructor that bypasses NKey credential loading. Used
+    /// by the Step 13 integration smoke test against a plaintext NATS
+    /// testcontainer — production still goes through `new` + the full
+    /// `Config::validate` TLS/creds gauntlet.
+    ///
+    /// Exposed under `#[doc(hidden)]` + `pub` rather than `#[cfg(test)]`
+    /// because the integration smoke lives in `tests/` (a separate
+    /// crate) and cannot see `#[cfg(test)]`-gated items.
+    #[doc(hidden)]
+    pub async fn new_for_testing(
+        config: Arc<BusConfig>,
+        identity: Identity,
+        engine: Arc<FeedEngine>,
+    ) -> Result<Self> {
+        let client = async_nats::ConnectOptions::new()
+            .connect(&config.url)
+            .await
+            .map_err(|e| EgreError::Peer {
+                reason: format!("bus: connect failed: {e}"),
+            })?;
+
+        let jetstream = async_nats::jetstream::new(client.clone());
+        let stream = bootstrap_stream(&jetstream, &config).await?;
+
+        let consumer_name = config
+            .consumer_name
+            .clone()
+            .unwrap_or_else(|| derive_consumer_name(&identity));
+
+        let consumer = bootstrap_consumer(&stream, &config, &consumer_name).await?;
+
+        Ok(Self {
+            client,
+            jetstream,
+            consumer,
+            identity,
+            engine,
+            config,
+            pending_acks: Arc::new(DashMap::new()),
+            started: AtomicBool::new(false),
+            inflight_publishes: AtomicUsize::new(0),
+            last_successful_publish: RwLock::new(None),
+            last_peer_contact: RwLock::new(None),
+            last_error: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// Test-only accessor to inspect pending_acks length. Used by
+    /// Step 13 integration tests to assert ack-handle draining.
+    #[doc(hidden)]
+    pub fn pending_acks_len(&self) -> usize {
+        self.pending_acks.len()
+    }
+
     /// Trait-level publish — idempotent enqueue to `pending_forwarding`
     /// (amendment §G.2), then delegates to `publish_attempt` for the
     /// JetStream round trip.

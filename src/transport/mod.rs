@@ -11,6 +11,8 @@
 //! `GossipTransport` itself lands in Step 3 — see
 //! `Work/implementation/2026-04-21--phase-1-plan.md`.
 
+pub mod bus;
+pub mod composite;
 pub mod filter;
 pub mod gossip;
 pub mod health;

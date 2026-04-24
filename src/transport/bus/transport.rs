@@ -27,7 +27,7 @@
 //! (amendment §C.2, §C.12) holds NATS ack handles keyed by
 //! `message.hash`; `ack_after_publish` / `abandon_ack` drain it.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -136,6 +136,22 @@ pub struct BusTransport {
     /// Most recent adapter-level error. Wave 2+ writes PII-scrubbed
     /// short codes per security-auditor A2 guidance.
     last_error: Arc<RwLock<Option<String>>>,
+
+    /// Wave 4 Step 22 retcon: bus self-echo counter (amendment §C.4).
+    ///
+    /// Incremented by `subscribe`'s `DuplicateMessage` branch — a
+    /// bus-sourced message we already have locally (typically because
+    /// we authored it and received our own publish back through the
+    /// subscribe loop). Self-echo is a bus-layer concern, not a
+    /// composite-direction concern: the message never reaches a bridge
+    /// queue. Wave 3 originally placed this counter in
+    /// `DirectionState.self_echo_total`; Wave 4 moves it here so the
+    /// canonical write happens at the source of truth. The composite's
+    /// `compute_bridge_queues_health` reads this via `self_echo_total()`
+    /// when the child is a bus transport, falling back to
+    /// `DirectionState.self_echo_total` for non-bus backends (always
+    /// zero).
+    self_echo_total: Arc<AtomicU64>,
 }
 
 impl BusTransport {
@@ -185,6 +201,7 @@ impl BusTransport {
             last_successful_publish: RwLock::new(None),
             last_peer_contact: RwLock::new(None),
             last_error: Arc::new(RwLock::new(None)),
+            self_echo_total: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -240,6 +257,7 @@ impl BusTransport {
             last_successful_publish: RwLock::new(None),
             last_peer_contact: RwLock::new(None),
             last_error: Arc::new(RwLock::new(None)),
+            self_echo_total: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -248,6 +266,15 @@ impl BusTransport {
     #[doc(hidden)]
     pub fn pending_acks_len(&self) -> usize {
         self.pending_acks.len()
+    }
+
+    /// Snapshot of the bus self-echo counter (amendment §C.4). Incremented
+    /// once per `DuplicateMessage` observed on the subscribe path. The
+    /// composite's `BridgeQueuesHealth` aggregation reads this for bus
+    /// children; gossip children always surface zero (they have no
+    /// self-echo path).
+    pub fn self_echo_total(&self) -> u64 {
+        self.self_echo_total.load(Ordering::Relaxed)
     }
 
     /// Trait-level publish — idempotent enqueue to `pending_forwarding`
@@ -263,7 +290,7 @@ impl BusTransport {
     /// Called by: Wave 4's `publish_dispatcher` (reading
     /// `DispatchTicket` off the bounded mpsc). The SQLite enqueue runs
     /// on the blocking pool per egregore/CLAUDE.md.
-    pub(crate) async fn publish_internal(&self, msg: &Message) -> Result<()> {
+    pub async fn publish_internal(&self, msg: &Message) -> Result<()> {
         // Durable pre-enqueue (§G.2): INSERT OR IGNORE handles the
         // `publish_full`-pre-enqueued row without a duplicate-key error.
         let engine = self.engine.clone();
@@ -295,7 +322,11 @@ impl BusTransport {
     ///   stored error string — use short, stable codes),
     /// - stamp `last_error`,
     /// - return `Err(EgreError::Peer { .. })`.
-    pub(crate) async fn publish_attempt(&self, msg: &Message) -> Result<()> {
+    ///
+    /// `pub` surface: `main.rs` (bin crate) wires this into the retry
+    /// scheduler callback; the pending scheduler is spawned from there
+    /// and must bypass `publish`'s enqueue step per §C.10.
+    pub async fn publish_attempt(&self, msg: &Message) -> Result<()> {
         let subject = author_subject(&msg.author);
         let payload = serde_json::to_vec(msg)?;
 
@@ -451,6 +482,7 @@ impl Transport for BusTransport {
         let engine = self.engine.clone();
         let last_error = self.last_error.clone();
         let pending_acks = self.pending_acks.clone();
+        let self_echo_total = self.self_echo_total.clone();
         // Note: `last_peer_contact` is not updated from the subscribe
         // stream body here — it's only written by `publish_attempt` on
         // successful PubAck. Inbound-traffic liveness is observable via
@@ -542,6 +574,14 @@ impl Transport for BusTransport {
                                 // do NOT yield — the bridge already has
                                 // it and yielding would trigger a
                                 // duplicate cross-transport forward.
+                                //
+                                // Wave 4 Step 22 retcon: count the
+                                // self-echo on the bus transport itself
+                                // (canonical location — §C.4). The
+                                // composite's BridgeQueuesHealth
+                                // aggregation reads from here for bus
+                                // children.
+                                self_echo_total.fetch_add(1, Ordering::Relaxed);
                                 let _ = nats_msg.ack().await;
                             }
                             Ok(Err(_ingest_err)) => {

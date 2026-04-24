@@ -335,9 +335,14 @@ impl FeedEngine {
                 }
             }
         }
-        // No dispatcher wired = single-transport gossip-legacy path still
-        // works (PushManager reads event_tx). PushManager retirement is
-        // Step 23.
+        // No dispatcher wired = test harness or gossip-only deployment
+        // where `main.rs` did not wire a dispatch channel. The publish
+        // is still durably stored in `messages` and visible on the SSE
+        // event_tx; tests that don't care about wire fan-out leave the
+        // dispatcher unwired.
+        //
+        // Production single-transport gossip deployments DO wire the
+        // dispatcher (Wave 4 Step 22); PushManager was retired in Step 23.
 
         Ok(message)
     }

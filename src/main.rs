@@ -766,7 +766,17 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Create connection registry for push-based replication
+    // Create connection registry for push-based replication.
+    //
+    // Phase 2 Wave 4 Step 23: `PushManager` is retired. Its job (broadcasting
+    // locally-authored messages to connected peers) is now handled by the
+    // `publish_dispatcher` task spawned below, which reads DispatchTicket
+    // values off the engine's bounded mpsc and hands them to
+    // `GossipTransport::publish` — which in turn calls
+    // `registry.broadcast(msg)`. The registry itself is still needed (it
+    // holds the set of persistent peer connections that `broadcast` writes
+    // to), but the PushManager's broadcast-channel → registry.broadcast
+    // loop is no longer needed.
     let registry = if config.push_enabled {
         let reg = Arc::new(gossip::registry::ConnectionRegistry::new(
             config.max_persistent_connections,
@@ -775,13 +785,6 @@ async fn main() -> anyhow::Result<()> {
             max_connections = config.max_persistent_connections,
             "push-based replication enabled"
         );
-
-        // Start push manager to broadcast messages to persistent connections
-        let push_manager = gossip::push::PushManager::new(reg.clone(), engine.clone());
-        tokio::spawn(async move {
-            push_manager.run().await;
-        });
-
         Some(reg)
     } else {
         None

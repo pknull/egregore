@@ -120,6 +120,11 @@ tokio-test = "0.4"
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
 proptest = "1"
+# Phase 2 Wave 2 Step 13 — bus integration smoke test harness.
+# NATS testcontainer for end-to-end bus tests. The tests are gated by
+# `#[ignore]` so `cargo test` in environments without Docker does not
+# fail; CI runs them via `cargo test -- --ignored`.
+testcontainers = "0.24"
 
 [profile.release]
 opt-level = 3

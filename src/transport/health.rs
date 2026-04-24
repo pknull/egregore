@@ -48,6 +48,66 @@ pub struct TransportHealth {
     /// byte-for-byte compatibility with the pre-abstraction shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<TransportHealth>,
+
+    /// Phase 2 + composite only. Present on children of a `CompositeTransport`
+    /// to describe the INBOUND queue state for that child-as-destination
+    /// (RFC 0002 §8.4). Absent on leaf transports and on single-transport
+    /// deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_queues: Option<BridgeQueuesHealth>,
+}
+
+/// Per-direction aggregate metrics for a composite transport's destination
+/// (RFC 0002 §8.4).
+///
+/// Each `TransportHealth.children[j].bridge_queues` describes the queues
+/// holding messages going TO child `j` (from every other child). Operators
+/// watch `depth_total` + `authors_backpressured` + `oldest_queued_age_secs`
+/// to distinguish healthy-bursting from stuck-destination.
+///
+/// Serde: optional stuck-detection fields use `skip_serializing_if = "Option::is_none"`
+/// so the JSON stays quiet on idle directions. `last_error` MUST NOT carry
+/// Ed25519 pubkeys, hashes, or ciphertext — auditor A2.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BridgeQueuesHealth {
+    /// Destination transport backend: `"nats"`, `"gossip"`, `"mock"`.
+    pub destination: String,
+    /// Total messages across all per-author queues going to this destination.
+    pub depth_total: u64,
+    /// Count of author queues currently at or past the high watermark.
+    pub authors_backpressured: u64,
+    /// Count of author queues in this direction with len > 0.
+    pub authors_active: u64,
+    /// Monotonic counter of upstream-ingress block events since process start.
+    pub backpressure_events_total: u64,
+    /// Amendment §C.4: monotonic counter of bus self-echoes dropped at
+    /// ingest (DuplicateMessage returns on bus-sourced messages). Distinct
+    /// from backpressure_events.
+    pub self_echo_total: u64,
+
+    /// Age in seconds of the oldest queued message across all author queues
+    /// in this direction. `None` if no messages currently queued. A steady
+    /// high value with low `depth_total` is the signature of a hung
+    /// destination with shallow queues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_queued_age_secs: Option<u64>,
+    /// Age in seconds of the currently-in-flight `publish` call on this
+    /// direction, if any. Hung destinations surface here as a climbing
+    /// value past a sane threshold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_in_flight_age_secs: Option<u64>,
+    /// Monotonic counter of destination publishes that returned `Err(_)`
+    /// and were acked anyway per §8.2 ack-on-destination-error policy.
+    pub ack_on_error_total: u64,
+    /// Monotonic counter of NATS `ack_wait` expiries that caused redelivery
+    /// (bus-side destinations only; zero for gossip destinations).
+    pub nats_redelivery_total: u64,
+    /// Most recent direction-specific error, distinct from the aggregate
+    /// `TransportHealth.last_error`. Auditor A2: MUST NOT contain Ed25519
+    /// pubkeys, hashes, or ciphertext. Use short codes + destination/source
+    /// identifiers only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 impl TransportHealth {
@@ -113,6 +173,12 @@ impl TransportHealth {
             inflight_publishes,
             last_error,
             children,
+            // `bridge_queues` on the top-level aggregate is always None —
+            // the field describes per-destination queue state for a
+            // CompositeTransport's CHILDREN (each child's bridge_queues
+            // describes its inbound queues). The top-level aggregate
+            // itself has no queue state of its own.
+            bridge_queues: None,
         }
     }
 }
@@ -132,6 +198,7 @@ mod tests {
             inflight_publishes: 0,
             last_error: None,
             children: vec![],
+            bridge_queues: None,
         }
     }
 

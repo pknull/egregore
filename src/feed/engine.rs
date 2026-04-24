@@ -1515,6 +1515,7 @@ mod tests {
                     inflight_publishes: 0,
                     last_error: None,
                     children: vec![],
+                    bridge_queues: None,
                 },
             })
         }

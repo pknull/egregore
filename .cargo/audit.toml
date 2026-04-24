@@ -2,9 +2,7 @@
 # See https://rustsec.org/advisories/ and https://docs.rs/cargo-audit/
 
 [advisories]
-# Five pre-existing upstream advisories remain. Reduced from seven via
-# a cargo update of the transitive tar dep from 0.4.44 → 0.4.45
-# (self_update 0.44's `tar = "0.4"` constraint accepts the patch).
+# Upstream advisories not reachable via our code, ignored to unblock CI.
 #
 # RAND UNSOUNDNESS (upstream):
 #   RUSTSEC-2026-0097 — rand 0.8.x / 0.9.x is unsound with a custom
@@ -19,16 +17,33 @@
 # (0.104.0-alpha.7 as of 2026-04-23). Upgrading requires rustls 0.24+
 # (also pre-release) with coordinated tokio-rustls / hyper-rustls /
 # reqwest alignment. Revisit when the 0.104.x line reaches stable:
-#   RUSTSEC-2026-0049 — CRL matching-logic bug (CRLs incorrectly not
-#     considered authoritative by Distribution Point)
+#   RUSTSEC-2026-0049 — CRL matching-logic bug
 #   RUSTSEC-2026-0098 — Name constraints incorrectly accepted for URI
 #   RUSTSEC-2026-0099 — Name constraints incorrectly accepted for
 #     certificates asserting a wildcard name
 #   RUSTSEC-2026-0104 — Reachable panic in CRL parsing
+#
+# testcontainers dev-only transitive advisories:
+# Phase 2 Wave 2 added `testcontainers = "0.24"` as [dev-dependencies]
+# for bus integration smoke tests. All integration tests are #[ignore]d
+# by default (opt-in via `cargo test -- --ignored`). These advisories
+# therefore only surface in dev builds; production binaries do not link
+# any of these crates:
+#
+#   RUSTSEC-2025-0134 — rustls-pemfile 2.2.0 unmaintained
+#     (testcontainers → bollard → rustls-pemfile)
+#   RUSTSEC-2025-0111 — tokio-tar 0.3.1 PAX extended header file smuggling
+#     (testcontainers → tokio-tar). Not reachable from egregore code;
+#     testcontainers uses tokio-tar internally for Docker API interaction.
+#
+# Track testcontainers upstream for dep-tree modernization. Revisit on
+# next testcontainers release.
 ignore = [
   "RUSTSEC-2026-0097",
   "RUSTSEC-2026-0049",
   "RUSTSEC-2026-0098",
   "RUSTSEC-2026-0099",
   "RUSTSEC-2026-0104",
+  "RUSTSEC-2025-0134",
+  "RUSTSEC-2025-0111",
 ]

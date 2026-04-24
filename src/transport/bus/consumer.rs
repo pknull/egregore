@@ -48,13 +48,13 @@ use async_nats::jetstream::stream::{
 };
 use async_nats::jetstream::Context;
 
-/// Convenience alias for a pull-mode consumer carrying our config type.
-pub type PullConsumer = Consumer<pull_consumer::Config>;
-
 use crate::error::{EgreError, Result};
 
 use super::config::BusConfig;
 use super::subjects::WILDCARD_FILTER;
+
+/// Convenience alias for a pull-mode consumer carrying our config type.
+pub type PullConsumer = Consumer<pull_consumer::Config>;
 
 /// NATS `max_msg_size` binding — amendment §C.7. Content cap is 64 KB but
 /// the signed `Message` envelope adds up to ~4 KB of optional fields; 128
@@ -82,11 +82,11 @@ pub async fn bootstrap_stream(ctx: &Context, config: &BusConfig) -> Result<Strea
         ..Default::default()
     };
 
-    ctx.get_or_create_stream(stream_cfg).await.map_err(|e| {
-        EgreError::Peer {
+    ctx.get_or_create_stream(stream_cfg)
+        .await
+        .map_err(|e| EgreError::Peer {
             reason: format!("nats bootstrap_stream failed: {e}"),
-        }
-    })
+        })
 }
 
 /// Idempotently create or reuse a durable pull consumer on the given

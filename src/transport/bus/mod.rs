@@ -21,5 +21,5 @@ pub mod ingest;
 pub mod subjects;
 pub mod transport;
 
-// Re-exports land in Steps 2 and 5 when the types exist.
+pub use self::config::{BrokerConfigInput, BusConfig};
 pub use self::transport::BusTransport;

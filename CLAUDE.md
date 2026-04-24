@@ -56,6 +56,12 @@ src/
     subscription.rs     Opaque SubscriptionHandle (drop-cancels)
     health.rs           TransportHealth struct + aggregate helper for composite
     gossip.rs           GossipTransport adapter wrapping the gossip/ stack via delegation
+    bus/                BusTransport (NATS JetStream adapter) — Phase 2
+    composite/          CompositeTransport + DirectionState/AckBarrier — RFC 0002 §8
+  pending/
+    mod.rs              pending-forwarding module root (Phase 2 Wave 1)
+    scheduler.rs        run_retry_scheduler (bus-only, exponential backoff)
+    store.rs            row-type re-exports (CRUD lives in feed/store/pending.rs)
   gossip/
     connection.rs       SHS handshake over TCP, then Box Stream
     replication.rs      Have/Want/Messages/Done + Push/Subscribe/SubscribeAck protocol
@@ -65,7 +71,6 @@ src/
     peers.rs            Peer address type
     health.rs           Gossip-level health metrics
     registry.rs         ConnectionRegistry for persistent connections (DashMap)
-    push.rs             PushManager for broadcasting to connected peers (Phase 2: retired)
     persistent.rs       PersistentConnectionTask for handling push connections
     backoff.rs          Exponential backoff with jitter for reconnection
     bloom.rs            Bloom filter summaries for sync efficiency

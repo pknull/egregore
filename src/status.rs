@@ -11,6 +11,7 @@ use crate::feed::profile_lifecycle::{peer_profile_validity, SystemClock};
 use crate::gossip::health::{PeerHealthStatus, DIRECT_OBSERVATION_MARKER};
 use crate::gossip::registry::ConnectionRegistry;
 use crate::identity::{Identity, PublicId};
+use crate::transport::health::TransportHealth;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeStatusMessage {
@@ -23,6 +24,14 @@ pub struct NodeStatusMessage {
     pub peers: NodeStatusPeers,
     pub storage: NodeStatusStorage,
     pub throughput: NodeStatusThroughput,
+
+    /// Phase 2 Wave 5 Step 25: transport health from
+    /// `engine.transport_health()`. Optional; omitted from serialized
+    /// output when `None` (single-transport-less test harness OR
+    /// pre-Phase-2 consumer). Lock-stepped with the `node_status/v1`
+    /// JSON Schema's `transport_health` property (see `src/feed/schema.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_health: Option<TransportHealth>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,6 +179,12 @@ pub fn build_node_status(
         .collect();
     health.sort_by(|a, b| a.peer.cmp(&b.peer));
 
+    // Phase 2 Wave 5 Step 25: surface transport health on node_status
+    // alongside /v1/status. `transport_health()` returns None for test
+    // harnesses with no attached transport; the optional field is
+    // omitted from serialized output in that case.
+    let transport_health = engine.transport_health();
+
     Ok(NodeStatusMessage {
         msg_type: "node_status".to_string(),
         node: identity.public_id().0,
@@ -190,6 +205,7 @@ pub fn build_node_status(
             msgs_in_last_hour,
             msgs_out_last_hour,
         },
+        transport_health,
     })
 }
 

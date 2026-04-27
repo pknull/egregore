@@ -71,13 +71,9 @@ struct Cli {
     #[arg(long, default_value = "127.0.0.1")]
     gossip_bind: String,
 
-    /// Encrypt private key with passphrase
-    #[arg(long)]
-    passphrase: bool,
-
     /// Network key for network isolation
-    #[arg(long, default_value = "egregore-network-v1")]
-    network_key: String,
+    #[arg(long)]
+    network_key: Option<String>,
 
     /// Enable strict schema validation (reject unknown content types/schemas)
     #[arg(long)]
@@ -349,8 +345,8 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
     if matches.value_source("gossip_bind") == Some(ValueSource::CommandLine) {
         config.gossip_bind = cli.gossip_bind.clone();
     }
-    if matches.value_source("network_key") == Some(ValueSource::CommandLine) {
-        config.network_key = cli.network_key.clone();
+    if let Some(network_key) = &cli.network_key {
+        config.network_key = network_key.clone();
     }
     if matches.value_source("schema_strict") == Some(ValueSource::CommandLine) {
         config.schema_strict = cli.schema_strict;
@@ -560,11 +556,7 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(command) = &cli.command {
         let identity_dir = config.identity_dir();
-        let identity = if cli.passphrase {
-            load_encrypted_identity(&identity_dir)?
-        } else {
-            Identity::load_or_generate(&identity_dir)?
-        };
+        let identity = Identity::load_or_generate(&identity_dir)?;
         let store = FeedStore::open(&config.db_path())?;
         let ctx = cli_admin::CliContext {
             config: config.clone(),
@@ -585,11 +577,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Load or generate identity
     let identity_dir = config.identity_dir();
-    let identity = if cli.passphrase {
-        load_encrypted_identity(&identity_dir)?
-    } else {
-        Identity::load_or_generate(&identity_dir)?
-    };
+    let identity = Identity::load_or_generate(&identity_dir)?;
 
     tracing::info!(
         identity = %identity.public_id(),
@@ -1249,37 +1237,6 @@ async fn run_node_status_publisher(
 
         tokio::time::sleep(poll_interval).await;
     }
-}
-
-fn load_encrypted_identity(identity_dir: &std::path::Path) -> anyhow::Result<Identity> {
-    use ed25519_dalek::SigningKey;
-    use egregore::identity::encryption;
-
-    let encrypted_path = identity_dir.join("secret.key.enc");
-
-    if encrypted_path.exists() {
-        // Decrypt existing
-        let passphrase = prompt_passphrase("Enter passphrase: ")?;
-        let encrypted = encryption::load_encrypted(&encrypted_path)?;
-        let secret_bytes = encryption::decrypt_key(&encrypted, &passphrase)?;
-        let signing_key = SigningKey::from_bytes(&secret_bytes);
-        Ok(Identity { signing_key })
-    } else {
-        // Generate new and encrypt
-        let identity = Identity::generate();
-        let passphrase = prompt_passphrase("Set passphrase for new identity: ")?;
-        let encrypted = encryption::encrypt_key(&identity.secret_bytes(), &passphrase)?;
-        std::fs::create_dir_all(identity_dir)?;
-        encryption::save_encrypted(&encrypted, &encrypted_path)?;
-        // Save public key
-        let pub_path = identity_dir.join("public.key");
-        std::fs::write(pub_path, identity.public_id().0.as_bytes())?;
-        Ok(identity)
-    }
-}
-
-fn prompt_passphrase(prompt: &str) -> anyhow::Result<String> {
-    Ok(rpassword::prompt_password(prompt)?)
 }
 
 #[cfg(test)]

@@ -1,4 +1,3 @@
-pub mod encryption;
 pub mod keys;
 pub mod permissions;
 pub mod signing;

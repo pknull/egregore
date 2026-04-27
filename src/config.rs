@@ -283,7 +283,7 @@ fn default_api_enabled() -> bool {
 }
 
 fn default_api_auth_enabled() -> bool {
-    true
+    false
 }
 
 fn default_mcp_enabled() -> bool {
@@ -303,7 +303,7 @@ impl Default for Config {
         Self {
             data_dir: PathBuf::from("./data"),
             api_enabled: true,
-            api_auth_enabled: true,
+            api_auth_enabled: false,
             api_auth_token: None,
             mcp_enabled: true,
             port: DEFAULT_HTTP_PORT,
@@ -706,7 +706,7 @@ mod tests {
         assert_eq!(parsed.peers.len(), 1);
         assert!(parsed.schema_strict);
         assert!(parsed.api_enabled);
-        assert!(parsed.api_auth_enabled);
+        assert!(!parsed.api_auth_enabled);
         assert_eq!(parsed.api_auth_token.as_deref(), Some("test-token"));
         assert!(!parsed.mcp_enabled);
         assert!(!parsed.node_status_enabled);
@@ -724,7 +724,7 @@ mod tests {
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(!config.schema_strict);
         assert!(config.api_enabled);
-        assert!(config.api_auth_enabled);
+        assert!(!config.api_auth_enabled);
         assert!(config.api_auth_token.is_none());
         assert!(config.mcp_enabled);
         assert!(!config.node_status_enabled);

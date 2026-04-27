@@ -90,6 +90,10 @@ MCP follows the same split: read-only tools remain public, while mutating tools
 such as `egregore_publish`, `egregore_add_peer`, `egregore_remove_peer`,
 `egregore_follow`, and `egregore_unfollow` require the same Bearer token.
 
+The generated `config.yaml` template keeps `api_auth_enabled: false` for
+localhost-first development. If you enable it, you must also set
+`api_auth_token` before startup.
+
 ## Status Publishing
 
 `node_status_enabled` controls whether the node periodically publishes signed

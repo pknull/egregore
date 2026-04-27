@@ -31,7 +31,7 @@ The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`).
 
 | Module | Purpose | Key files |
 |--------|---------|-----------|
-| `identity/` | Ed25519 keypair, signing, Argon2id encryption | `keys.rs`, `signing.rs`, `encryption.rs` |
+| `identity/` | Ed25519 keypair, signing, private-key permission checks | `keys.rs`, `signing.rs`, `permissions.rs` |
 | `crypto/` | SHS handshake, Box Stream, Private Box | `handshake.rs`, `box_stream.rs`, `private_box.rs` |
 | `feed/` | Message lifecycle: publish, ingest, query, search | `engine.rs`, `models.rs`, `content_types.rs` |
 | `feed/profile_lifecycle.rs` | Profile TTL self-enforce, peer soft filter, refresh scheduler (Phase 1; RFC 0001 §11.2) | — |

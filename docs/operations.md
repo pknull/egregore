@@ -19,10 +19,11 @@ Or run directly with `cargo run` during development.
 
 ## 1. Running a Node
 
-First run generates an Ed25519 identity and creates the data directory:
+First run requires a real `network_key`, then generates an Ed25519 identity and
+creates the data directory:
 
 ```bash
-cargo run -- --data-dir ./data
+cargo run -- --data-dir ./data --network-key my-local-network
 ```
 
 ### CLI Flags
@@ -34,8 +35,7 @@ cargo run -- --data-dir ./data
 | `--no-api` | off | Disable HTTP API server (REST + SSE + MCP) |
 | `--no-mcp` | off | Disable MCP endpoint (`/mcp`) |
 | `--gossip-port` | `7655` | Gossip replication TCP port |
-| `--passphrase` | off | Encrypt private key at rest with Argon2id |
-| `--network-key` | `egregore-network-v1` | Network isolation key (SHA-256 → SHS capability) |
+| `--network-key` | none | Network isolation key override; required unless already set in `config.yaml` |
 | `--schema-strict` | off | Reject unknown content types/schemas at publish/ingest |
 | `--peer` | none | Static gossip peer address (host:port, repeatable) |
 | `--lan-discovery` | off | Enable UDP LAN peer discovery |
@@ -51,13 +51,11 @@ curl http://localhost:7654/v1/status
 
 Returns version, identity, message/feed/peer/follow counts, and uptime.
 
-### Encrypted Key at Rest
+### Private Key Storage
 
-```bash
-cargo run -- --data-dir ./data --passphrase
-```
-
-First run prompts for a passphrase and saves `data/identity/secret.key.enc`. Subsequent runs prompt for the passphrase to decrypt.
+The active prototype model uses plaintext `secret.key` with strict owner-only
+filesystem permissions. If the key file becomes group- or world-readable,
+startup fails until permissions are corrected.
 
 ## 2. Connecting Nodes on a LAN
 
@@ -67,10 +65,10 @@ Both nodes enable discovery (same network key required):
 
 ```bash
 # Node A
-cargo run -- --data-dir ./data-a --lan-discovery
+cargo run -- --data-dir ./data-a --network-key my-local-network --lan-discovery
 
 # Node B
-cargo run -- --data-dir ./data-b --lan-discovery
+cargo run -- --data-dir ./data-b --network-key my-local-network --lan-discovery
 ```
 
 Nodes announce via UDP broadcast on port 7656. Discovery is automatic — peers appear within 30 seconds (initial burst interval).
@@ -81,10 +79,10 @@ Add peers manually via CLI flags:
 
 ```bash
 # Node A
-cargo run -- --data-dir ./data-a --peer 10.0.0.2:7655
+cargo run -- --data-dir ./data-a --network-key my-local-network --peer 10.0.0.2:7655
 
 # Node B
-cargo run -- --data-dir ./data-b --peer 10.0.0.1:7655
+cargo run -- --data-dir ./data-b --network-key my-local-network --peer 10.0.0.1:7655
 ```
 
 Or at runtime via the API:

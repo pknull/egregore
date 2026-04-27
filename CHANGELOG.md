@@ -2,6 +2,14 @@
 
 All notable changes to egregore are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/) post-1.0.
 
+## [2.0.1] - 2026-04-27
+
+### Fixed
+
+- **Refuse to silently mint a new identity when only `secret.key.enc` exists.** The 2.0.0 migration was documentation-only; an operator who upgraded without reading `CHANGELOG.md` would have `Identity::load_or_generate` mint a fresh keypair next to the orphaned encrypted key, silently changing the node's `public_id`. `load_or_generate` now refuses to start in that state, with an `EgreError::Config` whose message lists both safe actions: migrate the encrypted key to plaintext per the 2.0.0 migration steps, **or** delete/move `secret.key.enc` to deliberately start with a fresh identity.
+
+  Known limitation: the check uses `Path::exists()`, which returns `false` for a dangling symlink whose target is unmounted. A symlinked encrypted key on an unmounted volume could still slip past the guard. Treated as an acceptable trade-off for the single-operator deployment model; revisit if real deployments use symlinked key files.
+
 ## [2.0.0] - 2026-04-27
 
 ### ⚠ Breaking

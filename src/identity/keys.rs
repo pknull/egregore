@@ -78,15 +78,38 @@ impl Identity {
     pub fn load_or_generate(identity_dir: &Path) -> Result<Self> {
         let key_path = identity_dir.join("secret.key");
         if key_path.exists() {
-            Self::load_unencrypted(&key_path)
-        } else {
-            let identity = Self::generate();
-            identity.save_unencrypted(&key_path)?;
-            // Also save public key for convenience
-            let pub_path = identity_dir.join("public.key");
-            std::fs::write(pub_path, identity.public_id().0.as_bytes())?;
-            Ok(identity)
+            return Self::load_unencrypted(&key_path);
         }
+
+        // Refuse to silently mint a new identity when an Argon2id-encrypted
+        // key from a pre-2.0 deployment exists alongside no plaintext key.
+        // Without this check, load_or_generate would happily generate a new
+        // keypair, the orphaned secret.key.enc would sit unused, and the
+        // node would publish under a different public ID — silent identity
+        // loss. See CHANGELOG.md (2.0.0) for migration steps.
+        let enc_path = identity_dir.join("secret.key.enc");
+        if enc_path.exists() {
+            return Err(EgreError::Config {
+                reason: format!(
+                    "found {} but no {}. Argon2id-encrypted keys are not supported in 2.0; \
+                     generating a new keypair would silently change this node's public ID. \
+                     Migration: on a pre-2.0 build, decrypt the key and save the plaintext \
+                     as {} with mode 0600. To intentionally start over with a fresh identity, \
+                     delete or move {} and restart. See CHANGELOG.md for details.",
+                    enc_path.display(),
+                    key_path.display(),
+                    key_path.display(),
+                    enc_path.display(),
+                ),
+            });
+        }
+
+        let identity = Self::generate();
+        identity.save_unencrypted(&key_path)?;
+        // Also save public key for convenience
+        let pub_path = identity_dir.join("public.key");
+        std::fs::write(pub_path, identity.public_id().0.as_bytes())?;
+        Ok(identity)
     }
 
     /// Get the raw secret key bytes (for Curve25519 conversion, etc.).
@@ -214,6 +237,65 @@ mod tests {
 
         // Same key loaded both times
         assert_eq!(id1.verifying_key(), id2.verifying_key());
+    }
+
+    #[test]
+    fn load_or_generate_refuses_when_only_encrypted_key_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity_dir = dir.path().join("identity");
+        std::fs::create_dir_all(&identity_dir).unwrap();
+
+        // Simulate a pre-2.0 deployment where only secret.key.enc exists.
+        let enc_path = identity_dir.join("secret.key.enc");
+        std::fs::write(&enc_path, b"ciphertext-not-decryptable-anymore").unwrap();
+
+        let result = Identity::load_or_generate(&identity_dir);
+        match result {
+            Err(EgreError::Config { reason }) => {
+                assert!(
+                    reason.contains("Argon2id-encrypted keys are not supported"),
+                    "error reason missing migration framing: {reason}"
+                );
+                assert!(
+                    reason.contains("delete or move"),
+                    "error reason missing fresh-start guidance: {reason}"
+                );
+            }
+            Err(other) => panic!("expected EgreError::Config, got: {other:?}"),
+            Ok(_) => panic!("expected guard to fire; identity was minted instead"),
+        }
+
+        // Guard must not have written either file: the orphan .enc is the
+        // only file we should see in the directory.
+        assert!(
+            !identity_dir.join("secret.key").exists(),
+            "guard fired but secret.key was still written"
+        );
+        assert!(
+            !identity_dir.join("public.key").exists(),
+            "guard fired but public.key was still written"
+        );
+    }
+
+    #[test]
+    fn load_or_generate_prefers_plaintext_when_both_files_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity_dir = dir.path().join("identity");
+        std::fs::create_dir_all(&identity_dir).unwrap();
+
+        // Plaintext is the contract; .enc is a stale leftover.
+        let plain = Identity::generate();
+        plain
+            .save_unencrypted(&identity_dir.join("secret.key"))
+            .unwrap();
+        std::fs::write(
+            identity_dir.join("secret.key.enc"),
+            b"stale-leftover-ciphertext",
+        )
+        .unwrap();
+
+        let loaded = Identity::load_or_generate(&identity_dir).unwrap();
+        assert_eq!(loaded.verifying_key(), plain.verifying_key());
     }
 
     #[test]

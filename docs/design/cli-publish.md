@@ -350,9 +350,11 @@ If the file content is not valid JSON, `build_content_json` falls through to the
 
 If the user passes a JSON array or scalar, `build_content_json` returns it as-is (no "type" injection since there is no object to inject into). Schema validation in the engine will catch structurally invalid content if strict mode is enabled.
 
-### Encrypted identity (--passphrase)
+### Private key storage
 
-The existing `--passphrase` flag is handled in `main.rs` before dispatching to `cli_admin::handle_command`. The publish subcommand inherits this path automatically. If `--passphrase` is set, the user is prompted for their passphrase, the key is decrypted, and it is passed to `CliContext` like any other command.
+The active prototype model does not route publish through a separate encrypted
+identity path. Administrative commands load the node's plaintext `secret.key`
+with strict owner-only permission checks.
 
 ### Key has been rotated
 

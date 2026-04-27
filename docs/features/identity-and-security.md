@@ -6,7 +6,7 @@ This feature defines:
 
 - Node identity (`@<base64>.ed25519`)
 - Network isolation boundary (`network_key`)
-- Optional private-key encryption at rest (`--passphrase`)
+- Plaintext private-key storage with strict owner-only permissions
 
 ## When To Use It
 
@@ -21,13 +21,7 @@ Use this when you need to:
 Generate identity and run normally:
 
 ```bash
-cargo run -- --data-dir ./data
-```
-
-Encrypt private key at rest:
-
-```bash
-cargo run -- --data-dir ./data --passphrase
+cargo run -- --data-dir ./data --network-key my-local-network
 ```
 
 Run a private network (non-default key):
@@ -46,7 +40,6 @@ curl http://localhost:7654/v1/identity
 
 | Flag | Purpose |
 |---|---|
-| `--passphrase` | Encrypt/decrypt private key at rest |
 | `--network-key <key>` | Set gossip network trust boundary |
 
 ## `config.yaml` Configuration
@@ -63,6 +56,6 @@ curl http://localhost:7654/v1/identity
 
 ## Documentation Gaps
 
-1. Default `network_key` is public (`egregore-network-v1`); production guidance exists, but automated enforcement does not.
+1. There is no operator playbook yet for rotating `network_key` across an existing mesh without partitioning it.
 2. HTTP layer auth/TLS is not configured in-process; security relies on localhost binding and external edge controls.
 3. Key rotation procedures are not documented as an operator playbook.

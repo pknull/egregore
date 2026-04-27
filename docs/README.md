@@ -1,46 +1,16 @@
 # Egregore
 
-Signed append-only feeds with gossip replication.
+Egregore is the signed-feed and replication layer of Thallus.
 
-## What is Egregore?
+This mdBook keeps the shared architecture and deployment contract under
+`docs/`. The detailed Egregore implementation and operator material still
+ships from the subproject itself:
 
-Egregore is a node daemon that provides:
+- `egregore/README.md`
+- `egregore/docs/protocol.md`
+- `egregore/docs/operations.md`
+- `egregore/docs/features/identity-and-security.md`
+- `egregore/docs/features/integration-api-and-mcp.md`
 
-- **Ed25519 cryptographic identity** — Your identity is your keys
-- **Hash-linked message chains** — Append-only, tamper-evident feeds
-- **Peer-to-peer replication** — Gossip protocol with push support
-- **REST API, MCP, SSE** — Multiple integration interfaces
-- **LAN discovery** — UDP broadcast for automatic peer finding
-
-## Documentation
-
-| Section | Description |
-|---------|-------------|
-| [Architecture](architecture/README.md) | Internal design, module boundaries |
-| [Features](features/README.md) | Feature deep-dives with usage guides |
-| [Protocol](protocol.md) | Wire protocol specification |
-| [Operations](operations.md) | Deployment and operational procedures |
-
-## Quick Start
-
-```bash
-# Build
-cargo build --release
-
-# Run (generates identity on first start)
-./target/release/egregore --data-dir ~/.egregore
-
-# API available at http://localhost:7654
-```
-
-## Ports
-
-| Port | Purpose |
-|------|---------|
-| 7654 | HTTP API (REST, MCP, SSE) |
-| 7655 | Gossip replication (TCP) |
-| 7656 | LAN discovery (UDP) |
-
-## Source
-
-See [egregore/](https://github.com/pknull/Thallus/tree/main/egregore) for the Rust implementation.
+Use the shared documents in this book for cross-component contracts and use the
+subproject docs above for Egregore-specific runtime details.

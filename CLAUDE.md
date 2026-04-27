@@ -32,7 +32,7 @@ src/
   identity/
     keys.rs           Ed25519 keypair, Ed25519-to-X25519 conversion
     signing.rs        Sign/verify operations
-    encryption.rs     Argon2id key encryption at rest
+    permissions.rs    private-key permission validation
   crypto/
     handshake.rs      Secret Handshake (SHS) protocol
     box_stream.rs     Box Stream encrypted framing

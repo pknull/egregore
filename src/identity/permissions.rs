@@ -32,6 +32,11 @@ pub fn secure_private_key(path: &Path) -> Result<()> {
     }
 }
 
+/// Validate that a plaintext private key is not accessible to group/other.
+pub fn validate_private_key(path: &Path) -> Result<()> {
+    validate_private_key_impl(path)
+}
+
 #[cfg(unix)]
 fn secure_private_key_impl(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -39,6 +44,28 @@ fn secure_private_key_impl(path: &Path) -> std::io::Result<()> {
     let mut perms = std::fs::metadata(path)?.permissions();
     perms.set_mode(0o600);
     std::fs::set_permissions(path, perms)
+}
+
+#[cfg(unix)]
+fn validate_private_key_impl(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(crate::error::EgreError::Config {
+            reason: format!(
+                "private key {} has insecure permissions {:o}; expected owner-only access",
+                path.display(),
+                mode
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_private_key_impl(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -110,6 +137,20 @@ mod tests {
             // Verify mode is now 0600
             let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
+        }
+
+        #[test]
+        fn validate_rejects_group_readable_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let key_path = dir.path().join("test.key");
+
+            std::fs::write(&key_path, b"secret").unwrap();
+            let mut perms = std::fs::metadata(&key_path).unwrap().permissions();
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&key_path, perms).unwrap();
+
+            let err = validate_private_key(&key_path).expect_err("permissions must be rejected");
+            assert!(err.to_string().contains("insecure permissions"));
         }
     }
 }

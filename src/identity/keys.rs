@@ -6,8 +6,7 @@
 //! libsodium's crypto_sign_ed25519_sk_to_curve25519).
 //!
 //! Public IDs use SSB wire format: `@<base64-pubkey>.ed25519` (53 chars).
-//! Key storage: raw 32-byte file (`secret.key`) or Argon2id-encrypted JSON
-//! (`secret.key.enc`). See `encryption.rs` for the encrypted variant.
+//! Key storage: raw 32-byte file (`secret.key`) with owner-only permissions.
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -64,6 +63,7 @@ impl Identity {
 
     /// Load private key from unencrypted file.
     pub fn load_unencrypted(path: &Path) -> Result<Self> {
+        super::permissions::validate_private_key(path)?;
         let bytes = std::fs::read(path).map_err(|_| EgreError::IdentityNotFound {
             path: path.display().to_string(),
         })?;

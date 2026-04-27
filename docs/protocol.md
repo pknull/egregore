@@ -54,24 +54,9 @@ let x25519_public = ed25519_verifying_key.to_montgomery().to_bytes();
 
 ### 1.3 Key Storage
 
-Private keys may be encrypted at rest using Argon2id:
-
-```
-salt: 16 random bytes
-key = Argon2id(passphrase, salt, m=64MB, t=3, p=1)
-nonce: 12 random bytes
-ciphertext = ChaCha20-Poly1305(key, nonce, signing_key_bytes)
-
-Storage format (JSON):
-{
-  "encrypted": true,
-  "salt": "<base64>",
-  "nonce": "<base64>",
-  "ciphertext": "<base64>"
-}
-```
-
-Unencrypted storage is also supported for automated deployments.
+Private keys are stored as plaintext `secret.key` files in the active
+prototype model. Those files must remain owner-only on disk; startup rejects
+overly broad permissions rather than silently continuing.
 
 **File permissions:** Private key files MUST be mode 0600 (owner read/write only).
 
@@ -815,7 +800,7 @@ CREATE TABLE group_offsets (
 | Key exchange | X25519 (ephemeral) |
 | Symmetric encryption | ChaCha20-Poly1305 |
 | Hashing | SHA-256 |
-| Key derivation (encryption at rest) | Argon2id |
+| Key storage hardening | Owner-only file permissions |
 | HMAC | HMAC-SHA256 |
 
 ### 11.3 Attack Mitigations

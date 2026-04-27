@@ -176,12 +176,12 @@ impl Transport for CompositeTransport {
     /// traffic goes through the ingress→egress pipeline (Steps 17+18), not
     /// through this method.
     ///
-    /// Aggregation: `Ok(())` iff every child returned `Ok`. On any failure
-    /// we surface a compound error naming the first failing child; the
-    /// aggregate `TransportHealth.last_error` carries the per-child
-    /// detail. We do NOT stop fanning out on the first error — partial
-    /// delivery (to the children that succeeded) is Invariant 3's
-    /// at-least-once posture in action.
+    /// Aggregation: best-effort fanout. Once the message has been accepted
+    /// and durably stored by the local engine, child transport errors are
+    /// surfaced through health / backlog / retry paths rather than as a
+    /// synchronous publish failure. We do NOT stop fanning out on the first
+    /// error — partial delivery (to the children that succeeded) is
+    /// Invariant 3's at-least-once posture in action.
     async fn publish(&self, msg: &Message) -> Result<()> {
         let futures = self
             .children
@@ -195,19 +195,24 @@ impl Transport for CompositeTransport {
             .enumerate()
             .filter_map(|(i, r)| r.err().map(|e| (i, e)))
             .collect();
-        if errors.is_empty() {
-            Ok(())
-        } else {
+
+        if !errors.is_empty() {
             let total = self.children.len();
             let failed = errors.len();
-            let (first_idx, first_err) = &errors[0];
-            Err(EgreError::Peer {
-                reason: format!(
-                    "composite publish: {failed} of {total} children failed (first child \
-                     {first_idx}: {first_err})"
-                ),
-            })
+            let first = errors
+                .first()
+                .map(|(idx, err)| format!("first child {idx}: {err}"))
+                .unwrap_or_else(|| "no child details".to_string());
+            tracing::warn!(
+                total_children = total,
+                failed_children = failed,
+                message_hash = %msg.hash,
+                summary = %first,
+                "composite publish fanout had child errors; local publish remains accepted"
+            );
         }
+
+        Ok(())
     }
 
     /// Merge-subscribe across every child.
@@ -804,7 +809,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_reports_compound_error_when_one_fails() {
+    async fn publish_is_best_effort_when_one_child_fails() {
         let mock_a = MockChild::new();
         let mock_b = MockChild::new();
         mock_b.set_publish_error("simulated bus publish failure");
@@ -816,28 +821,24 @@ mod tests {
         ])
         .unwrap();
         let msg = sample_message("@alice.ed25519", 1);
-        let err = composite
+        composite
             .publish(&msg)
             .await
-            .expect_err("mock_b error must surface");
-        let msg_str = format!("{err}");
-        assert!(
-            msg_str.contains("1 of 3 children failed"),
-            "compound error must name count; got: {msg_str}"
-        );
-        assert!(
-            msg_str.contains("child 1"),
-            "compound error must name failing index; got: {msg_str}"
-        );
-        // Even on compound error, the children that succeeded did receive
-        // the publish — at-least-once (Invariant 3) partial fan-out is
-        // intentional.
+            .expect("composite publish should stay best-effort");
+        // Even with one child failure, the children that succeeded did
+        // receive the publish — at-least-once (Invariant 3) partial
+        // fan-out is intentional.
         assert_eq!(
             mock_a.published().len(),
             1,
             "successful children still receive the publish"
         );
         assert_eq!(mock_c.published().len(), 1);
+        assert_eq!(
+            mock_b.published().len(),
+            1,
+            "the failing child should still be attempted once"
+        );
     }
 
     #[tokio::test]

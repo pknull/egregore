@@ -706,7 +706,7 @@ mod tests {
         assert_eq!(parsed.peers.len(), 1);
         assert!(parsed.schema_strict);
         assert!(parsed.api_enabled);
-        assert!(!parsed.api_auth_enabled);
+        assert!(parsed.api_auth_enabled);
         assert_eq!(parsed.api_auth_token.as_deref(), Some("test-token"));
         assert!(!parsed.mcp_enabled);
         assert!(!parsed.node_status_enabled);

@@ -46,43 +46,41 @@ pub async fn get_feed(
     let identity = state.identity.clone();
     let include_self = params.include_self.unwrap_or(false);
     let self_id = state.identity.public_id();
+    let limit = params.limit;
+    let offset = params.offset;
 
-    let result = tokio::task::spawn_blocking(move || {
-        engine.query(&FeedQuery {
-            author: None,
-            exclude_author: if include_self { None } else { Some(self_id) },
-            content_type: params.content_type,
-            trace_id: params.trace_id,
-            tag: params.tag,
-            relates: params.relates,
-            limit: params.limit,
-            offset: params.offset,
-            ..Default::default()
-        })
-    })
-    .await;
+    let msgs = match response::run_blocking(
+        move || {
+            engine.query(&FeedQuery {
+                author: None,
+                exclude_author: if include_self { None } else { Some(self_id) },
+                content_type: params.content_type,
+                trace_id: params.trace_id,
+                tag: params.tag,
+                relates: params.relates,
+                limit,
+                offset,
+                ..Default::default()
+            })
+        },
+        "failed to query feed",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
-    match result {
-        Ok(Ok(msgs)) => {
-            let msgs: Vec<Message> = msgs
-                .into_iter()
-                .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
-                .collect();
-            let meta = response::ApiMetadata {
-                total: None,
-                limit: params.limit,
-                offset: params.offset,
-            };
-            response::ok_with_metadata(msgs, meta).into_response()
-        }
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to query feed",
-        )
-        .into_response(),
-    }
+    let msgs: Vec<Message> = msgs
+        .into_iter()
+        .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
+        .collect();
+    let meta = response::ApiMetadata {
+        total: None,
+        limit,
+        offset,
+    };
+    response::ok_with_metadata(msgs, meta).into_response()
 }
 
 pub async fn get_feed_by_author(
@@ -93,34 +91,30 @@ pub async fn get_feed_by_author(
     let engine = state.engine.clone();
     let identity = state.identity.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        engine.query(&FeedQuery {
-            author: Some(PublicId(author)),
-            content_type: params.content_type,
-            trace_id: params.trace_id,
-            limit: params.limit,
-            offset: params.offset,
-            ..Default::default()
-        })
-    })
-    .await;
+    let msgs = match response::run_blocking(
+        move || {
+            engine.query(&FeedQuery {
+                author: Some(PublicId(author)),
+                content_type: params.content_type,
+                trace_id: params.trace_id,
+                limit: params.limit,
+                offset: params.offset,
+                ..Default::default()
+            })
+        },
+        "failed to query feed",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
-    match result {
-        Ok(Ok(msgs)) => {
-            let msgs: Vec<Message> = msgs
-                .into_iter()
-                .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
-                .collect();
-            response::ok(msgs).into_response()
-        }
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to query feed",
-        )
-        .into_response(),
-    }
+    let msgs: Vec<Message> = msgs
+        .into_iter()
+        .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
+        .collect();
+    response::ok(msgs).into_response()
 }
 
 pub async fn get_insights(
@@ -130,33 +124,29 @@ pub async fn get_insights(
     let engine = state.engine.clone();
     let identity = state.identity.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        engine.query(&FeedQuery {
-            content_type: Some("insight".to_string()),
-            trace_id: params.trace_id,
-            limit: params.limit,
-            offset: params.offset,
-            ..Default::default()
-        })
-    })
-    .await;
+    let msgs = match response::run_blocking(
+        move || {
+            engine.query(&FeedQuery {
+                content_type: Some("insight".to_string()),
+                trace_id: params.trace_id,
+                limit: params.limit,
+                offset: params.offset,
+                ..Default::default()
+            })
+        },
+        "failed to query insights",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
-    match result {
-        Ok(Ok(msgs)) => {
-            let msgs: Vec<Message> = msgs
-                .into_iter()
-                .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
-                .collect();
-            response::ok(msgs).into_response()
-        }
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to query insights",
-        )
-        .into_response(),
-    }
+    let msgs: Vec<Message> = msgs
+        .into_iter()
+        .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
+        .collect();
+    response::ok(msgs).into_response()
 }
 
 pub async fn search_insights(
@@ -177,24 +167,21 @@ pub async fn search_insights(
         .into_response();
     }
 
-    let result = tokio::task::spawn_blocking(move || engine.search(&query_text, limit)).await;
+    let msgs = match response::run_blocking(
+        move || engine.search(&query_text, limit),
+        "failed to search insights",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
-    match result {
-        Ok(Ok(msgs)) => {
-            let msgs: Vec<Message> = msgs
-                .into_iter()
-                .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
-                .collect();
-            response::ok(msgs).into_response()
-        }
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to search insights",
-        )
-        .into_response(),
-    }
+    let msgs: Vec<Message> = msgs
+        .into_iter()
+        .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
+        .collect();
+    response::ok(msgs).into_response()
 }
 
 pub async fn get_message_by_hash(
@@ -204,23 +191,25 @@ pub async fn get_message_by_hash(
     let engine = state.engine.clone();
     let identity = state.identity.clone();
 
-    let result = tokio::task::spawn_blocking(move || engine.get_message(&hash)).await;
+    let msg = match response::run_blocking(
+        move || engine.get_message(&hash),
+        "failed to retrieve message",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
-    match result {
-        Ok(Ok(Some(msg))) => {
-            response::ok(crate::feed::private_box::decrypt_or_passthrough(&identity, msg)).into_response()
+    match msg {
+        Some(msg) => {
+            response::ok(crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
+                .into_response()
         }
-        Ok(Ok(None)) => response::err::<()>(
+        None => response::err::<()>(
             axum::http::StatusCode::NOT_FOUND,
             "NOT_FOUND",
             "message not found",
-        )
-        .into_response(),
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to retrieve message",
         )
         .into_response(),
     }

@@ -30,7 +30,6 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{EgreError, Result};
 use crate::feed::models::Message;
 use crate::identity::PublicId;
-use crate::transport::bus::BusTransport;
 use crate::transport::filter::TopicFilter;
 use crate::transport::health::TransportHealth;
 use crate::transport::subscription::SubscriptionHandle;
@@ -40,39 +39,21 @@ use super::direction::{AckBarrier, DirectionState};
 
 /// How a child transport is attached to the composite.
 ///
-/// The composite cannot downcast `Arc<dyn Transport>` to `Arc<BusTransport>`
-/// at construction time (trait object erasure), but the egress task needs
-/// the concrete bus handle to call `ack_after_publish` on final-destination
-/// resolution. Callers (Wave 4's `main.rs`) still have the concrete type
-/// when they build the composite, so they pass both handles through
-/// `ChildSpec`. Non-bus children leave `bus_handle = None`.
+/// `ack_after_publish` and `self_echo_total` are now trait methods with
+/// default no-op / default-zero implementations; bus-specific concerns are
+/// resolved through trait dispatch on `Arc<dyn Transport>`, so the composite
+/// no longer needs to retain a parallel concrete bus handle.
 pub struct ChildSpec {
     /// The transport as a trait object — used for `publish`, `subscribe`,
-    /// `request_from`, `start`, `shutdown`, `health`.
+    /// `request_from`, `start`, `shutdown`, `health`, and the composite-only
+    /// extension hooks `ack_after_publish` / `self_echo_total`.
     pub transport: Arc<dyn Transport>,
-    /// When the child is a `BusTransport`, the concrete handle is retained
-    /// here so `egress` can call `ack_after_publish(hash)` after a
-    /// bus-sourced message has resolved against every destination. `None`
-    /// for gossip and other non-bus children.
-    pub bus_handle: Option<Arc<BusTransport>>,
 }
 
 impl ChildSpec {
-    /// Construct a gossip-style (no-ack) child spec.
-    pub fn gossip(transport: Arc<dyn Transport>) -> Self {
-        Self {
-            transport,
-            bus_handle: None,
-        }
-    }
-
-    /// Construct a bus child spec — the concrete handle is required for
-    /// the egress → ack_after_publish path.
-    pub fn bus(transport: Arc<dyn Transport>, bus_handle: Arc<BusTransport>) -> Self {
-        Self {
-            transport,
-            bus_handle: Some(bus_handle),
-        }
+    /// Construct a child spec from any `Transport` implementation.
+    pub fn new(transport: Arc<dyn Transport>) -> Self {
+        Self { transport }
     }
 }
 
@@ -84,13 +65,10 @@ impl ChildSpec {
 /// the `Transport` trait only.
 #[allow(dead_code)] // consumed in Steps 16–20 (publish, ingress, egress, start, shutdown, health)
 pub struct CompositeTransport {
-    /// Child transports as trait objects. Index = `TransportId`.
+    /// Child transports as trait objects. Index = `TransportId`. Bus-specific
+    /// hooks (`ack_after_publish`, `self_echo_total`) are dispatched through
+    /// the trait so no parallel concrete handle is retained.
     pub(crate) children: Vec<Arc<dyn Transport>>,
-
-    /// Concrete bus handles parallel to `children`. `bus_children[i]` is
-    /// `Some(bus)` iff child `i` is a bus transport. Populated from
-    /// `ChildSpec.bus_handle` at construction.
-    pub(crate) bus_children: Vec<Option<Arc<BusTransport>>>,
 
     /// One `DirectionState` per child. `directions[j]` holds queues for
     /// messages going TO child `j` (from every `i != j`).
@@ -144,19 +122,14 @@ impl CompositeTransport {
                 ),
             });
         }
-        let mut children = Vec::with_capacity(specs.len());
-        let mut bus_children = Vec::with_capacity(specs.len());
-        for spec in specs {
-            children.push(spec.transport);
-            bus_children.push(spec.bus_handle);
-        }
+        let children: Vec<Arc<dyn Transport>> =
+            specs.into_iter().map(|spec| spec.transport).collect();
         let directions = (0..children.len())
             .map(|_| Arc::new(DirectionState::new()))
             .collect();
 
         Ok(Self {
             children,
-            bus_children,
             directions,
             started: AtomicBool::new(false),
             cancel: CancellationToken::new(),
@@ -386,7 +359,7 @@ impl Transport for CompositeTransport {
 
         let num_children = self.children.len();
         let directions_arc = Arc::new(self.directions.clone());
-        let bus_children_arc = Arc::new(self.bus_children.clone());
+        let children_arc = Arc::new(self.children.clone());
 
         // 2. Spawn one ingress task per child (source).
         let mut ingress_handles = Vec::with_capacity(num_children);
@@ -417,10 +390,10 @@ impl Transport for CompositeTransport {
             let dest = child.clone();
             let dir = self.directions[j].clone();
             let barriers = self.ack_barriers.clone();
-            let bus_children = bus_children_arc.clone();
+            let children = children_arc.clone();
             let cancel = self.cancel.clone();
             egress_handles.push(tokio::spawn(async move {
-                super::egress::run_egress(dest_id, dest, dir, barriers, bus_children, cancel).await;
+                super::egress::run_egress(dest_id, dest, dir, barriers, children, cancel).await;
             }));
         }
         *self.egress_handles.lock().await = Some(egress_handles);
@@ -523,15 +496,13 @@ impl Transport for CompositeTransport {
             .map(|(j, child)| {
                 let mut child_health = child.health();
                 let destination = child_health.backend;
-                // Wave 4 Step 22 retcon: bus children surface their
-                // canonical self_echo_total counter via the bus handle;
-                // gossip children fall back to `DirectionState`'s
-                // (always-zero) counter.
-                let bus_handle = self.bus_children[j].as_ref();
+                // Wave 4 Step 22 retcon: self-echo lives on the bus adapter
+                // itself (amendment §C.4). The trait's default returns 0
+                // for non-bus children, so the call is unconditional.
                 child_health.bridge_queues = Some(super::health::compute_bridge_queues_health(
                     &self.directions[j],
                     destination,
-                    bus_handle,
+                    Some(child.as_ref() as &dyn Transport),
                 ));
                 child_health
             })
@@ -742,7 +713,7 @@ mod tests {
         let empty = CompositeTransport::new(vec![]);
         assert!(empty.is_err(), "zero children must be rejected");
         let single =
-            CompositeTransport::new(vec![ChildSpec::gossip(Arc::new(StubChild) as Arc<_>)]);
+            CompositeTransport::new(vec![ChildSpec::new(Arc::new(StubChild) as Arc<_>)]);
         assert!(
             single.is_err(),
             "single-child composite is a pass-through; caller must use child directly"
@@ -752,17 +723,13 @@ mod tests {
     #[test]
     fn new_populates_one_direction_per_child() {
         let specs = vec![
-            ChildSpec::gossip(Arc::new(StubChild) as Arc<_>),
-            ChildSpec::gossip(Arc::new(StubChild) as Arc<_>),
-            ChildSpec::gossip(Arc::new(StubChild) as Arc<_>),
+            ChildSpec::new(Arc::new(StubChild) as Arc<_>),
+            ChildSpec::new(Arc::new(StubChild) as Arc<_>),
+            ChildSpec::new(Arc::new(StubChild) as Arc<_>),
         ];
         let composite = CompositeTransport::new(specs).unwrap();
         assert_eq!(composite.children.len(), 3);
-        assert_eq!(composite.bus_children.len(), 3);
         assert_eq!(composite.directions.len(), 3);
-        for slot in &composite.bus_children {
-            assert!(slot.is_none(), "gossip spec leaves bus_handle=None");
-        }
         for dir in &composite.directions {
             assert!(dir.queues.lock().is_empty());
             assert_eq!(dir.backpressure_events.load(Ordering::Relaxed), 0);
@@ -772,8 +739,8 @@ mod tests {
     #[test]
     fn new_starts_cancel_token_unfired() {
         let composite = CompositeTransport::new(vec![
-            ChildSpec::gossip(Arc::new(StubChild) as Arc<_>),
-            ChildSpec::gossip(Arc::new(StubChild) as Arc<_>),
+            ChildSpec::new(Arc::new(StubChild) as Arc<_>),
+            ChildSpec::new(Arc::new(StubChild) as Arc<_>),
         ])
         .unwrap();
         assert!(
@@ -792,9 +759,9 @@ mod tests {
         let mock_b = MockChild::new();
         let mock_c = MockChild::new();
         let composite = CompositeTransport::new(vec![
-            ChildSpec::gossip(mock_a.clone() as Arc<_>),
-            ChildSpec::gossip(mock_b.clone() as Arc<_>),
-            ChildSpec::gossip(mock_c.clone() as Arc<_>),
+            ChildSpec::new(mock_a.clone() as Arc<_>),
+            ChildSpec::new(mock_b.clone() as Arc<_>),
+            ChildSpec::new(mock_c.clone() as Arc<_>),
         ])
         .unwrap();
         let msg = sample_message("@alice.ed25519", 1);
@@ -815,9 +782,9 @@ mod tests {
         mock_b.set_publish_error("simulated bus publish failure");
         let mock_c = MockChild::new();
         let composite = CompositeTransport::new(vec![
-            ChildSpec::gossip(mock_a.clone() as Arc<_>),
-            ChildSpec::gossip(mock_b.clone() as Arc<_>),
-            ChildSpec::gossip(mock_c.clone() as Arc<_>),
+            ChildSpec::new(mock_a.clone() as Arc<_>),
+            ChildSpec::new(mock_b.clone() as Arc<_>),
+            ChildSpec::new(mock_c.clone() as Arc<_>),
         ])
         .unwrap();
         let msg = sample_message("@alice.ed25519", 1);
@@ -848,8 +815,8 @@ mod tests {
         mock_a.push_subscribe_message(sample_message("@alice.ed25519", 1));
         mock_b.push_subscribe_message(sample_message("@bob.ed25519", 1));
         let composite = CompositeTransport::new(vec![
-            ChildSpec::gossip(mock_a.clone() as Arc<_>),
-            ChildSpec::gossip(mock_b.clone() as Arc<_>),
+            ChildSpec::new(mock_a.clone() as Arc<_>),
+            ChildSpec::new(mock_b.clone() as Arc<_>),
         ])
         .unwrap();
         let (_handle, mut stream) = composite
@@ -886,8 +853,8 @@ mod tests {
         mock_b.set_request_from_stream(expected.clone());
 
         let composite = CompositeTransport::new(vec![
-            ChildSpec::gossip(mock_a as Arc<_>),
-            ChildSpec::gossip(mock_b as Arc<_>),
+            ChildSpec::new(mock_a as Arc<_>),
+            ChildSpec::new(mock_b as Arc<_>),
         ])
         .unwrap();
         let mut stream = composite
@@ -996,8 +963,8 @@ mod tests {
         let (mock_b, _tx_b) = FullMock::new(16);
         let composite = Arc::new(
             CompositeTransport::new(vec![
-                ChildSpec::gossip(mock_a.clone() as Arc<_>),
-                ChildSpec::gossip(mock_b.clone() as Arc<_>),
+                ChildSpec::new(mock_a.clone() as Arc<_>),
+                ChildSpec::new(mock_b.clone() as Arc<_>),
             ])
             .unwrap(),
         );
@@ -1029,8 +996,8 @@ mod tests {
         let (mock_b, _tx_b) = FullMock::new(16);
         let composite = Arc::new(
             CompositeTransport::new(vec![
-                ChildSpec::gossip(mock_a.clone() as Arc<_>),
-                ChildSpec::gossip(mock_b.clone() as Arc<_>),
+                ChildSpec::new(mock_a.clone() as Arc<_>),
+                ChildSpec::new(mock_b.clone() as Arc<_>),
             ])
             .unwrap(),
         );
@@ -1057,8 +1024,8 @@ mod tests {
         let (mock_b, _tx_b) = FullMock::new(16);
         let composite = Arc::new(
             CompositeTransport::new(vec![
-                ChildSpec::gossip(mock_a as Arc<_>),
-                ChildSpec::gossip(mock_b as Arc<_>),
+                ChildSpec::new(mock_a as Arc<_>),
+                ChildSpec::new(mock_b as Arc<_>),
             ])
             .unwrap(),
         );
@@ -1087,8 +1054,8 @@ mod tests {
         let (mock_b, _tx_b) = FullMock::new(16);
         let composite = Arc::new(
             CompositeTransport::new(vec![
-                ChildSpec::gossip(mock_a as Arc<_>),
-                ChildSpec::gossip(mock_b as Arc<_>),
+                ChildSpec::new(mock_a as Arc<_>),
+                ChildSpec::new(mock_b as Arc<_>),
             ])
             .unwrap(),
         );
@@ -1127,8 +1094,8 @@ mod tests {
         let (mock_b, _tx_b) = FullMock::new(16);
         let composite = Arc::new(
             CompositeTransport::new(vec![
-                ChildSpec::gossip(mock_a as Arc<_>),
-                ChildSpec::gossip(mock_b as Arc<_>),
+                ChildSpec::new(mock_a as Arc<_>),
+                ChildSpec::new(mock_b as Arc<_>),
             ])
             .unwrap(),
         );
@@ -1148,8 +1115,8 @@ mod tests {
         let (mock_b, _tx_b) = FullMock::new(16);
         let composite = Arc::new(
             CompositeTransport::new(vec![
-                ChildSpec::gossip(mock_a as Arc<_>),
-                ChildSpec::gossip(mock_b as Arc<_>),
+                ChildSpec::new(mock_a as Arc<_>),
+                ChildSpec::new(mock_b as Arc<_>),
             ])
             .unwrap(),
         );
@@ -1167,8 +1134,8 @@ mod tests {
         let (mock_b, _tx_b) = FullMock::new(16);
         let composite = Arc::new(
             CompositeTransport::new(vec![
-                ChildSpec::gossip(mock_a as Arc<_>),
-                ChildSpec::gossip(mock_b as Arc<_>),
+                ChildSpec::new(mock_a as Arc<_>),
+                ChildSpec::new(mock_b as Arc<_>),
             ])
             .unwrap(),
         );
@@ -1196,8 +1163,8 @@ mod tests {
         // Both mocks report connected=true by default.
         let composite = Arc::new(
             CompositeTransport::new(vec![
-                ChildSpec::gossip(mock_a.clone() as Arc<_>),
-                ChildSpec::gossip(mock_b.clone() as Arc<_>),
+                ChildSpec::new(mock_a.clone() as Arc<_>),
+                ChildSpec::new(mock_b.clone() as Arc<_>),
             ])
             .unwrap(),
         );
@@ -1218,8 +1185,8 @@ mod tests {
         let (mock_b, _tx_b) = FullMock::new(16);
         let composite = Arc::new(
             CompositeTransport::new(vec![
-                ChildSpec::gossip(mock_a.clone() as Arc<_>),
-                ChildSpec::gossip(mock_b.clone() as Arc<_>),
+                ChildSpec::new(mock_a.clone() as Arc<_>),
+                ChildSpec::new(mock_b.clone() as Arc<_>),
             ])
             .unwrap(),
         );
@@ -1259,8 +1226,8 @@ mod tests {
         mock_a.set_request_from_err("err_a");
         mock_b.set_request_from_err("err_b");
         let composite = CompositeTransport::new(vec![
-            ChildSpec::gossip(mock_a as Arc<_>),
-            ChildSpec::gossip(mock_b as Arc<_>),
+            ChildSpec::new(mock_a as Arc<_>),
+            ChildSpec::new(mock_b as Arc<_>),
         ])
         .unwrap();
         let err = match composite

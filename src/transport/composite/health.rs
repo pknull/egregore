@@ -7,11 +7,10 @@
 //! construction of the returned struct.
 
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Instant;
 
-use crate::transport::bus::BusTransport;
 use crate::transport::health::BridgeQueuesHealth;
+use crate::transport::trait_def::Transport;
 
 use super::direction::{DirectionState, BRIDGE_QUEUE_HIGH_WATERMARK};
 
@@ -22,17 +21,16 @@ use super::direction::{DirectionState, BRIDGE_QUEUE_HIGH_WATERMARK};
 /// rendered JSON stays consistent with the child's self-reported backend
 /// string.
 ///
-/// `bus_handle` — Wave 4 Step 22 retcon: when the child is a bus
-/// transport, the canonical `self_echo_total` counter lives on the bus
-/// adapter itself (amendment §C.4 re-interpretation; self-echo is a
-/// bus-layer concern, not a direction concern). Pass `Some(bus)` for
-/// bus children so the aggregate reflects the live counter; pass `None`
-/// for gossip/other children and the fallback `DirectionState.self_echo_total`
-/// (always zero in practice) is used.
+/// `child` — Wave 4 Step 22 retcon: self-echo is a bus-layer concern
+/// (amendment §C.4). The child's `Transport::self_echo_total` returns the
+/// canonical counter for bus transports and the trait default `0` for
+/// gossip and other non-bus children. Pass `Some(child)` in production;
+/// `None` in test contexts that want the legacy `DirectionState.self_echo_total`
+/// fallback (always zero in practice).
 pub(crate) fn compute_bridge_queues_health(
     dir: &DirectionState,
     destination: &str,
-    bus_handle: Option<&Arc<BusTransport>>,
+    child: Option<&dyn Transport>,
 ) -> BridgeQueuesHealth {
     // Snapshot the queue map under a short lock. We compute depth_total
     // and authors_active from the same snapshot so the two numbers stay
@@ -81,12 +79,13 @@ pub(crate) fn compute_bridge_queues_health(
     // ensures a mis-routed write can't leak here.
     let last_error = dir.last_error.read().clone().map(sanitize_error_surface);
 
-    // Self-echo total: bus children read from BusTransport (canonical
-    // source, amendment §C.4 Wave 4 retcon). Non-bus children surface the
-    // direction-scoped counter, which is always zero since self-echo only
-    // applies to bus-sourced deliveries.
-    let self_echo_total = match bus_handle {
-        Some(bus) => bus.self_echo_total(),
+    // Self-echo total: production callers pass the child transport;
+    // `Transport::self_echo_total` is overridden by `BusTransport` to
+    // surface the canonical counter (amendment §C.4 Wave 4 retcon) and
+    // returns the trait default 0 for any non-bus child. The `None` arm
+    // is the legacy direction-scoped fallback used by isolated unit tests.
+    let self_echo_total = match child {
+        Some(c) => c.self_echo_total(),
         None => dir.self_echo_total.load(Ordering::Relaxed),
     };
 

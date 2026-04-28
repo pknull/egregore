@@ -17,7 +17,6 @@ use std::time::Instant;
 use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 
-use crate::transport::bus::BusTransport;
 use crate::transport::trait_def::Transport;
 
 use super::direction::{AckBarrier, DirectionState, TransportId};
@@ -34,7 +33,7 @@ pub(crate) async fn run_egress(
     dest_transport: Arc<dyn Transport>,
     dir: Arc<DirectionState>,
     ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>>,
-    bus_children: Arc<Vec<Option<Arc<BusTransport>>>>,
+    children: Arc<Vec<Arc<dyn Transport>>>,
     cancel: CancellationToken,
 ) {
     let mut rr_cursor: usize = 0;
@@ -162,8 +161,12 @@ pub(crate) async fn run_egress(
                 );
             }
 
-            if let Some(Some(bus)) = bus_children.get(source_id) {
-                if let Err(e) = bus.ack_after_publish(&msg.hash).await {
+            if let Some(source) = children.get(source_id) {
+                // Bus children override ack_after_publish to drain
+                // pending_acks; gossip and other non-bus children keep
+                // the trait's default no-op (Ok(())). Barrier removal
+                // above completes the cycle either way.
+                if let Err(e) = source.ack_after_publish(&msg.hash).await {
                     tracing::warn!(
                         source_id,
                         error = %e,
@@ -172,8 +175,6 @@ pub(crate) async fn run_egress(
                     *dir.last_error.write() = Some("source ack_after_publish error".to_string());
                 }
             }
-            // Gossip-sourced: source_id's bus_children slot is None —
-            // nothing to ack. Barrier removal above completes the cycle.
         }
     }
 }
@@ -210,6 +211,114 @@ mod tests {
             expires_at: None,
             hash: format!("hash-{author}-{seq}"),
             signature: "sig".to_string(),
+        }
+    }
+
+    /// Minimal stub that satisfies the `Transport` trait via defaults.
+    /// Used to populate the `children` parameter of `run_egress` for tests
+    /// that don't exercise source-side ack semantics — gossip-equivalent
+    /// behavior (the trait's default `ack_after_publish` returns `Ok(())`).
+    struct StubChild;
+
+    #[async_trait]
+    impl Transport for StubChild {
+        async fn publish(&self, _msg: &Message) -> Result<()> {
+            Ok(())
+        }
+        async fn subscribe(
+            &self,
+            _f: TopicFilter,
+        ) -> Result<(SubscriptionHandle, BoxStream<'static, Message>)> {
+            unreachable!("StubChild is ack-only")
+        }
+        async fn request_from(&self, _a: PublicId, _s: u64) -> Result<BoxStream<'static, Message>> {
+            unreachable!()
+        }
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn shutdown(&self, _d: Duration) -> Result<()> {
+            Ok(())
+        }
+        fn health(&self) -> TransportHealth {
+            TransportHealth {
+                connected: true,
+                backend: "stub",
+                last_successful_publish: None,
+                last_peer_contact: None,
+                unreplicated_count: 0,
+                inflight_publishes: 0,
+                last_error: None,
+                children: vec![],
+                bridge_queues: None,
+            }
+        }
+    }
+
+    fn stub_children(n: usize) -> Arc<Vec<Arc<dyn Transport>>> {
+        Arc::new(
+            (0..n)
+                .map(|_| Arc::new(StubChild) as Arc<dyn Transport>)
+                .collect(),
+        )
+    }
+
+    /// A source-side mock that records `ack_after_publish` invocations.
+    /// Used to assert that egress dispatches the source-ack call through
+    /// the `Transport` trait (i.e. that BusTransport's override would fire,
+    /// without needing a live NATS connection to construct a real bus).
+    struct RecordingSource {
+        ack_calls: Arc<PlMutex<Vec<String>>>,
+    }
+
+    impl RecordingSource {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                ack_calls: Arc::new(PlMutex::new(Vec::new())),
+            })
+        }
+
+        fn ack_calls(&self) -> Vec<String> {
+            self.ack_calls.lock().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Transport for RecordingSource {
+        async fn publish(&self, _msg: &Message) -> Result<()> {
+            Ok(())
+        }
+        async fn subscribe(
+            &self,
+            _f: TopicFilter,
+        ) -> Result<(SubscriptionHandle, BoxStream<'static, Message>)> {
+            unreachable!("RecordingSource is ack-only")
+        }
+        async fn request_from(&self, _a: PublicId, _s: u64) -> Result<BoxStream<'static, Message>> {
+            unreachable!()
+        }
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn shutdown(&self, _d: Duration) -> Result<()> {
+            Ok(())
+        }
+        fn health(&self) -> TransportHealth {
+            TransportHealth {
+                connected: true,
+                backend: "recording",
+                last_successful_publish: None,
+                last_peer_contact: None,
+                unreplicated_count: 0,
+                inflight_publishes: 0,
+                last_error: None,
+                children: vec![],
+                bridge_queues: None,
+            }
+        }
+        async fn ack_after_publish(&self, message_hash: &str) -> Result<()> {
+            self.ack_calls.lock().push(message_hash.to_string());
+            Ok(())
         }
     }
 
@@ -296,7 +405,7 @@ mod tests {
         let dir = Arc::new(DirectionState::new());
         let dest = MockDest::new();
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None]);
+        let children = stub_children(2);
         let cancel = CancellationToken::new();
 
         // Pre-enqueue 3 messages from source_id=0 to this destination.
@@ -309,7 +418,7 @@ mod tests {
         let dir_clone = dir.clone();
         let dest_clone = dest.clone();
         let barriers_clone = ack_barriers.clone();
-        let bus_children_clone = bus_children.clone();
+        let children_clone = children.clone();
         let cancel_clone = cancel.clone();
         let egress = tokio::spawn(async move {
             run_egress(
@@ -317,7 +426,7 @@ mod tests {
                 dest_clone as Arc<dyn Transport>,
                 dir_clone,
                 barriers_clone,
-                bus_children_clone,
+                children_clone,
                 cancel_clone,
             )
             .await;
@@ -344,7 +453,7 @@ mod tests {
         let dir = Arc::new(DirectionState::new());
         let dest = MockDest::new();
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None]);
+        let children = stub_children(2);
         let cancel = CancellationToken::new();
 
         // Two authors from the same source, 3 messages each. Interleaved
@@ -360,7 +469,7 @@ mod tests {
         let dir_clone = dir.clone();
         let dest_clone = dest.clone();
         let barriers_clone = ack_barriers.clone();
-        let bus_children_clone = bus_children.clone();
+        let children_clone = children.clone();
         let cancel_clone = cancel.clone();
         let egress = tokio::spawn(async move {
             run_egress(
@@ -368,7 +477,7 @@ mod tests {
                 dest_clone as Arc<dyn Transport>,
                 dir_clone,
                 barriers_clone,
-                bus_children_clone,
+                children_clone,
                 cancel_clone,
             )
             .await;
@@ -405,7 +514,7 @@ mod tests {
         let dir = Arc::new(DirectionState::new());
         let dest = MockDest::new();
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None]);
+        let children = stub_children(2);
         let cancel = CancellationToken::new();
 
         let author = "@a.ed25519";
@@ -439,7 +548,7 @@ mod tests {
         let dir_clone = dir.clone();
         let dest_clone = dest.clone();
         let barriers_clone = ack_barriers.clone();
-        let bus_children_clone = bus_children.clone();
+        let children_clone = children.clone();
         let cancel_clone = cancel.clone();
         let egress = tokio::spawn(async move {
             run_egress(
@@ -447,7 +556,7 @@ mod tests {
                 dest_clone as Arc<dyn Transport>,
                 dir_clone,
                 barriers_clone,
-                bus_children_clone,
+                children_clone,
                 cancel_clone,
             )
             .await;
@@ -483,7 +592,7 @@ mod tests {
         // removal. The bus-specific ack call is exercised in the
         // integration smoke test (Step 13).
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None, None]);
+        let children = stub_children(3);
         let cancel = CancellationToken::new();
 
         let msg = sample_message("@a.ed25519", 1);
@@ -494,7 +603,7 @@ mod tests {
         let dir_clone = dir.clone();
         let dest_clone = dest.clone();
         let barriers_clone = ack_barriers.clone();
-        let bus_children_clone = bus_children.clone();
+        let children_clone = children.clone();
         let cancel_clone = cancel.clone();
         let egress = tokio::spawn(async move {
             run_egress(
@@ -502,7 +611,7 @@ mod tests {
                 dest_clone as Arc<dyn Transport>,
                 dir_clone,
                 barriers_clone,
-                bus_children_clone,
+                children_clone,
                 cancel_clone,
             )
             .await;
@@ -542,7 +651,7 @@ mod tests {
             reason: "simulated destination failure".to_string(),
         }));
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None]);
+        let children = stub_children(2);
         let cancel = CancellationToken::new();
 
         let msg = sample_message("@a.ed25519", 1);
@@ -552,7 +661,7 @@ mod tests {
         let dir_clone = dir.clone();
         let dest_clone = dest.clone();
         let barriers_clone = ack_barriers.clone();
-        let bus_children_clone = bus_children.clone();
+        let children_clone = children.clone();
         let cancel_clone = cancel.clone();
         let egress = tokio::spawn(async move {
             run_egress(
@@ -560,7 +669,7 @@ mod tests {
                 dest_clone as Arc<dyn Transport>,
                 dir_clone,
                 barriers_clone,
-                bus_children_clone,
+                children_clone,
                 cancel_clone,
             )
             .await;
@@ -590,13 +699,13 @@ mod tests {
         let dir = Arc::new(DirectionState::new());
         let dest = MockDest::new();
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None]);
+        let children = stub_children(2);
         let cancel = CancellationToken::new();
 
         let dir_clone = dir.clone();
         let dest_clone = dest.clone();
         let barriers_clone = ack_barriers.clone();
-        let bus_children_clone = bus_children.clone();
+        let children_clone = children.clone();
         let cancel_clone = cancel.clone();
         let egress = tokio::spawn(async move {
             run_egress(
@@ -604,7 +713,7 @@ mod tests {
                 dest_clone as Arc<dyn Transport>,
                 dir_clone,
                 barriers_clone,
-                bus_children_clone,
+                children_clone,
                 cancel_clone,
             )
             .await;
@@ -632,14 +741,14 @@ mod tests {
         let dir = Arc::new(DirectionState::new());
         let dest = MockDest::new();
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None]);
+        let children = stub_children(2);
         let cancel = CancellationToken::new();
 
         let egress = tokio::spawn({
             let dir = dir.clone();
             let dest = dest.clone();
             let ack_barriers = ack_barriers.clone();
-            let bus_children = bus_children.clone();
+            let children_inner = children.clone();
             let cancel = cancel.clone();
             async move {
                 run_egress(
@@ -647,7 +756,7 @@ mod tests {
                     dest as Arc<dyn Transport>,
                     dir,
                     ack_barriers,
-                    bus_children,
+                    children_inner,
                     cancel,
                 )
                 .await;
@@ -662,12 +771,70 @@ mod tests {
         );
     }
 
+    /// Locks the trait-dispatch contract for the source-side ack hook
+    /// without requiring a live NATS connection. After the C3 refactor,
+    /// `run_egress` calls `source.ack_after_publish(hash)` via the
+    /// `Transport` trait — `BusTransport` overrides the default no-op to
+    /// drain `pending_acks`. This test substitutes a `RecordingSource`
+    /// (also overrides) at index 0 and asserts the override fires when the
+    /// barrier resolves to zero.
+    #[tokio::test]
+    async fn egress_dispatches_ack_after_publish_through_trait() {
+        let dir = Arc::new(DirectionState::new());
+        let dest = MockDest::new();
+        let recording = RecordingSource::new();
+        let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
+        // children[0] = RecordingSource (the source we'll receive an ack on);
+        // children[1] is a stub that we don't exercise.
+        let children: Arc<Vec<Arc<dyn Transport>>> = Arc::new(vec![
+            recording.clone() as Arc<dyn Transport>,
+            Arc::new(StubChild) as Arc<dyn Transport>,
+        ]);
+        let cancel = CancellationToken::new();
+
+        let msg = sample_message("@a.ed25519", 1);
+        let hash = msg.hash.clone();
+        // Single destination → barrier resolves to zero on the first publish.
+        ack_barriers.insert(hash.clone(), Arc::new(AckBarrier::new(0, 1)));
+        pre_enqueue(&dir, 0, msg);
+
+        let dir_clone = dir.clone();
+        let dest_clone = dest.clone();
+        let barriers_clone = ack_barriers.clone();
+        let children_clone = children.clone();
+        let cancel_clone = cancel.clone();
+        let egress = tokio::spawn(async move {
+            run_egress(
+                1,
+                dest_clone as Arc<dyn Transport>,
+                dir_clone,
+                barriers_clone,
+                children_clone,
+                cancel_clone,
+            )
+            .await;
+        });
+        dir.egress_wake.notify_one();
+
+        let acked = eventually(|| recording.ack_calls().len() == 1, Duration::from_secs(2)).await;
+        assert!(
+            acked,
+            "egress must dispatch ack_after_publish through the Transport trait \
+             so BusTransport's override fires on barrier-final"
+        );
+        assert_eq!(recording.ack_calls()[0], hash);
+        assert!(ack_barriers.is_empty());
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(1), egress).await;
+    }
+
     #[tokio::test]
     async fn egress_publish_in_flight_since_brackets_publish_call() {
         let dir = Arc::new(DirectionState::new());
         let dest = MockDest::new();
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None]);
+        let children = stub_children(2);
         let cancel = CancellationToken::new();
 
         let msg = sample_message("@a.ed25519", 1);
@@ -680,7 +847,7 @@ mod tests {
         let dir_clone = dir.clone();
         let dest_clone = dest.clone();
         let barriers_clone = ack_barriers.clone();
-        let bus_children_clone = bus_children.clone();
+        let children_clone = children.clone();
         let cancel_clone = cancel.clone();
         let egress = tokio::spawn(async move {
             run_egress(
@@ -688,7 +855,7 @@ mod tests {
                 dest_clone as Arc<dyn Transport>,
                 dir_clone,
                 barriers_clone,
-                bus_children_clone,
+                children_clone,
                 cancel_clone,
             )
             .await;
@@ -715,7 +882,7 @@ mod tests {
         let dir = Arc::new(DirectionState::new());
         let dest = MockDest::new();
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None]);
+        let children = stub_children(2);
         let cancel = CancellationToken::new();
 
         // Arm oldest_queued_at as ingress would.
@@ -727,7 +894,7 @@ mod tests {
         let dir_clone = dir.clone();
         let dest_clone = dest.clone();
         let barriers_clone = ack_barriers.clone();
-        let bus_children_clone = bus_children.clone();
+        let children_clone = children.clone();
         let cancel_clone = cancel.clone();
         let egress = tokio::spawn(async move {
             run_egress(
@@ -735,7 +902,7 @@ mod tests {
                 dest_clone as Arc<dyn Transport>,
                 dir_clone,
                 barriers_clone,
-                bus_children_clone,
+                children_clone,
                 cancel_clone,
             )
             .await;
@@ -767,7 +934,7 @@ mod tests {
         let dest1 = MockDest::new();
         let dest2 = MockDest::new();
         let ack_barriers: Arc<DashMap<String, Arc<AckBarrier>>> = Arc::new(DashMap::new());
-        let bus_children: Arc<Vec<Option<Arc<BusTransport>>>> = Arc::new(vec![None, None, None]);
+        let children = stub_children(3);
         let cancel = CancellationToken::new();
 
         let msg = sample_message("@a.ed25519", 1);
@@ -782,20 +949,22 @@ mod tests {
             let dir = dir1.clone();
             let dest = dest1.clone();
             let bars = ack_barriers.clone();
-            let buses = bus_children.clone();
+            let children_clone = children.clone();
             let cancel = cancel.clone();
             tokio::spawn(async move {
-                run_egress(1, dest as Arc<dyn Transport>, dir, bars, buses, cancel).await;
+                run_egress(1, dest as Arc<dyn Transport>, dir, bars, children_clone, cancel)
+                    .await;
             })
         };
         let e2 = {
             let dir = dir2.clone();
             let dest = dest2.clone();
             let bars = ack_barriers.clone();
-            let buses = bus_children.clone();
+            let children_clone = children.clone();
             let cancel = cancel.clone();
             tokio::spawn(async move {
-                run_egress(2, dest as Arc<dyn Transport>, dir, bars, buses, cancel).await;
+                run_egress(2, dest as Arc<dyn Transport>, dir, bars, children_clone, cancel)
+                    .await;
             })
         };
         dir1.egress_wake.notify_one();

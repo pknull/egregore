@@ -90,4 +90,29 @@ pub trait Transport: Send + Sync + 'static {
     /// Coarse liveness signal for `/v1/status`. Per-peer detail is adapter-
     /// internal (e.g. `gossip::health`); this is the wire-agnostic summary.
     fn health(&self) -> TransportHealth;
+
+    /// Composite-only extension hook (RFC 0002 §C.5): finalize broker-side
+    /// acknowledgment for a forwarded message after the per-message
+    /// `AckBarrier` resolves to zero.
+    ///
+    /// NOT a core transport invariant — only the bridge-mode composite calls
+    /// this on the SOURCE child after every destination has been published.
+    /// Implementations that have no broker-side ack concept (gossip, mock,
+    /// any pure peer-to-peer backend) MUST keep the default no-op.
+    /// `BusTransport` overrides this to drain its `pending_acks` map.
+    async fn ack_after_publish(&self, _message_hash: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Composite-only extension hook (amendment §C.4 retcon): expose the
+    /// canonical self-echo counter so the bridge can surface it through
+    /// `BridgeQueuesHealth`.
+    ///
+    /// NOT a core transport invariant — only the composite's health
+    /// aggregation reads this. Implementations with no self-echo path
+    /// (gossip, mock) MUST keep the default zero. `BusTransport` overrides
+    /// to surface its incremented atomic.
+    fn self_echo_total(&self) -> u64 {
+        0
+    }
 }

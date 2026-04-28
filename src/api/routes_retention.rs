@@ -124,23 +124,18 @@ impl From<RetentionPolicy> for PolicyResponse {
 pub async fn list_policies(State(state): State<AppState>) -> impl IntoResponse {
     let engine = state.engine.clone();
 
-    let result =
-        tokio::task::spawn_blocking(move || engine.store().list_retention_policies()).await;
+    let policies = match response::run_blocking(
+        move || engine.store().list_retention_policies(),
+        "failed to list retention policies",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
-    match result {
-        Ok(Ok(policies)) => {
-            let responses: Vec<PolicyResponse> =
-                policies.into_iter().map(PolicyResponse::from).collect();
-            response::ok(responses).into_response()
-        }
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to list retention policies",
-        )
-        .into_response(),
-    }
+    let responses: Vec<PolicyResponse> = policies.into_iter().map(PolicyResponse::from).collect();
+    response::ok(responses).into_response()
 }
 
 /// Create a retention policy.
@@ -238,24 +233,19 @@ pub async fn create_policy(
 
     let engine = state.engine.clone();
     let policy_clone = policy.clone();
-    let result =
-        tokio::task::spawn_blocking(move || engine.store().save_retention_policy(&policy_clone))
-            .await;
+    let id = match response::run_blocking(
+        move || engine.store().save_retention_policy(&policy_clone),
+        "failed to create retention policy",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
-    match result {
-        Ok(Ok(id)) => {
-            let mut resp = PolicyResponse::from(policy);
-            resp.id = id;
-            (StatusCode::CREATED, response::ok(resp)).into_response()
-        }
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to create retention policy",
-        )
-        .into_response(),
-    }
+    let mut resp = PolicyResponse::from(policy);
+    resp.id = id;
+    (StatusCode::CREATED, response::ok(resp)).into_response()
 }
 
 /// Delete a retention policy by ID.
@@ -265,23 +255,24 @@ pub async fn delete_policy(
 ) -> impl IntoResponse {
     let engine = state.engine.clone();
 
-    let result =
-        tokio::task::spawn_blocking(move || engine.store().delete_retention_policy(id)).await;
+    let deleted = match response::run_blocking(
+        move || engine.store().delete_retention_policy(id),
+        "failed to delete retention policy",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
-    match result {
-        Ok(Ok(true)) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Ok(false)) => response::err::<()>(
+    if deleted {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        response::err::<()>(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
             "retention policy not found",
         )
-        .into_response(),
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to delete retention policy",
-        )
-        .into_response(),
+        .into_response()
     }
 }

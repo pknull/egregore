@@ -157,27 +157,24 @@ pub async fn add_peer(
     let address = req.address.clone();
     let engine = state.engine.clone();
 
-    let result =
-        tokio::task::spawn_blocking(move || engine.store().insert_address_peer(&address)).await;
-
-    match result {
-        Ok(Ok(())) => (
-            StatusCode::CREATED,
-            response::ok(PeerInfo {
-                address: req.address,
-                public_id: None,
-                source: "manual".to_string(),
-            }),
-        )
-            .into_response(),
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<PeerInfo>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to persist peer",
-        )
-        .into_response(),
+    if let Err(resp) = response::run_blocking(
+        move || engine.store().insert_address_peer(&address),
+        "failed to persist peer",
+    )
+    .await
+    {
+        return resp;
     }
+
+    (
+        StatusCode::CREATED,
+        response::ok(PeerInfo {
+            address: req.address,
+            public_id: None,
+            source: "manual".to_string(),
+        }),
+    )
+        .into_response()
 }
 
 pub async fn delete_peer(
@@ -196,19 +193,16 @@ pub async fn delete_peer(
 
     let engine = state.engine.clone();
 
-    let result =
-        tokio::task::spawn_blocking(move || engine.store().remove_address_peer(&address)).await;
-
-    match result {
-        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to remove peer",
-        )
-        .into_response(),
+    if let Err(resp) = response::run_blocking(
+        move || engine.store().remove_address_peer(&address),
+        "failed to remove peer",
+    )
+    .await
+    {
+        return resp;
     }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Build status info from current state. Shared by HTTP route and MCP tool.

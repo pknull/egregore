@@ -202,3 +202,40 @@ pub fn from_error(e: crate::error::EgreError) -> Response {
 
     (status, body).into_response()
 }
+
+/// Run a synchronous, blocking workload (typically a SQLite call) on Tokio's
+/// blocking pool and lift the standard error mapping out of every API
+/// handler:
+///
+/// - `Ok(Ok(value))` → `Ok(value)` for the caller's success path.
+/// - `Ok(Err(EgreError))` → `Err(from_error(e))`.
+/// - `Err(JoinError)` → logged with `ctx`, returned as `INTERNAL_SERVER_ERROR`.
+///
+/// Caller pattern:
+/// ```ignore
+/// let value = match run_blocking(move || engine.query(...), "failed to query").await {
+///     Ok(v) => v,
+///     Err(resp) => return resp,
+/// };
+/// ```
+///
+/// Or, if the handler's signature is `Result<Response, Response>`, just `?`.
+///
+/// Do NOT use this helper for handlers that need to introspect `EgreError`
+/// before converting it (e.g. group "already exists" → 409, status/health
+/// builders that intentionally degrade rather than fail). Those keep the
+/// inline `match`.
+pub async fn run_blocking<T, F>(f: F, ctx: &'static str) -> std::result::Result<T, Response>
+where
+    F: FnOnce() -> std::result::Result<T, crate::error::EgreError> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(Ok(t)) => Ok(t),
+        Ok(Err(e)) => Err(from_error(e)),
+        Err(join_err) => {
+            tracing::error!(error = %join_err, ctx, "blocking task join failure");
+            Err(err::<()>(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", ctx).into_response())
+        }
+    }
+}

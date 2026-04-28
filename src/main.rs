@@ -911,11 +911,11 @@ async fn main() -> anyhow::Result<()> {
     use egregore::transport::composite::transport::{ChildSpec, CompositeTransport};
     let mut child_specs: Vec<ChildSpec> = Vec::new();
     if let Some(gossip) = gossip_transport.as_ref() {
-        child_specs.push(ChildSpec::gossip(gossip.clone()));
+        child_specs.push(ChildSpec::new(gossip.clone()));
     }
     if let Some(bus_arc) = bus_transport_arc.as_ref() {
         let bus_as_trait: Arc<dyn egregore::transport::Transport> = bus_arc.clone();
-        child_specs.push(ChildSpec::bus(bus_as_trait, bus_arc.clone()));
+        child_specs.push(ChildSpec::new(bus_as_trait));
     }
     let effective_transport: Option<Arc<dyn egregore::transport::Transport>> =
         match child_specs.len() {

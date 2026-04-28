@@ -44,26 +44,22 @@ pub async fn add_topic_subscription(
     let engine = state.engine.clone();
     let topic_owned = trimmed.to_string();
 
-    let result =
-        tokio::task::spawn_blocking(move || engine.store().add_topic_subscription(&topic_owned))
-            .await;
-
-    match result {
-        Ok(Ok(())) => (
-            StatusCode::CREATED,
-            response::ok(TopicInfo {
-                topic: trimmed.to_string(),
-            }),
-        )
-            .into_response(),
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to add topic subscription",
-        )
-        .into_response(),
+    if let Err(resp) = response::run_blocking(
+        move || engine.store().add_topic_subscription(&topic_owned),
+        "failed to add topic subscription",
+    )
+    .await
+    {
+        return resp;
     }
+
+    (
+        StatusCode::CREATED,
+        response::ok(TopicInfo {
+            topic: trimmed.to_string(),
+        }),
+    )
+        .into_response()
 }
 
 /// Unsubscribe from a topic.
@@ -85,78 +81,69 @@ pub async fn remove_topic_subscription(
     let engine = state.engine.clone();
     let topic_owned = trimmed.to_string();
 
-    let result =
-        tokio::task::spawn_blocking(move || engine.store().remove_topic_subscription(&topic_owned))
-            .await;
-
-    match result {
-        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to remove topic subscription",
-        )
-        .into_response(),
+    if let Err(resp) = response::run_blocking(
+        move || engine.store().remove_topic_subscription(&topic_owned),
+        "failed to remove topic subscription",
+    )
+    .await
+    {
+        return resp;
     }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// List all topic subscriptions.
 pub async fn get_topic_subscriptions(State(state): State<AppState>) -> impl IntoResponse {
     let engine = state.engine.clone();
 
-    let result =
-        tokio::task::spawn_blocking(move || engine.store().get_topic_subscriptions()).await;
+    let topics = match response::run_blocking(
+        move || engine.store().get_topic_subscriptions(),
+        "failed to list topic subscriptions",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
-    match result {
-        Ok(Ok(topics)) => {
-            let infos: Vec<TopicInfo> = topics
-                .into_iter()
-                .map(|topic| TopicInfo { topic })
-                .collect();
-            response::ok(infos).into_response()
-        }
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to list topic subscriptions",
-        )
-        .into_response(),
-    }
+    let infos: Vec<TopicInfo> = topics
+        .into_iter()
+        .map(|topic| TopicInfo { topic })
+        .collect();
+    response::ok(infos).into_response()
 }
 
 /// List all known topics (discovered from messages) with subscription status.
 pub async fn get_known_topics(State(state): State<AppState>) -> impl IntoResponse {
     let engine = state.engine.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        let store = engine.store();
-        let known = store.get_all_known_topics()?;
-        let subscribed = store.get_topic_subscriptions()?;
-        let subscribed_set: std::collections::HashSet<String> = subscribed.into_iter().collect();
+    let infos = match response::run_blocking(
+        move || {
+            let store = engine.store();
+            let known = store.get_all_known_topics()?;
+            let subscribed = store.get_topic_subscriptions()?;
+            let subscribed_set: std::collections::HashSet<String> =
+                subscribed.into_iter().collect();
 
-        let infos: Vec<KnownTopicInfo> = known
-            .into_iter()
-            .map(|topic| KnownTopicInfo {
-                subscribed: subscribed_set.contains(&topic),
-                topic,
-            })
-            .collect();
-        Ok::<_, crate::error::EgreError>(infos)
-    })
-    .await;
+            let infos: Vec<KnownTopicInfo> = known
+                .into_iter()
+                .map(|topic| KnownTopicInfo {
+                    subscribed: subscribed_set.contains(&topic),
+                    topic,
+                })
+                .collect();
+            Ok::<_, crate::error::EgreError>(infos)
+        },
+        "failed to list known topics",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
-    match result {
-        Ok(Ok(infos)) => response::ok(infos).into_response(),
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to list known topics",
-        )
-        .into_response(),
-    }
+    response::ok(infos).into_response()
 }
 
 #[cfg(test)]

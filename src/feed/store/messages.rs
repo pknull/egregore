@@ -5,13 +5,80 @@
 //! Backfill promotes the flag when the missing predecessor arrives.
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::error::{EgreError, Result};
 use crate::feed::models::{FeedQuery, Message};
 use crate::identity::PublicId;
 
 use super::{content_type_name, FeedStore};
+
+/// Shared persistence block for both the publish (atomic, transactional) and
+/// ingest (plain connection) paths. Inserts the message row, its tags, and
+/// updates the feed-tracking row.
+///
+/// Takes `&rusqlite::Connection`; `rusqlite::Transaction` derefs to it, so
+/// callers in either context (transactional or not) pass through. The
+/// transaction boundary stays at the caller — this helper does NOT begin or
+/// commit, and is NOT atomic across the three table writes when invoked
+/// outside a transaction (matches the prior `insert_message` semantics).
+///
+/// `ConstraintViolation` is mapped to `EgreError::DuplicateMessage` ONLY for
+/// the `messages` insert (the row that carries the duplicate-detection
+/// invariants — `PRIMARY KEY(hash)` and `UNIQUE(author, sequence)`). Failures
+/// on `message_tags` / `feeds` surface as raw `EgreError::Database`.
+fn insert_message_row(conn: &Connection, msg: &Message, chain_valid: bool) -> Result<()> {
+    let content_type = content_type_name(&msg.content);
+    let content_json = serde_json::to_string(&msg.content)?;
+    let raw_json = serde_json::to_string(msg)?;
+
+    conn.execute(
+        "INSERT INTO messages (hash, author, sequence, previous, timestamp, content_type, content_json, signature, raw_json, chain_valid, relates)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            msg.hash,
+            msg.author.0,
+            msg.sequence,
+            msg.previous,
+            msg.timestamp.to_rfc3339(),
+            content_type,
+            content_json,
+            msg.signature,
+            raw_json,
+            chain_valid as i32,
+            msg.relates,
+        ],
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            EgreError::DuplicateMessage {
+                author: msg.author.0.clone(),
+                sequence: msg.sequence,
+            }
+        }
+        other => EgreError::Database(other),
+    })?;
+
+    for tag in &msg.tags {
+        conn.execute(
+            "INSERT OR IGNORE INTO message_tags (message_hash, tag) VALUES (?1, ?2)",
+            params![msg.hash, tag],
+        )?;
+    }
+
+    conn.execute(
+        "INSERT INTO feeds (author, latest_sequence, last_seen)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(author) DO UPDATE SET
+            latest_sequence = MAX(feeds.latest_sequence, excluded.latest_sequence),
+            last_seen = excluded.last_seen",
+        params![msg.author.0, msg.sequence, msg.timestamp.to_rfc3339()],
+    )?;
+
+    Ok(())
+}
 
 /// Phase 2 Wave 5 Step 27 (amendment §G.3) — per-author summary of
 /// chain-gap state for the Prometheus metrics updater. One row per
@@ -74,64 +141,12 @@ impl FeedStore {
             None
         };
 
-        // Build the message (computes hash, signs)
+        // Build the message (computes hash, signs).
         let message = builder(new_seq, previous)?;
 
-        // Insert within same transaction
-        let content_type = content_type_name(&message.content);
-        let content_json = serde_json::to_string(&message.content)?;
-        let raw_json = serde_json::to_string(&message)?;
-
-        tx.execute(
-            "INSERT INTO messages (hash, author, sequence, previous, timestamp, content_type, content_json, signature, raw_json, chain_valid, relates)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                message.hash,
-                message.author.0,
-                message.sequence,
-                message.previous,
-                message.timestamp.to_rfc3339(),
-                content_type,
-                content_json,
-                message.signature,
-                raw_json,
-                1i32, // chain_valid = true for locally published messages
-                message.relates,
-            ],
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::SqliteFailure(err, _)
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                EgreError::DuplicateMessage {
-                    author: message.author.0.clone(),
-                    sequence: message.sequence,
-                }
-            }
-            other => EgreError::Database(other),
-        })?;
-
-        // Insert tags
-        for tag in &message.tags {
-            tx.execute(
-                "INSERT OR IGNORE INTO message_tags (message_hash, tag) VALUES (?1, ?2)",
-                params![message.hash, tag],
-            )?;
-        }
-
-        // Update feed tracking
-        tx.execute(
-            "INSERT INTO feeds (author, latest_sequence, last_seen)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(author) DO UPDATE SET
-                latest_sequence = MAX(feeds.latest_sequence, excluded.latest_sequence),
-                last_seen = excluded.last_seen",
-            params![
-                message.author.0,
-                message.sequence,
-                message.timestamp.to_rfc3339(),
-            ],
-        )?;
+        // Persist within the same transaction. chain_valid = true for locally
+        // published messages (we just signed and know the predecessor exists).
+        insert_message_row(&tx, &message, true)?;
 
         tx.commit()?;
         Ok(message)
@@ -140,59 +155,7 @@ impl FeedStore {
     /// Insert a message. `chain_valid` indicates whether the hash chain
     /// linkage to the predecessor has been verified.
     pub fn insert_message(&self, msg: &Message, chain_valid: bool) -> Result<()> {
-        let conn = self.conn();
-        let content_type = content_type_name(&msg.content);
-        let content_json = serde_json::to_string(&msg.content)?;
-        let raw_json = serde_json::to_string(msg)?;
-
-        conn.execute(
-            "INSERT INTO messages (hash, author, sequence, previous, timestamp, content_type, content_json, signature, raw_json, chain_valid, relates)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                msg.hash,
-                msg.author.0,
-                msg.sequence,
-                msg.previous,
-                msg.timestamp.to_rfc3339(),
-                content_type,
-                content_json,
-                msg.signature,
-                raw_json,
-                chain_valid as i32,
-                msg.relates,
-            ],
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::SqliteFailure(err, _)
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                EgreError::DuplicateMessage {
-                    author: msg.author.0.clone(),
-                    sequence: msg.sequence,
-                }
-            }
-            other => EgreError::Database(other),
-        })?;
-
-        // Insert tags
-        for tag in &msg.tags {
-            conn.execute(
-                "INSERT OR IGNORE INTO message_tags (message_hash, tag) VALUES (?1, ?2)",
-                params![msg.hash, tag],
-            )?;
-        }
-
-        // Update feed tracking
-        conn.execute(
-            "INSERT INTO feeds (author, latest_sequence, last_seen)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(author) DO UPDATE SET
-                latest_sequence = MAX(feeds.latest_sequence, excluded.latest_sequence),
-                last_seen = excluded.last_seen",
-            params![msg.author.0, msg.sequence, msg.timestamp.to_rfc3339(),],
-        )?;
-
-        Ok(())
+        insert_message_row(&self.conn(), msg, chain_valid)
     }
 
     /// Update the chain_valid flag for a message identified by hash.

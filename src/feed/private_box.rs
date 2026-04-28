@@ -79,6 +79,30 @@ pub fn decrypt_for_identity(identity: &Identity, message: &Message) -> Result<Op
     Ok(Some(decrypted))
 }
 
+/// Decrypt `message` if it carries a private-box payload addressed to
+/// `identity`; otherwise return the message unchanged. Decryption failures
+/// (envelope-shaped but unrecoverable) are logged and surfaced as the
+/// original ciphertext message — we never drop the message, so callers
+/// always get something to render.
+pub fn decrypt_or_passthrough(identity: &Identity, message: Message) -> Message {
+    if !is_private_box_content(&message.content) {
+        return message;
+    }
+
+    match decrypt_for_identity(identity, &message) {
+        Ok(Some(decrypted)) => decrypted,
+        Ok(None) => message,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                hash = %message.hash,
+                "failed to decrypt private box message",
+            );
+            message
+        }
+    }
+}
+
 pub fn is_private_box_content(content: &serde_json::Value) -> bool {
     content
         .get("type")

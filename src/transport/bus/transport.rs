@@ -765,6 +765,20 @@ impl Transport for BusTransport {
             bridge_queues: None,
         }
     }
+
+    /// Override the trait default to drain `pending_acks` on broker-side
+    /// resolution. Composite egress calls this on the source bus child once
+    /// every destination has been published (RFC 0002 §C.5).
+    async fn ack_after_publish(&self, message_hash: &str) -> Result<()> {
+        BusTransport::ack_after_publish(self, message_hash).await
+    }
+
+    /// Override the trait default to expose the canonical self-echo counter
+    /// (amendment §C.4 retcon). Composite health aggregation reads this for
+    /// bus children; gossip and other non-bus children keep the default 0.
+    fn self_echo_total(&self) -> u64 {
+        BusTransport::self_echo_total(self)
+    }
 }
 
 #[cfg(test)]

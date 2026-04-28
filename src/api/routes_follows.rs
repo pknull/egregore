@@ -27,18 +27,16 @@ pub async fn add_follow(
     let engine = state.engine.clone();
     let author_id = PublicId(author.clone());
 
-    let result = tokio::task::spawn_blocking(move || engine.store().add_follow(&author_id)).await;
-
-    match result {
-        Ok(Ok(())) => (StatusCode::CREATED, response::ok(FollowInfo { author })).into_response(),
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to add follow",
-        )
-        .into_response(),
+    if let Err(resp) = response::run_blocking(
+        move || engine.store().add_follow(&author_id),
+        "failed to add follow",
+    )
+    .await
+    {
+        return resp;
     }
+
+    (StatusCode::CREATED, response::ok(FollowInfo { author })).into_response()
 }
 
 pub async fn remove_follow(
@@ -56,40 +54,34 @@ pub async fn remove_follow(
     let engine = state.engine.clone();
     let author_id = PublicId(author);
 
-    let result =
-        tokio::task::spawn_blocking(move || engine.store().remove_follow(&author_id)).await;
-
-    match result {
-        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to remove follow",
-        )
-        .into_response(),
+    if let Err(resp) = response::run_blocking(
+        move || engine.store().remove_follow(&author_id),
+        "failed to remove follow",
+    )
+    .await
+    {
+        return resp;
     }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn get_follows(State(state): State<AppState>) -> impl IntoResponse {
     let engine = state.engine.clone();
 
-    let result = tokio::task::spawn_blocking(move || engine.store().get_follows()).await;
+    let follows = match response::run_blocking(
+        move || engine.store().get_follows(),
+        "failed to list follows",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
-    match result {
-        Ok(Ok(follows)) => {
-            let infos: Vec<FollowInfo> = follows
-                .into_iter()
-                .map(|pid| FollowInfo { author: pid.0 })
-                .collect();
-            response::ok(infos).into_response()
-        }
-        Ok(Err(e)) => response::from_error(e),
-        Err(_) => response::err::<()>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "failed to list follows",
-        )
-        .into_response(),
-    }
+    let infos: Vec<FollowInfo> = follows
+        .into_iter()
+        .map(|pid| FollowInfo { author: pid.0 })
+        .collect();
+    response::ok(infos).into_response()
 }

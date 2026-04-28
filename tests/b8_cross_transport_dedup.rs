@@ -83,8 +83,8 @@ impl Harness {
 
         let composite = Arc::new(
             CompositeTransport::new(vec![
-                ChildSpec::gossip(child_a.clone() as Arc<dyn Transport>),
-                ChildSpec::gossip(child_b.clone() as Arc<dyn Transport>),
+                ChildSpec::new(child_a.clone() as Arc<dyn Transport>),
+                ChildSpec::new(child_b.clone() as Arc<dyn Transport>),
             ])
             .expect("two-child composite construction"),
         );

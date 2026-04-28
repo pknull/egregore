@@ -428,7 +428,9 @@ impl BusTransport {
     ///
     /// Uses `remove()` to both drop the handle and call `.ack()` on it.
     /// The `DashMap::remove` returns the `(K, V)` tuple on hit.
-    #[allow(dead_code)] // wired by CompositeTransport egress in Wave 3
+    ///
+    /// Reached via the `Transport::ack_after_publish` override below; the
+    /// composite egress task dispatches through the trait on barrier-final.
     pub async fn ack_after_publish(&self, message_hash: &str) -> Result<()> {
         if let Some((_, nats_msg)) = self.pending_acks.remove(message_hash) {
             nats_msg.ack().await.map_err(|_e| EgreError::Peer {
@@ -438,10 +440,13 @@ impl BusTransport {
         Ok(())
     }
 
-    /// Release the ack handle for `message_hash` WITHOUT acking. Called
-    /// on shutdown or error paths so NATS `ack_wait` expires and the
-    /// message is redelivered. Amendment §C.2.
-    #[allow(dead_code)] // wired by CompositeTransport egress in Wave 3
+    /// Release the ack handle for `message_hash` WITHOUT acking. Intended
+    /// for shutdown or error paths so NATS `ack_wait` expires and the
+    /// message is redelivered (amendment §C.2). Currently unwired — egress
+    /// resolves all barriers via `ack_after_publish`. Retained as the
+    /// documented §C.2 affordance; a future commit wiring shutdown-time
+    /// abandon should drop the `#[allow(dead_code)]`.
+    #[allow(dead_code)]
     pub fn abandon_ack(&self, message_hash: &str) {
         self.pending_acks.remove(message_hash);
     }

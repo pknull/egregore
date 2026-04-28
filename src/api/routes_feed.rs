@@ -202,10 +202,10 @@ pub async fn get_message_by_hash(
     };
 
     match msg {
-        Some(msg) => {
-            response::ok(crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
-                .into_response()
-        }
+        Some(msg) => response::ok(crate::feed::private_box::decrypt_or_passthrough(
+            &identity, msg,
+        ))
+        .into_response(),
         None => response::err::<()>(
             axum::http::StatusCode::NOT_FOUND,
             "NOT_FOUND",
@@ -214,4 +214,3 @@ pub async fn get_message_by_hash(
         .into_response(),
     }
 }
-

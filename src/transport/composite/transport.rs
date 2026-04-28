@@ -712,8 +712,7 @@ mod tests {
     fn new_rejects_fewer_than_two_children() {
         let empty = CompositeTransport::new(vec![]);
         assert!(empty.is_err(), "zero children must be rejected");
-        let single =
-            CompositeTransport::new(vec![ChildSpec::new(Arc::new(StubChild) as Arc<_>)]);
+        let single = CompositeTransport::new(vec![ChildSpec::new(Arc::new(StubChild) as Arc<_>)]);
         assert!(
             single.is_err(),
             "single-child composite is a pass-through; caller must use child directly"

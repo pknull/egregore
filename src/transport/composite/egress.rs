@@ -952,8 +952,15 @@ mod tests {
             let children_clone = children.clone();
             let cancel = cancel.clone();
             tokio::spawn(async move {
-                run_egress(1, dest as Arc<dyn Transport>, dir, bars, children_clone, cancel)
-                    .await;
+                run_egress(
+                    1,
+                    dest as Arc<dyn Transport>,
+                    dir,
+                    bars,
+                    children_clone,
+                    cancel,
+                )
+                .await;
             })
         };
         let e2 = {
@@ -963,8 +970,15 @@ mod tests {
             let children_clone = children.clone();
             let cancel = cancel.clone();
             tokio::spawn(async move {
-                run_egress(2, dest as Arc<dyn Transport>, dir, bars, children_clone, cancel)
-                    .await;
+                run_egress(
+                    2,
+                    dest as Arc<dyn Transport>,
+                    dir,
+                    bars,
+                    children_clone,
+                    cancel,
+                )
+                .await;
             })
         };
         dir1.egress_wake.notify_one();

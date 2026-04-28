@@ -15,7 +15,6 @@ use crate::api::response;
 use crate::api::AppState;
 use crate::feed::models::FeedQuery;
 use crate::feed::models::Message;
-use crate::feed::private_box;
 use crate::identity::PublicId;
 
 #[derive(Deserialize, Default)]
@@ -67,7 +66,7 @@ pub async fn get_feed(
         Ok(Ok(msgs)) => {
             let msgs: Vec<Message> = msgs
                 .into_iter()
-                .map(|msg| decrypt_for_local_identity(&identity, msg))
+                .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
                 .collect();
             let meta = response::ApiMetadata {
                 total: None,
@@ -110,7 +109,7 @@ pub async fn get_feed_by_author(
         Ok(Ok(msgs)) => {
             let msgs: Vec<Message> = msgs
                 .into_iter()
-                .map(|msg| decrypt_for_local_identity(&identity, msg))
+                .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
                 .collect();
             response::ok(msgs).into_response()
         }
@@ -146,7 +145,7 @@ pub async fn get_insights(
         Ok(Ok(msgs)) => {
             let msgs: Vec<Message> = msgs
                 .into_iter()
-                .map(|msg| decrypt_for_local_identity(&identity, msg))
+                .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
                 .collect();
             response::ok(msgs).into_response()
         }
@@ -184,7 +183,7 @@ pub async fn search_insights(
         Ok(Ok(msgs)) => {
             let msgs: Vec<Message> = msgs
                 .into_iter()
-                .map(|msg| decrypt_for_local_identity(&identity, msg))
+                .map(|msg| crate::feed::private_box::decrypt_or_passthrough(&identity, msg))
                 .collect();
             response::ok(msgs).into_response()
         }
@@ -209,7 +208,7 @@ pub async fn get_message_by_hash(
 
     match result {
         Ok(Ok(Some(msg))) => {
-            response::ok(decrypt_for_local_identity(&identity, msg)).into_response()
+            response::ok(crate::feed::private_box::decrypt_or_passthrough(&identity, msg)).into_response()
         }
         Ok(Ok(None)) => response::err::<()>(
             axum::http::StatusCode::NOT_FOUND,
@@ -227,17 +226,3 @@ pub async fn get_message_by_hash(
     }
 }
 
-fn decrypt_for_local_identity(identity: &crate::identity::Identity, message: Message) -> Message {
-    if !private_box::is_private_box_content(&message.content) {
-        return message;
-    }
-
-    match private_box::decrypt_for_identity(identity, &message) {
-        Ok(Some(decrypted)) => decrypted,
-        Ok(None) => message,
-        Err(error) => {
-            tracing::warn!(error = %error, hash = %message.hash, "failed to decrypt private box message");
-            message
-        }
-    }
-}

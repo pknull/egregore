@@ -63,7 +63,6 @@ impl ChildSpec {
 /// (`ingress`, `egress`, `health`) can read them without an accessor
 /// ceremony. Callers outside the crate construct via `new` + drive via
 /// the `Transport` trait only.
-#[allow(dead_code)] // consumed in Steps 16–20 (publish, ingress, egress, start, shutdown, health)
 pub struct CompositeTransport {
     /// Child transports as trait objects. Index = `TransportId`. Bus-specific
     /// hooks (`ack_after_publish`, `self_echo_total`) are dispatched through

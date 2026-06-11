@@ -25,7 +25,7 @@
 //! last_successful_publish/last_peer_contact RwLocks + last_error shared
 //! `Arc<RwLock<Option<String>>>`). The additional `pending_acks` map
 //! (amendment §C.2, §C.12) holds NATS ack handles keyed by
-//! `message.hash`; `ack_after_publish` / `abandon_ack` drain it.
+//! `message.hash`; `ack_after_publish` drains it.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -107,16 +107,13 @@ pub struct BusTransport {
 
     /// Effective config — `ack_wait_secs` may have been derived; keep
     /// the resolved form so `health` and operator-facing surfaces see
-    /// the actual values in use. Wave 2 Step 11's request_from path
-    /// reads `stream_name` to construct the ephemeral consumer.
-    #[allow(dead_code)] // consumed in Wave 2 Step 11
+    /// the actual values in use. The request_from path reads
+    /// `stream_name` to construct the ephemeral consumer.
     config: Arc<BusConfig>,
 
     /// Ack handles for in-flight consumer messages, keyed by
     /// `message.hash` (amendment §C.2, §C.12). Populated by
-    /// `subscribe`'s ingest loop; drained by `ack_after_publish` or
-    /// `abandon_ack` (Wave 2).
-    #[allow(dead_code)] // consumed in Wave 2 Step 10
+    /// `subscribe`'s ingest loop; drained by `ack_after_publish`.
     pending_acks: Arc<DashMap<String, async_nats::jetstream::Message>>,
 
     /// Single-shot start latch — `compare_exchange` makes `start`
@@ -438,17 +435,6 @@ impl BusTransport {
             })?;
         }
         Ok(())
-    }
-
-    /// Release the ack handle for `message_hash` WITHOUT acking. Intended
-    /// for shutdown or error paths so NATS `ack_wait` expires and the
-    /// message is redelivered (amendment §C.2). Currently unwired — egress
-    /// resolves all barriers via `ack_after_publish`. Retained as the
-    /// documented §C.2 affordance; a future commit wiring shutdown-time
-    /// abandon should drop the `#[allow(dead_code)]`.
-    #[allow(dead_code)]
-    pub fn abandon_ack(&self, message_hash: &str) {
-        self.pending_acks.remove(message_hash);
     }
 }
 

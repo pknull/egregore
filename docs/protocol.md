@@ -589,82 +589,9 @@ delay(attempt) = min(initial * 2^attempt * jitter, max)
 
 ---
 
-## 8. Consumer Groups
+## 8. Discovery
 
-Kafka-style coordinated consumption for multi-consumer scenarios.
-
-### 8.1 Concepts
-
-- **Group**: Named collection of consumers
-- **Member**: A consumer in a group
-- **Generation**: Monotonic counter, incremented on rebalance
-- **Assignment**: Which feeds each member is responsible for
-- **Offset**: Last processed sequence per feed (cursor)
-
-### 8.2 Round-Robin Assignment
-
-Feeds are distributed to members:
-
-```rust
-fn round_robin_assign(members: &[PublicId], feeds: &[PublicId])
-    -> Vec<(PublicId, Vec<PublicId>)>
-{
-    let mut assignments = vec![(member, vec![]); members.len()];
-    for (i, feed) in feeds.iter().enumerate() {
-        assignments[i % members.len()].1.push(feed);
-    }
-    assignments
-}
-
-// 3 feeds, 2 members:
-// Member 0: [feed0, feed2]
-// Member 1: [feed1]
-```
-
-### 8.3 Join/Leave Protocol
-
-**Join:**
-
-1. Create group if not exists
-2. Add member to group_members
-3. Increment generation
-4. Rebalance (reassign all feeds)
-5. Return assigned feeds and generation
-
-**Leave:**
-
-1. Remove member
-2. Remove member's assignments
-3. Increment generation
-4. Rebalance remaining members
-5. If no members left, delete group
-
-### 8.4 Offset Commit
-
-```rust
-commit_offset(group_id, author, sequence, committed_by) -> Result<GroupOffset>
-```
-
-- Verifies committer is assigned the feed (in transaction)
-- Only increases offset (MAX semantics)
-- Records who committed and when
-
-### 8.5 Heartbeat & Eviction
-
-Members must heartbeat to stay alive:
-
-```rust
-heartbeat(group_id, member_id) -> bool  // Update last_heartbeat
-evict_stale_members(timeout_secs) -> u64  // Remove dead members
-```
-
-Default timeout: 30 seconds. Dead members are evicted and their feeds reassigned.
-
----
-
-## 9. Discovery
-
-### 9.1 LAN UDP Discovery
+### 8.1 LAN UDP Discovery
 
 Opt-in broadcast on port 7656.
 
@@ -692,7 +619,7 @@ Opt-in broadcast on port 7656.
 - Periodic burst: every 5s for 30s
 - Repeat
 
-### 9.2 Peer Sources
+### 8.2 Peer Sources
 
 Sync loop merges peers from:
 
@@ -702,9 +629,9 @@ Sync loop merges peers from:
 
 ---
 
-## 10. Storage
+## 9. Storage
 
-### 10.1 SQLite Schema
+### 9.1 SQLite Schema
 
 ```sql
 -- Feed state
@@ -747,52 +674,19 @@ CREATE TABLE follows (
     author TEXT PRIMARY KEY
 );
 
--- Consumer groups
-CREATE TABLE consumer_groups (
-    group_id TEXT PRIMARY KEY,
-    generation INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE group_members (
-    group_id TEXT NOT NULL,
-    member_id TEXT NOT NULL,
-    joined_at TEXT NOT NULL,
-    last_heartbeat TEXT NOT NULL,
-    assignment_generation INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (group_id, member_id)
-);
-
-CREATE TABLE group_assignments (
-    group_id TEXT NOT NULL,
-    member_id TEXT NOT NULL,
-    author TEXT NOT NULL,
-    generation INTEGER NOT NULL,
-    PRIMARY KEY (group_id, author)
-);
-
-CREATE TABLE group_offsets (
-    group_id TEXT NOT NULL,
-    author TEXT NOT NULL,
-    committed_sequence INTEGER NOT NULL DEFAULT 0,
-    committed_at TEXT NOT NULL,
-    committed_by TEXT NOT NULL,
-    PRIMARY KEY (group_id, author)
-);
 ```
 
 ---
 
-## 11. Security Considerations
+## 10. Security Considerations
 
-### 11.1 Network Boundary
+### 10.1 Network Boundary
 
 - HTTP API binds to localhost only (127.0.0.1)
 - Gossip binds to all interfaces (0.0.0.0)
 - Network key is the trust boundary for gossip
 
-### 11.2 Cryptographic Choices
+### 10.2 Cryptographic Choices
 
 | Purpose | Algorithm |
 |---------|-----------|
@@ -803,7 +697,7 @@ CREATE TABLE group_offsets (
 | Key storage hardening | Owner-only file permissions |
 | HMAC | HMAC-SHA256 |
 
-### 11.3 Attack Mitigations
+### 10.3 Attack Mitigations
 
 | Attack | Mitigation |
 |--------|------------|
@@ -816,15 +710,15 @@ CREATE TABLE group_offsets (
 | Fork attacks | Hash chain validation |
 | Signature forgery | Ed25519 verification |
 
-### 11.4 File Permissions
+### 10.4 File Permissions
 
 Private key files MUST have mode 0600. Implementations SHOULD verify and warn if permissions are too open.
 
 ---
 
-## 12. Backward Compatibility
+## 11. Backward Compatibility
 
-### 12.1 Protocol Versioning
+### 11.1 Protocol Versioning
 
 Extensions use optional fields with `#[serde(default)]`:
 
@@ -840,7 +734,7 @@ Have {
 
 Old nodes ignore unknown fields. New nodes handle missing fields via defaults.
 
-### 12.2 Persistent Mode Fallback
+### 11.2 Persistent Mode Fallback
 
 - Old servers close after replication; new clients timeout and fall back to pull
 - Old clients close; new servers timeout and close normally
@@ -848,7 +742,7 @@ Old nodes ignore unknown fields. New nodes handle missing fields via defaults.
 
 ---
 
-## 13. Implementation Checklist
+## 12. Implementation Checklist
 
 ### Core
 
@@ -895,13 +789,6 @@ Old nodes ignore unknown fields. New nodes handle missing fields via defaults.
 - [ ] Push messages
 - [ ] Credit-based flow control
 - [ ] Connection registry
-
-### Consumer Groups
-
-- [ ] Join/leave with rebalancing
-- [ ] Round-robin assignment
-- [ ] Offset tracking
-- [ ] Heartbeat/eviction
 
 ### Discovery
 

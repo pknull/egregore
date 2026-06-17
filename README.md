@@ -79,7 +79,6 @@ Use feature-first docs when you want one capability explained in isolation:
 | Mesh Replication | [`docs/features/mesh-replication.md`](docs/features/mesh-replication.md) |
 | Peer Discovery | [`docs/features/peer-discovery.md`](docs/features/peer-discovery.md) |
 | Selective Replication (`follows`/`topics`) | [`docs/features/selective-replication.md`](docs/features/selective-replication.md) |
-| Consumer Groups | [`docs/features/consumer-groups.md`](docs/features/consumer-groups.md) |
 | Schema Registry | [`docs/features/schema-registry.md`](docs/features/schema-registry.md) |
 | Retention and Lifecycle | [`docs/features/retention-and-lifecycle.md`](docs/features/retention-and-lifecycle.md) |
 | Mesh Health | [`docs/features/mesh-health.md`](docs/features/mesh-health.md) |
@@ -196,7 +195,7 @@ Generate a documented config file:
 
 This creates `./data/config.yaml` with all options and defaults. Edit this file for persistent configuration. CLI flags override config file values when both are specified.
 
-The config file supports options not available via CLI (flow control, retention settings) and persistent toggles like `schema_strict`, `api_enabled`, `api_auth_enabled`, `mcp_enabled`, `node_status_enabled`, `schema_api_enabled`, and `consumer_groups_enabled`. `node_status_enabled` is off by default; turn it on only if you want periodic `node_status` messages published to the feed. `consumer_groups_enabled` is off by default — enable it to expose the Kafka-style `/v1/groups/*` API for coordinated multi-consumer deployments. `schema_api_enabled` is on by default; turn it off to hide the `/v1/schemas/*` management endpoints (internal schema validation still runs regardless). See the generated template for full documentation.
+The config file supports options not available via CLI (flow control, retention settings) and persistent toggles like `schema_strict`, `api_enabled`, `api_auth_enabled`, `mcp_enabled`, `node_status_enabled` and `schema_api_enabled`. `node_status_enabled` is off by default; turn it on only if you want periodic `node_status` messages published to the feed. `schema_api_enabled` is on by default; turn it off to hide the `/v1/schemas/*` management endpoints (internal schema validation still runs regardless). See the generated template for full documentation.
 
 The generated template keeps `api_auth_enabled: false` for localhost-first
 compatibility. If you turn it on, you must also set `api_auth_token` before the
@@ -586,7 +585,6 @@ src/
       messages.rs Message CRUD, chain validation, search, topic filtering
       peers.rs    Peer storage, follows
       health.rs   Peer health tracking
-      groups.rs   Consumer groups, membership, offset tracking
       retention.rs  Retention policy enforcement, cleanup
   gossip/
     connection.rs SHS handshake over TCP, Box Stream, SecureReader/SecureWriter
@@ -614,7 +612,6 @@ src/
     routes_identity.rs GET /v1/identity
     routes_mesh.rs    GET /v1/mesh (mesh-wide peer health)
     routes_events.rs  GET /v1/events (SSE streaming)
-    routes_groups.rs  Consumer group management (POST/GET/DELETE /v1/groups)
     routes_schema.rs  Schema registry (GET/POST /v1/schemas)
     routes_topics.rs  Topic subscriptions (GET/POST/DELETE /v1/topics)
     routes_retention.rs  Retention policy endpoints (GET/POST /v1/retention)

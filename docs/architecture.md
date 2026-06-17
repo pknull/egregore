@@ -14,7 +14,6 @@ Architecture documentation is split into feature-aligned slices so each capabili
 - Mesh Replication: [`docs/architecture/mesh-replication.md`](./architecture/mesh-replication.md)
 - Peer Discovery and Addressing: [`docs/architecture/peer-discovery.md`](./architecture/peer-discovery.md)
 - Selective Replication Policy: [`docs/architecture/selective-replication.md`](./architecture/selective-replication.md)
-- Consumer Groups: [`docs/architecture/consumer-groups.md`](./architecture/consumer-groups.md)
 - Schema Registry: [`docs/architecture/schema-registry.md`](./architecture/schema-registry.md)
 - Retention and Lifecycle: [`docs/architecture/retention-and-lifecycle.md`](./architecture/retention-and-lifecycle.md)
 - Mesh Health: [`docs/architecture/mesh-health.md`](./architecture/mesh-health.md)

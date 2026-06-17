@@ -49,7 +49,6 @@ src/
       messages.rs       Message CRUD, chain validation, search, topic filtering; get_latest_by_content_type
       peers.rs          Peer storage, follows
       health.rs         Peer health tracking
-      groups.rs         Consumer groups, membership, offset tracking
       pending.rs        pending_forwarding table CRUD (Phase 2 Wave 1)
       retention.rs      Retention policy (age + count sweeps)
   metrics.rs            Prometheus metrics (ingest counters, transport health, bridge queues, chain-gap gauges) — Phase 2 Wave 5
@@ -99,7 +98,6 @@ src/
     routes_identity.rs GET /v1/identity
     routes_mesh.rs    GET /v1/mesh (mesh-wide peer health)
     routes_events.rs  GET /v1/events (SSE streaming)
-    routes_groups.rs  Consumer group management (POST/GET/DELETE /v1/groups)
     routes_schema.rs  Schema registry (GET/POST /v1/schemas)
     routes_topics.rs  Topic subscriptions (GET/POST/DELETE /v1/topics)
     mcp.rs            MCP JSON-RPC 2.0 dispatcher (POST /mcp)

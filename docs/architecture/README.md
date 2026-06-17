@@ -18,7 +18,6 @@ For usage and operator workflows, use [`docs/features/README.md`](../features/RE
 | Mesh Replication | [mesh-replication.md](./mesh-replication.md) | [`docs/features/mesh-replication.md`](../features/mesh-replication.md) |
 | Peer Discovery | [peer-discovery.md](./peer-discovery.md) | [`docs/features/peer-discovery.md`](../features/peer-discovery.md) |
 | Selective Replication | [selective-replication.md](./selective-replication.md) | [`docs/features/selective-replication.md`](../features/selective-replication.md) |
-| Consumer Groups | [consumer-groups.md](./consumer-groups.md) | [`docs/features/consumer-groups.md`](../features/consumer-groups.md) |
 | Schema Registry | [schema-registry.md](./schema-registry.md) | [`docs/features/schema-registry.md`](../features/schema-registry.md) |
 | Retention and Lifecycle | [retention-and-lifecycle.md](./retention-and-lifecycle.md) | [`docs/features/retention-and-lifecycle.md`](../features/retention-and-lifecycle.md) |
 | Mesh Health | [mesh-health.md](./mesh-health.md) | [`docs/features/mesh-health.md`](../features/mesh-health.md) |

@@ -222,9 +222,9 @@ pub fn from_error(e: crate::error::EgreError) -> Response {
 /// Or, if the handler's signature is `Result<Response, Response>`, just `?`.
 ///
 /// Do NOT use this helper for handlers that need to introspect `EgreError`
-/// before converting it (e.g. group "already exists" → 409, status/health
-/// builders that intentionally degrade rather than fail). Those keep the
-/// inline `match`.
+/// before converting it (e.g. a duplicate insert "already exists" → 409, or
+/// status/health builders that intentionally degrade rather than fail). Those
+/// keep the inline `match`.
 pub async fn run_blocking<T, F>(f: F, ctx: &'static str) -> std::result::Result<T, Response>
 where
     F: FnOnce() -> std::result::Result<T, crate::error::EgreError> + Send + 'static,

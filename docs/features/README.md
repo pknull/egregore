@@ -22,7 +22,6 @@ For architecture internals (module boundaries, invariants, storage ownership), s
 | Mesh Replication | Pull/push gossip synchronization and flow control | [mesh-replication.md](./mesh-replication.md) |
 | Peer Discovery | Static peers, LAN UDP discovery, and mDNS discovery | [peer-discovery.md](./peer-discovery.md) |
 | Selective Replication | Author (`follows`) and topic (`topics`) replication filters | [selective-replication.md](./selective-replication.md) |
-| Consumer Groups | Local worker coordination and offset tracking | [consumer-groups.md](./consumer-groups.md) |
 | Schema Registry | Message schema contracts and strict-mode enforcement | [schema-registry.md](./schema-registry.md) |
 | Retention and Lifecycle | TTL, retention policies, compaction, tombstones | [retention-and-lifecycle.md](./retention-and-lifecycle.md) |
 | Mesh Health | Direct and transitive peer health visibility | [mesh-health.md](./mesh-health.md) |

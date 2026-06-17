@@ -221,75 +221,7 @@ Effect:
 When topic subscriptions are non-empty, peers send this node only messages
 whose `tags` match at least one subscribed topic.
 
-### 4.4 Groups (Local Worker Coordination)
-
-Groups do not span nodes. A group is local to one node's SQLite database.
-
-What groups do:
-
-1. Workers join a group with a `member_id`.
-2. Egregore assigns author feeds across members (round-robin).
-3. Each worker processes only its `assigned_feeds`.
-4. Workers commit offsets; commits are rejected if member is not assigned.
-
-`member_id` must be in `@<base64>.ed25519` format. Use a stable ID per worker slot
-(for example, `worker-a`, `worker-b` identities) so restarts do not create churn.
-
-Create/list group:
-
-```bash
-curl -X POST http://localhost:7654/v1/groups \
-  -H 'Content-Type: application/json' \
-  -d '{"group_id":"analytics"}'
-
-curl http://localhost:7654/v1/groups
-```
-
-Worker `@AAA...` joins:
-
-```bash
-curl -X POST http://localhost:7654/v1/groups/analytics/join \
-  -H 'Content-Type: application/json' \
-  -d '{"member_id":"@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519"}'
-```
-
-Worker `@BBB...` joins:
-
-```bash
-curl -X POST http://localhost:7654/v1/groups/analytics/join \
-  -H 'Content-Type: application/json' \
-  -d '{"member_id":"@BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=.ed25519"}'
-```
-
-Inspect current assignments:
-
-```bash
-curl http://localhost:7654/v1/groups/analytics/members
-```
-
-Commit progress for an assigned feed:
-
-```bash
-curl -X POST http://localhost:7654/v1/groups/analytics/offsets \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "author":"@<feed-author>.ed25519",
-    "sequence":42,
-    "committed_by":"@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519"
-  }'
-```
-
-If `committed_by` is not assigned that `author` in the group, commit is rejected.
-
-Graceful shutdown:
-
-```bash
-curl -X POST http://localhost:7654/v1/groups/analytics/leave \
-  -H 'Content-Type: application/json' \
-  -d '{"member_id":"@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519"}'
-```
-
-### 4.5 Practical Routing Pattern
+### 4.4 Practical Routing Pattern
 
 If you want "`@AAA` processes instead of `@BBB`":
 

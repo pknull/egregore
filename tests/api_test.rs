@@ -37,9 +37,6 @@ fn create_test_engine() -> (Identity, Arc<FeedEngine>) {
 fn create_test_app_with_identity(identity: Identity, engine: Arc<FeedEngine>) -> axum::Router {
     let config = Config {
         api_auth_enabled: false,
-        // Integration tests exercise the full HTTP surface, including advanced
-        // features that are off by default in production.
-        consumer_groups_enabled: true,
         ..Config::default()
     };
     let tmp = tempfile::tempdir().unwrap();
@@ -93,273 +90,6 @@ fn assert_validation_error_code_and_field(json: &Value, expected_code: &str, exp
         "expected non-empty validation detail message, got {:?}",
         json["error"]["details"][0]["message"]
     );
-}
-
-// ============ GROUP TESTS ============
-
-#[tokio::test]
-async fn test_create_and_list_groups() {
-    let (_engine, app) = create_test_app();
-
-    // Create a group
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/groups")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"group_id": "test-group"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let json = json_body(response).await;
-    assert!(json["success"].as_bool().unwrap());
-    assert_eq!(json["data"]["group_id"], "test-group");
-
-    // List groups
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/groups")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = json_body(response).await;
-    assert!(json["success"].as_bool().unwrap());
-    assert_eq!(json["data"].as_array().unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn test_get_nonexistent_group_returns_404() {
-    let (_engine, app) = create_test_app();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/groups/nonexistent")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn test_get_members_nonexistent_group_returns_404() {
-    let (_engine, app) = create_test_app();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/groups/nonexistent/members")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn test_get_offsets_nonexistent_group_returns_404() {
-    let (_engine, app) = create_test_app();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/groups/nonexistent/offsets")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn test_join_and_leave_group() {
-    let (_engine, app) = create_test_app();
-
-    // Create group first
-    let _ = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/groups")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"group_id": "join-test"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    // Join the group
-    let member_id = "@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519";
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/groups/join-test/join")
-                .header("content-type", "application/json")
-                .body(Body::from(format!(r#"{{"member_id": "{}"}}"#, member_id)))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let json = json_body(response).await;
-    assert!(json["data"]["is_leader"].as_bool().unwrap());
-
-    // Leave the group
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/groups/join-test/leave")
-                .header("content-type", "application/json")
-                .body(Body::from(format!(r#"{{"member_id": "{}"}}"#, member_id)))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-}
-
-#[tokio::test]
-async fn test_join_group_invalid_member_id_returns_structured_error() {
-    let (_engine, app) = create_test_app();
-
-    let _ = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/groups")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"group_id": "join-test"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/groups/join-test/join")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"member_id":"not-a-public-id"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let json = json_body(response).await;
-    assert_validation_error(&json, "INVALID_MEMBER_ID", "member_id", "@<base64>.ed25519");
-}
-
-#[tokio::test]
-async fn test_delete_group() {
-    let (_engine, app) = create_test_app();
-
-    // Create group
-    let _ = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/groups")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"group_id": "delete-test"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    // Delete it (note: production route requires content-type for DELETE)
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/v1/groups/delete-test")
-                .header("content-type", "application/json")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-    // Verify it's gone
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/groups/delete-test")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn test_duplicate_group_creation_returns_conflict() {
-    let (_engine, app) = create_test_app();
-
-    // Create group
-    let _ = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/groups")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"group_id": "dup-test"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    // Try to create again
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/groups")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"group_id": "dup-test"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
 // ============ TOPIC TESTS ============
@@ -686,8 +416,8 @@ async fn test_csrf_rejects_post_without_content_type() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/groups")
-                .body(Body::from(r#"{"group_id": "csrf-test"}"#))
+                .uri("/v1/follows")
+                .body(Body::from(r#"{"public_id": "csrf-test"}"#))
                 .unwrap(),
         )
         .await
@@ -705,9 +435,9 @@ async fn test_csrf_rejects_form_content_type() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/groups")
+                .uri("/v1/follows")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("group_id=csrf-test"))
+                .body(Body::from("public_id=csrf-test"))
                 .unwrap(),
         )
         .await
@@ -1037,7 +767,7 @@ async fn test_events_endpoint_accepts_query_params() {
 }
 
 /// Build a test app with a custom config closure. Lets individual tests flip
-/// feature flags (e.g., disable consumer groups) to verify route gating.
+/// feature flags (e.g., disable the schema API) to verify route gating.
 fn create_test_app_with_config<F>(customize: F) -> axum::Router
 where
     F: FnOnce(&mut Config),
@@ -1047,7 +777,6 @@ where
     let engine = Arc::new(FeedEngine::new(store));
     let mut config = Config {
         api_auth_enabled: false,
-        consumer_groups_enabled: true,
         ..Config::default()
     };
     customize(&mut config);
@@ -1062,22 +791,6 @@ where
         blob_store,
     };
     router_with_mcp(state, false)
-}
-
-#[tokio::test]
-async fn consumer_groups_disabled_returns_404() {
-    let app = create_test_app_with_config(|c| c.consumer_groups_enabled = false);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/groups")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1098,9 +811,8 @@ async fn schema_api_disabled_returns_404() {
 
 #[tokio::test]
 async fn core_routes_unaffected_by_advanced_toggles() {
-    // With both advanced features off, core routes (feed, identity) still respond.
+    // With the advanced feature off, core routes (feed, identity) still respond.
     let app = create_test_app_with_config(|c| {
-        c.consumer_groups_enabled = false;
         c.schema_api_enabled = false;
     });
     let response = app

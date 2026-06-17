@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,10 +10,10 @@ use egregore::api::routes_peers::is_valid_peer_address;
 use egregore::config::Config;
 use egregore::feed::schema::{SchemaDefinition, SchemaFileDefinition, SchemaRegistry};
 use egregore::feed::store::retention::{RetentionPolicy, RetentionScope};
-use egregore::feed::store::{AddressPeer, ConsumerGroup, FeedStore, GroupMember, PeerRecord};
+use egregore::feed::store::{AddressPeer, FeedStore, PeerRecord};
 use egregore::identity::{Identity, PublicId};
 
-use crate::{Command, GroupCommand, PeerCommand, RetentionCommand, SchemaCommand, TopicCommand};
+use crate::{Command, PeerCommand, RetentionCommand, SchemaCommand, TopicCommand};
 
 #[derive(Clone)]
 pub struct CliContext {
@@ -54,30 +54,6 @@ impl OutputMode {
 #[derive(Debug, Clone, Serialize)]
 struct FollowChange {
     author: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct GroupSummary {
-    group_id: String,
-    generation: u64,
-    member_count: u64,
-    created_at: String,
-    updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct GroupMemberView {
-    member_id: String,
-    joined_at: String,
-    last_heartbeat: String,
-    assignment_generation: u64,
-    assigned_feeds: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct GroupDetail {
-    group: GroupSummary,
-    members: Vec<GroupMemberView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -168,10 +144,6 @@ pub fn handle_command(
             handle_topic_command(command, ctx, output)?;
             Ok(true)
         }
-        Command::Group { command } => {
-            handle_group_command(command, ctx, output)?;
-            Ok(true)
-        }
         Command::Schema { command } => {
             handle_schema_command(command, ctx, output)?;
             Ok(true)
@@ -246,50 +218,6 @@ fn handle_topic_command(
             ctx.store.remove_topic_subscription(name)?;
             output.emit(&serde_json::json!({ "topic": name }), || {
                 format!("Unsubscribed from topic {}", name)
-            })
-        }
-    }
-}
-
-fn handle_group_command(
-    command: &GroupCommand,
-    ctx: &CliContext,
-    output: OutputMode,
-) -> anyhow::Result<()> {
-    match command {
-        GroupCommand::Create { name, members } => {
-            validate_group_name(name)?;
-            let members = parse_members_csv(members.as_deref())?;
-            ctx.store.create_group(name)?;
-            for member in members {
-                ctx.store.join_group(name, &member)?;
-            }
-            let detail = group_detail(&ctx.store, name)?
-                .ok_or_else(|| anyhow!("group disappeared after creation: {name}"))?;
-            output.emit(&detail, || {
-                format!(
-                    "Created group {} (generation {}, members {})",
-                    detail.group.group_id, detail.group.generation, detail.group.member_count
-                )
-            })
-        }
-        GroupCommand::List => {
-            let groups = list_groups(&ctx.store)?;
-            output.emit(&groups, || format_group_list(&groups))?;
-            Ok(())
-        }
-        GroupCommand::Show { name } => {
-            let detail = group_detail(&ctx.store, name)?
-                .ok_or_else(|| anyhow!("group not found: {name}"))?;
-            output.emit(&detail, || format_group_detail(&detail))?;
-            Ok(())
-        }
-        GroupCommand::Delete { name } => {
-            if !ctx.store.delete_group(name)? {
-                bail!("group not found: {}", name);
-            }
-            output.emit(&serde_json::json!({ "group_id": name }), || {
-                format!("Deleted group {}", name)
             })
         }
     }
@@ -409,90 +337,6 @@ fn parse_public_id(value: &str) -> anyhow::Result<PublicId> {
         bail!("invalid public ID: {}", value);
     }
     Ok(PublicId(value.to_string()))
-}
-
-fn parse_members_csv(input: Option<&str>) -> anyhow::Result<Vec<PublicId>> {
-    let Some(input) = input else {
-        return Ok(Vec::new());
-    };
-
-    let mut seen = BTreeSet::new();
-    let mut members = Vec::new();
-    for part in input.split(',') {
-        let trimmed = part.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let member = parse_public_id(trimmed)?;
-        if seen.insert(member.0.clone()) {
-            members.push(member);
-        }
-    }
-    Ok(members)
-}
-
-fn validate_group_name(name: &str) -> anyhow::Result<()> {
-    let valid = !name.is_empty()
-        && name.len() <= 64
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if !valid {
-        bail!("group name must be 1-64 alphanumeric characters, hyphens, or underscores");
-    }
-    Ok(())
-}
-
-fn list_groups(store: &FeedStore) -> anyhow::Result<Vec<GroupSummary>> {
-    let mut groups = store
-        .list_groups()?
-        .into_iter()
-        .map(|group| group_summary(store, group))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    groups.sort_by(|left, right| left.group_id.cmp(&right.group_id));
-    Ok(groups)
-}
-
-fn group_summary(store: &FeedStore, group: ConsumerGroup) -> anyhow::Result<GroupSummary> {
-    Ok(GroupSummary {
-        member_count: store.group_member_count(&group.group_id)?,
-        group_id: group.group_id,
-        generation: group.generation,
-        created_at: group.created_at.to_rfc3339(),
-        updated_at: group.updated_at.to_rfc3339(),
-    })
-}
-
-fn group_detail(store: &FeedStore, group_id: &str) -> anyhow::Result<Option<GroupDetail>> {
-    let Some(group) = store.get_group(group_id)? else {
-        return Ok(None);
-    };
-
-    let mut members: Vec<GroupMemberView> = store
-        .get_group_members(group_id)?
-        .into_iter()
-        .map(group_member_view)
-        .collect();
-    members.sort_by(|left, right| left.member_id.cmp(&right.member_id));
-
-    Ok(Some(GroupDetail {
-        group: group_summary(store, group)?,
-        members,
-    }))
-}
-
-fn group_member_view(member: GroupMember) -> GroupMemberView {
-    GroupMemberView {
-        member_id: member.member_id.0,
-        joined_at: member.joined_at.to_rfc3339(),
-        last_heartbeat: member.last_heartbeat.to_rfc3339(),
-        assignment_generation: member.assignment_generation,
-        assigned_feeds: member
-            .assigned_feeds
-            .into_iter()
-            .map(|feed| feed.0)
-            .collect(),
-    }
 }
 
 fn schema_registry(strict: bool, schemas_dir: &Path) -> SchemaRegistry {
@@ -778,48 +622,6 @@ fn format_string_list(values: &[String], empty_message: &str) -> String {
     } else {
         values.join("\n")
     }
-}
-
-fn format_group_list(groups: &[GroupSummary]) -> String {
-    if groups.is_empty() {
-        return "No consumer groups.".to_string();
-    }
-    groups
-        .iter()
-        .map(|group| {
-            format!(
-                "{} generation={} members={}",
-                group.group_id, group.generation, group.member_count
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn format_group_detail(detail: &GroupDetail) -> String {
-    let mut lines = vec![
-        format!("Group: {}", detail.group.group_id),
-        format!("Generation: {}", detail.group.generation),
-        format!("Members: {}", detail.group.member_count),
-        format!("Created: {}", detail.group.created_at),
-        format!("Updated: {}", detail.group.updated_at),
-    ];
-
-    if detail.members.is_empty() {
-        lines.push("Member list: none".to_string());
-    } else {
-        lines.push("Members:".to_string());
-        for member in &detail.members {
-            lines.push(format!(
-                "{} heartbeat={} feeds={}",
-                member.member_id,
-                member.last_heartbeat,
-                member.assigned_feeds.len()
-            ));
-        }
-    }
-
-    lines.join("\n")
 }
 
 fn format_schema_list(schemas: &[SchemaView]) -> String {
@@ -1148,17 +950,6 @@ mod tests {
     fn parse_duration_supports_days_and_compound_values() {
         assert_eq!(parse_duration_spec("30d").unwrap(), 30 * 24 * 60 * 60);
         assert_eq!(parse_duration_spec("1h30m").unwrap(), 5400);
-    }
-
-    #[test]
-    fn parse_members_deduplicates_and_preserves_order() {
-        let first = Identity::generate().public_id().0;
-        let second = Identity::generate().public_id().0;
-        let members = parse_members_csv(Some(&format!("{first},{second},{first}"))).unwrap();
-
-        assert_eq!(members.len(), 2);
-        assert_eq!(members[0].0, first);
-        assert_eq!(members[1].0, second);
     }
 
     #[test]

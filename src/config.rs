@@ -152,14 +152,6 @@ pub struct Config {
     /// not need runtime schema management.
     #[serde(default = "default_schema_api_enabled")]
     pub schema_api_enabled: bool,
-    /// Enable consumer groups (`/v1/groups/*`).
-    ///
-    /// Consumer groups provide Kafka-style coordinated feed consumption with
-    /// generation counters, heartbeat-based eviction, and offset tracking. This
-    /// is an advanced feature useful for multi-consumer deployments. Disabled
-    /// by default — most local meshes do not need it.
-    #[serde(default)]
-    pub consumer_groups_enabled: bool,
     pub peers: Vec<String>,
     pub lan_discovery: bool,
     pub discovery_port: u16,
@@ -312,7 +304,6 @@ impl Default for Config {
             network_key: DEFAULT_NETWORK_KEY.to_string(),
             schema_strict: false,
             schema_api_enabled: true,
-            consumer_groups_enabled: false,
             peers: Vec::new(),
             lan_discovery: false,
             discovery_port: DEFAULT_DISCOVERY_PORT,

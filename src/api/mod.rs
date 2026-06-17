@@ -25,7 +25,6 @@ pub mod routes_blobs;
 pub mod routes_events;
 pub mod routes_feed;
 pub mod routes_follows;
-pub mod routes_groups;
 pub mod routes_identity;
 pub mod routes_mesh;
 pub mod routes_peers;
@@ -232,31 +231,6 @@ pub fn router_with_mcp(state: AppState, mcp_enabled: bool) -> Router {
             "/v1/transport/bus/authors",
             get(routes_transport::get_bus_authors),
         );
-
-    // Consumer groups API (advanced feature; off by default).
-    let router = if state.config.consumer_groups_enabled {
-        router
-            .route(
-                "/v1/groups",
-                get(routes_groups::list_groups).post(routes_groups::create_group),
-            )
-            .route(
-                "/v1/groups/:id",
-                get(routes_groups::get_group).delete(routes_groups::delete_group),
-            )
-            .route(
-                "/v1/groups/:id/members",
-                get(routes_groups::get_group_members),
-            )
-            .route("/v1/groups/:id/join", post(routes_groups::join_group))
-            .route("/v1/groups/:id/leave", post(routes_groups::leave_group))
-            .route(
-                "/v1/groups/:id/offsets",
-                get(routes_groups::get_group_offsets).post(routes_groups::commit_offset),
-            )
-    } else {
-        router
-    };
 
     // Schema registry management API (on by default; internal validation is always on).
     let router = if state.config.schema_api_enabled {

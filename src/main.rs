@@ -154,12 +154,6 @@ enum Command {
         command: TopicCommand,
     },
 
-    /// Manage consumer groups
-    Group {
-        #[command(subcommand)]
-        command: GroupCommand,
-    },
-
     /// Manage schema registry entries
     Schema {
         #[command(subcommand)]
@@ -239,23 +233,6 @@ enum TopicCommand {
     List,
     /// Unsubscribe from a topic
     Unsubscribe { name: String },
-}
-
-#[derive(clap::Subcommand, Debug, Clone)]
-enum GroupCommand {
-    /// Create a consumer group
-    Create {
-        name: String,
-        /// Comma-separated member public IDs to join immediately
-        #[arg(long)]
-        members: Option<String>,
-    },
-    /// List consumer groups
-    List,
-    /// Show a consumer group with membership details
-    Show { name: String },
-    /// Delete a consumer group
-    Delete { name: String },
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
@@ -1242,33 +1219,6 @@ async fn run_node_status_publisher(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cli_parses_group_create_with_members_and_json_flag() {
-        let cli = Cli::try_parse_from([
-            "egregore",
-            "--json",
-            "--data-dir",
-            "/tmp/egregore",
-            "group",
-            "create",
-            "workers",
-            "--members",
-            "@one.ed25519,@two.ed25519",
-        ])
-        .unwrap();
-
-        assert!(cli.json);
-        match cli.command.unwrap() {
-            Command::Group {
-                command: GroupCommand::Create { name, members },
-            } => {
-                assert_eq!(name, "workers");
-                assert_eq!(members.as_deref(), Some("@one.ed25519,@two.ed25519"));
-            }
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
 
     #[test]
     fn cli_parses_identity_export_and_quiet() {

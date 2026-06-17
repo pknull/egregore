@@ -11,16 +11,11 @@
 //! Both contribute to the sync loop's peer list via `list_all_syncable_addresses()`
 //! (SQL UNION, deduplicated).
 
-mod groups;
 mod health;
 mod messages;
 mod peers;
 pub mod pending;
 pub mod retention;
-
-pub use groups::{
-    AssignmentStrategy, ConsumerGroup, GroupMember, GroupOffset, JoinGroupRequest, JoinGroupResult,
-};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
@@ -306,9 +301,6 @@ impl FeedStore {
                 "CREATE TABLE IF NOT EXISTS topic_subscriptions (topic TEXT PRIMARY KEY);",
             )?;
         }
-
-        // Migration: add consumer groups tables
-        Self::ensure_groups_schema(conn)?;
 
         // Migration: add expires_at column to messages
         let has_expires_at: bool = conn

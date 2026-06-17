@@ -53,20 +53,6 @@ This map lists the node HTTP surfaces by capability area.
 | POST | `/v1/retention/policies` | Create retention policy |
 | DELETE | `/v1/retention/policies/:id` | Delete retention policy |
 
-## Consumer Groups
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/v1/groups` | List groups |
-| POST | `/v1/groups` | Create group |
-| GET | `/v1/groups/:id` | Get group |
-| DELETE | `/v1/groups/:id` | Delete group |
-| GET | `/v1/groups/:id/members` | List members |
-| POST | `/v1/groups/:id/join` | Join group |
-| POST | `/v1/groups/:id/leave` | Leave group |
-| GET | `/v1/groups/:id/offsets` | Read committed offsets |
-| POST | `/v1/groups/:id/offsets` | Commit offset |
-
 ## Event and MCP Interfaces
 
 | Method | Path | Purpose |

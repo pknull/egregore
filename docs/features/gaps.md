@@ -11,22 +11,19 @@ This file tracks cross-feature gaps discovered while writing feature-isolated do
 2. Follows/topics are API-managed only.
    - No CLI flags or `config.yaml` bootstrap entries for follows/topics.
 
-3. Consumer groups are API-managed only.
-   - No CLI workflow and no MCP tools for group operations.
-
-4. Schema registry operations are API-managed only.
+3. Schema registry operations are API-managed only.
    - No CLI workflow and no MCP tools for schema operations.
 
-5. Retention policy management is API-managed only.
+4. Retention policy management is API-managed only.
    - No CLI workflow and no MCP tools for retention policy CRUD.
 
-6. Topic controls are not exposed in MCP.
+5. Topic controls are not exposed in MCP.
    - MCP has follow/unfollow tools but no topic subscribe/unsubscribe/list tools.
 
-7. Private Box is library-only.
+6. Private Box is library-only.
    - No HTTP/MCP route currently exposes this capability.
 
-8. Feature docs currently include usage patterns and examples but not troubleshooting runbooks per feature.
+7. Feature docs currently include usage patterns and examples but not troubleshooting runbooks per feature.
    - Troubleshooting remains centralized in `docs/operations.md`.
 
 ## Suggested Review Order

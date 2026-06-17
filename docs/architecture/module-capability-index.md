@@ -13,6 +13,5 @@ Use this as a fast map from runtime capability to implementation files.
 | Discovery | `src/gossip/discovery.rs`, `src/gossip/mdns.rs` |
 | Mesh health | `src/gossip/health.rs`, `src/feed/store/health.rs`, `src/api/routes_mesh.rs` |
 | Schema governance | `src/feed/schema.rs`, `src/api/routes_schema.rs` |
-| Consumer groups | `src/feed/store/groups.rs`, `src/api/routes_groups.rs` |
 | Retention | `src/feed/store/retention.rs`, `src/api/routes_retention.rs` |
 | API and integrations | `src/api/mod.rs`, `src/api/routes_*`, `src/api/mcp*.rs`, `src/hooks.rs` |

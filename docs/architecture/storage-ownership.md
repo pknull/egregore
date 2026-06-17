@@ -8,7 +8,6 @@ This map shows which architecture slice primarily owns each SQLite table.
 | `peers`, `known_peers` | Peer Discovery and Addressing |
 | `follows`, `topic_subscriptions` | Selective Replication Policy |
 | `peer_health`, `local_state` | Mesh Health Observability |
-| `consumer_groups`, `group_members`, `group_assignments`, `group_offsets` | Consumer Groups |
 | `retention_policies`, `tombstones` | Retention and Lifecycle |
 
 ## Notes

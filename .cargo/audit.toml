@@ -38,6 +38,18 @@
 #
 # Track testcontainers upstream for dep-tree modernization. Revisit on
 # next testcontainers release.
+#
+# quick-xml 0.38.4 (via self_update 0.44, the operator-triggered
+# `egregore update` flow). Both fixes require quick-xml >=0.41, a
+# semver-major bump self_update has not adopted (no release beyond
+# 0.44 as of 2026-08-05). Both are DoS-class issues parsing
+# attacker-controlled XML; the updater only parses GitHub release
+# metadata over TLS, so reachability is low. Revisit on next
+# self_update release:
+#   RUSTSEC-2026-0194 — quadratic run time checking a start tag for
+#     duplicate attribute names
+#   RUSTSEC-2026-0195 — unbounded namespace-declaration allocation in
+#     NsReader enables memory-exhaustion denial of service
 ignore = [
   "RUSTSEC-2026-0097",
   "RUSTSEC-2026-0049",
@@ -46,4 +58,6 @@ ignore = [
   "RUSTSEC-2026-0104",
   "RUSTSEC-2025-0134",
   "RUSTSEC-2025-0111",
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
 ]

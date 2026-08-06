@@ -55,7 +55,7 @@ pub async fn run_mdns_discovery(
     let our_public_id_short = truncate_id(&our_public_id, ID_TRUNCATE_LEN);
 
     // Create service info for advertising
-    let instance_name = format!("egregore-{}", &our_public_id_short);
+    let instance_name = format!("egregore-{}", our_public_id_short);
     let host_name = format!(
         "{}.local.",
         hostname::get()

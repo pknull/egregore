@@ -172,6 +172,16 @@ impl OtlpConfig {
 
         warnings
     }
+
+    /// Emit each validation warning via `tracing::warn!`.
+    ///
+    /// Must be called after a tracing subscriber is installed — warnings
+    /// emitted before init are silently dropped.
+    pub fn emit_warnings(&self) {
+        for warning in self.validate() {
+            tracing::warn!("{}", warning);
+        }
+    }
 }
 
 /// Validate OTLP endpoint URL for security.
@@ -582,7 +592,86 @@ fn sanitize_value(value: &serde_json::Value, depth: usize) -> serde_json::Value 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::fmt::MakeWriter;
+
     use super::*;
+
+    /// Shared `Vec<u8>` writer for capturing `tracing` output in tests.
+    /// Mirrors the capture shim in `transport/mod.rs` tests.
+    #[derive(Clone, Default)]
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for BufferWriter {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Run `f` with a `tracing` subscriber whose writer buffers output,
+    /// then return the captured UTF-8 string.
+    fn capture_tracing<F: FnOnce()>(f: F) -> String {
+        let buffer = BufferWriter::default();
+        let captured = buffer.0.clone();
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer)
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, f);
+
+        let bytes = captured.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn emit_warnings_logs_sample_rate_above_one() {
+        let config = OtlpConfig {
+            sample_rate: 2.5,
+            ..OtlpConfig::default()
+        };
+        let output = capture_tracing(|| config.emit_warnings());
+        assert!(
+            output.contains("otlp.sample_rate 2.5 exceeds 1.0"),
+            "expected exceeds-1.0 warning, got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn emit_warnings_logs_negative_sample_rate() {
+        let config = OtlpConfig {
+            sample_rate: -0.5,
+            ..OtlpConfig::default()
+        };
+        let output = capture_tracing(|| config.emit_warnings());
+        assert!(
+            output.contains("otlp.sample_rate -0.5 is negative"),
+            "expected negative-rate warning, got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn emit_warnings_silent_for_valid_config() {
+        let output = capture_tracing(|| OtlpConfig::default().emit_warnings());
+        assert!(
+            output.is_empty(),
+            "expected no warnings for valid config, got: {output:?}"
+        );
+    }
 
     #[test]
     fn log_format_parsing() {

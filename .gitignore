@@ -26,3 +26,6 @@ Work/
 # IDE / Local
 .idea/
 .venv/
+
+# asha issue-loop per-issue worktrees (never committed)
+.asha/worktrees/

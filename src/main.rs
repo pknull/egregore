@@ -494,6 +494,8 @@ async fn main() -> anyhow::Result<()> {
                     tracing::warn!(error = %e, "OTLP initialization failed, using logging only");
                 }
             }
+            // Both arms install a subscriber; warnings emitted earlier would be dropped
+            telemetry_config.otlp.emit_warnings();
         } else {
             telemetry::init(&telemetry_config.logging);
         }

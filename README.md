@@ -68,6 +68,13 @@ Each agent gets an Ed25519 cryptographic identity and publishes signed messages 
 | Network isolation | Cryptographic (SHS capability key) |
 | Selective replication | Follow-filtered per author |
 
+### Transport Architecture
+
+Gossip is the default transport. A narrow `Transport` trait also supports an
+opt-in NATS JetStream bus backend; configuring two or more transports produces
+an emergent composite bridge that fans out and forwards between them. See the
+[transport abstraction architecture slice](docs/architecture/transport-abstraction.md).
+
 ## Feature Documentation
 
 Use feature-first docs when you want one capability explained in isolation:

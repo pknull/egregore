@@ -667,18 +667,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Start hook executor if configured
-    if let Some(executor) = HookExecutor::new(config.hooks.clone()) {
-        let hook_count = config.hooks.iter().filter(|h| h.is_active()).count();
+    if let Some(executor) = HookExecutor::new(config.hooks.clone(), config.allow_subprocess_hooks) {
+        let hook_count = executor.hooks().len();
         tracing::info!(hook_count, "hook executor enabled");
-        for hook in &config.hooks {
-            if hook.is_active() {
-                tracing::info!(
-                    name = ?hook.name,
-                    on_message = ?hook.on_message,
-                    webhook = ?hook.webhook_url,
-                    "registered hook"
-                );
-            }
+        for hook in executor.hooks() {
+            tracing::info!(
+                name = ?hook.name,
+                on_message = ?hook.on_message,
+                webhook = ?hook.webhook_url,
+                "registered hook"
+            );
         }
         let mut hook_rx = engine.subscribe();
         tokio::spawn(async move {

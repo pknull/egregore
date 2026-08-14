@@ -86,6 +86,12 @@ mdns_service: "_egregore._tcp.local."
 #   - relay.example.com:7661
 peers: []
 
+# Allow deprecated message-triggered subprocess hooks (`on_message`).
+# Disabled by default for security containment. Webhooks remain supported.
+# Compatibility only: migrate automation to Servitor work before removal.
+# Default: false
+allow_subprocess_hooks: false
+
 # Hook definitions. Each hook fires independently on message events.
 # Hooks run in parallel. Each can have its own timeout.
 # CLI --hook-on-message/--hook-webhook-url append an additional hook.

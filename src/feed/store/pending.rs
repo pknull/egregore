@@ -15,6 +15,7 @@
 
 use chrono::{DateTime, Utc};
 use rusqlite::params;
+use std::sync::atomic::Ordering;
 
 use crate::error::{EgreError, Result};
 use crate::feed::models::Message;
@@ -103,6 +104,10 @@ impl FeedStore {
             ],
         )?;
         Ok(if changed == 1 {
+            if transport_id == "bus" {
+                self.bus_pending_forwarding_count
+                    .fetch_add(1, Ordering::AcqRel);
+            }
             EnqueueResult::Inserted
         } else {
             EnqueueResult::AlreadyPresent
@@ -116,15 +121,23 @@ impl FeedStore {
         message_hash: &str,
     ) -> Result<()> {
         let conn = self.conn();
-        conn.execute(
+        let changed = conn.execute(
             "DELETE FROM pending_forwarding
              WHERE transport_id = ?1 AND message_hash = ?2",
             params![transport_id, message_hash],
         )?;
+        if changed == 1 && transport_id == "bus" {
+            self.bus_pending_forwarding_count
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    Some(count.saturating_sub(1))
+                })
+                .expect("bus pending count fetch_update closure always returns Some");
+        }
         Ok(())
     }
 
-    /// List up to `limit` pending rows for a transport, oldest first.
+    /// List up to `limit` pending rows for a transport in deterministic
+    /// per-author FIFO order.
     pub fn pending_forwarding_list(
         &self,
         transport_id: &str,
@@ -136,7 +149,7 @@ impl FeedStore {
                     last_attempt_at, attempt_count, last_error
              FROM pending_forwarding
              WHERE transport_id = ?1
-             ORDER BY enqueued_at ASC
+             ORDER BY author ASC, sequence ASC
              LIMIT ?2",
         )?;
         let rows = stmt
@@ -474,23 +487,90 @@ mod tests {
         let (store, msg) = store_with_msg();
         store.pending_forwarding_enqueue("bus", &msg).unwrap();
         assert_eq!(store.pending_forwarding_count("bus").unwrap(), 1);
+        assert_eq!(store.bus_pending_forwarding_count(), 1);
 
         store.pending_forwarding_complete("bus", &msg.hash).unwrap();
         assert_eq!(store.pending_forwarding_count("bus").unwrap(), 0);
+        assert_eq!(store.bus_pending_forwarding_count(), 0);
     }
 
     #[test]
-    fn pending_list_paginates_and_orders_oldest_first() {
+    fn pending_list_paginates_in_author_sequence_order() {
         let store = FeedStore::open_memory().unwrap();
-        for i in 1..=5 {
-            let msg = make_test_message("@alice.ed25519", i, None);
+        for (author, sequence) in [
+            ("@bob.ed25519", 2),
+            ("@alice.ed25519", 3),
+            ("@bob.ed25519", 1),
+            ("@alice.ed25519", 1),
+            ("@alice.ed25519", 2),
+        ] {
+            let msg = make_test_message(author, sequence, None);
             store.pending_forwarding_enqueue("bus", &msg).unwrap();
         }
-        let rows = store.pending_forwarding_list("bus", 3).unwrap();
-        assert_eq!(rows.len(), 3, "limit must cap returned rows");
-        // Oldest-first ordering: sequences 1, 2, 3.
-        let seqs: Vec<_> = rows.iter().map(|r| r.sequence).collect();
-        assert_eq!(seqs, vec![1, 2, 3]);
+        let rows = store.pending_forwarding_list("bus", 4).unwrap();
+        assert_eq!(rows.len(), 4, "limit must cap returned rows");
+        let author_sequences: Vec<_> = rows
+            .iter()
+            .map(|row| (row.author.as_str(), row.sequence))
+            .collect();
+        assert_eq!(
+            author_sequences,
+            vec![
+                ("@alice.ed25519", 1),
+                ("@alice.ed25519", 2),
+                ("@alice.ed25519", 3),
+                ("@bob.ed25519", 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn bus_pending_projection_changes_only_on_actual_row_mutations() {
+        let (store, msg) = store_with_msg();
+        assert_eq!(store.bus_pending_forwarding_count(), 0);
+
+        assert_eq!(
+            store.pending_forwarding_enqueue("bus", &msg).unwrap(),
+            EnqueueResult::Inserted
+        );
+        assert_eq!(store.bus_pending_forwarding_count(), 1);
+
+        assert_eq!(
+            store.pending_forwarding_enqueue("bus", &msg).unwrap(),
+            EnqueueResult::AlreadyPresent
+        );
+        assert_eq!(store.bus_pending_forwarding_count(), 1);
+
+        store
+            .pending_forwarding_complete("bus", "not-a-real-hash")
+            .unwrap();
+        assert_eq!(store.bus_pending_forwarding_count(), 1);
+
+        store.pending_forwarding_complete("bus", &msg.hash).unwrap();
+        assert_eq!(store.bus_pending_forwarding_count(), 0);
+
+        store.pending_forwarding_enqueue("gossip", &msg).unwrap();
+        assert_eq!(store.bus_pending_forwarding_count(), 0);
+        store
+            .pending_forwarding_complete("gossip", &msg.hash)
+            .unwrap();
+        assert_eq!(store.bus_pending_forwarding_count(), 0);
+    }
+
+    #[test]
+    fn bus_pending_projection_is_initialized_from_existing_sqlite_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feed.db");
+        let msg = make_test_message("@alice.ed25519", 1, None);
+
+        {
+            let store = FeedStore::open(&path).unwrap();
+            store.pending_forwarding_enqueue("bus", &msg).unwrap();
+            assert_eq!(store.bus_pending_forwarding_count(), 1);
+        }
+
+        let reopened = FeedStore::open(&path).unwrap();
+        assert_eq!(reopened.bus_pending_forwarding_count(), 1);
     }
 
     #[test]

@@ -62,9 +62,8 @@ src/
     bus/                BusTransport (NATS JetStream adapter) — Phase 2
       config.rs           BusConfig + ack_wait derivation + startup validation
       subjects.rs         Subject mapping: egregore.feed.{author}
-      consumer.rs         JetStream consumer setup + ack state machine
-      ingest.rs           Durable-local-ingest precondition (§8 amendment)
-      transport.rs        BusTransport struct + Transport trait impl + self_echo_total counter
+      consumer.rs         JetStream stream/consumer setup + live ordering validation
+      transport.rs        BusTransport + durable-local-ingest subscribe path + self_echo_total counter
     composite/          CompositeTransport + DirectionState/AckBarrier — RFC 0002 §8
       direction.rs        DirectionState + AuthorQueueEntry + AckBarrier (N>2 safe)
       ingress.rs          Per-source ingress task (subscribe + forward to destination queues)

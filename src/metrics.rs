@@ -12,6 +12,7 @@
 //! - `status`: bounded (success/error) - OK
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use metrics::{counter, gauge, histogram};
@@ -237,6 +238,43 @@ pub fn set_bridge_self_echo_absolute(direction: &str, absolute_total: u64) {
     set_counter_delta("egregore_bridge_self_echo_total", direction, absolute_total);
 }
 
+// ---- Composite adapter metrics (RFC 0002 §13.2; RFC 0001 §18 A4) ----
+
+/// Number of children attached to the effective composite transport.
+pub fn set_transport_composite_children(count: usize) {
+    gauge!("egregore_transport_composite_children").set(count as f64);
+}
+
+/// Time spent publishing a locally-authored message to one child during
+/// composite fan-out. The backend label is bounded by configured children.
+pub fn record_transport_composite_forward_latency(child_backend: &str, latency_secs: f64) {
+    histogram!(
+        "egregore_transport_composite_forward_latency_seconds",
+        "child_backend" => child_backend.to_string()
+    )
+    .record(latency_secs);
+}
+
+/// Bridge dedup drops are owned by child self-echo counters. Health
+/// collection supplies their summed absolute value; this function converts
+/// it to the delta required by a Prometheus counter.
+pub fn set_transport_composite_dedup_drops_absolute(absolute_total: u64) {
+    static SHADOW: AtomicU64 = AtomicU64::new(0);
+    let previous = SHADOW.swap(absolute_total, Ordering::AcqRel);
+    let delta = absolute_counter_delta(previous, absolute_total);
+    if delta > 0 {
+        counter!("egregore_transport_composite_dedup_drops_total").increment(delta);
+    }
+}
+
+fn absolute_counter_delta(previous: u64, current: u64) -> u64 {
+    if current >= previous {
+        current - previous
+    } else {
+        current
+    }
+}
+
 // Internal: track last-observed absolute value per (metric_name, direction)
 // so the poller can emit the correct delta to the monotonic counter.
 static COUNTER_SHADOWS: OnceLock<
@@ -255,7 +293,7 @@ fn set_counter_delta(metric_name: &'static str, direction: &str, absolute_total:
         // Handle resets: if absolute_total < prev (e.g., process restart
         // of the source without resetting the Prometheus exporter),
         // treat the new value as the delta (not negative).
-        let delta = absolute_total.saturating_sub(prev);
+        let delta = absolute_counter_delta(prev, absolute_total);
         guard.insert(key, absolute_total);
         delta
     };
@@ -355,6 +393,10 @@ pub async fn run_transport_metrics_updater_with_interval(
 pub async fn update_transport_metrics_once(engine: &Arc<FeedEngine>) {
     // 1. Transport health → bridge + leaf gauges.
     if let Some(health) = engine.transport_health() {
+        if health.backend == "composite" {
+            set_transport_composite_children(health.children.len());
+            set_transport_composite_dedup_drops_absolute(engine.transport_self_echo_total());
+        }
         update_bridge_metrics_from_health(&health);
     }
 
@@ -448,5 +490,12 @@ mod tests {
         // In test context, metrics may or may not be initialized
         // Just verify the function doesn't panic
         let _ = is_enabled();
+    }
+
+    #[test]
+    fn absolute_counter_delta_handles_growth_stasis_and_reset() {
+        assert_eq!(absolute_counter_delta(3, 8), 5);
+        assert_eq!(absolute_counter_delta(8, 8), 0);
+        assert_eq!(absolute_counter_delta(8, 2), 2);
     }
 }

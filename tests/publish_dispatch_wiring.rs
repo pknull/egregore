@@ -8,7 +8,7 @@
 //!    bus-specific durability handle.
 //!
 //! 2. `bus_transport_deployment_enqueues_pending_synchronously_in_publish_full`
-//!    — when a bus-backend transport is attached to the engine,
+//!    — when a NATS-backend transport is attached to the engine,
 //!    `publish_full` MUST write the pending row BEFORE returning. This is
 //!    the amendment §C.8 durability guarantee that survives a crashed
 //!    dispatcher.
@@ -27,7 +27,7 @@
 //!
 //! A full bus-configured end-to-end test is deferred to Step 13's
 //! testcontainer rig; this file uses a purpose-built mock with a
-//! `"bus"` backend label to exercise the engine-level branching
+//! `"nats"` backend label to exercise the engine-level branching
 //! without a live NATS server.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -198,7 +198,7 @@ async fn single_transport_deployment_publishes_without_dispatcher_pending() {
 #[tokio::test(flavor = "multi_thread")]
 async fn bus_transport_deployment_enqueues_pending_synchronously_in_publish_full() {
     let (engine, identity) = setup();
-    let bus = BackendMock::new("bus");
+    let bus = BackendMock::new("nats");
     engine.attach_transport(bus.clone() as Arc<dyn Transport>);
 
     // We do NOT attach a dispatcher channel here. `publish_full` must
@@ -217,7 +217,7 @@ async fn bus_transport_deployment_enqueues_pending_synchronously_in_publish_full
     assert_eq!(
         pending.len(),
         1,
-        "bus-attached publish must enqueue a pending row BEFORE returning"
+        "nats-attached publish must enqueue a bus pending row BEFORE returning"
     );
     assert_eq!(pending[0].message_hash, msg.hash);
 }
@@ -225,7 +225,7 @@ async fn bus_transport_deployment_enqueues_pending_synchronously_in_publish_full
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_mpsc_full_does_not_lose_publish() {
     let (engine, identity) = setup();
-    let bus = BackendMock::new("bus");
+    let bus = BackendMock::new("nats");
     engine.attach_transport(bus.clone() as Arc<dyn Transport>);
 
     // Small mpsc capacity + stalled dispatcher = Full errors on try_send.

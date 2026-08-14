@@ -6,7 +6,7 @@
 //!
 //! Validation obligations enforced via `Config::validate` in `src/config.rs`:
 //!
-//! - `url` MUST use TLS (`tls://` or `nats+tls://`) — RFC 0001 §13.5 RL2.
+//! - `url` MUST use TLS (`tls://` or `nats+tls://`) — RFC 0001 §13.5 RL1.
 //! - `credentials_path` MUST exist with mode ≤ 0o600 — RFC 0001 §13.5 RL3.
 //! - `max_ack_pending` ∈ [1, 65535].
 //! - Effective `ack_wait` ∈ [5s, 3600s] — WARN (not error) outside this band
@@ -179,7 +179,7 @@ impl BusConfig {
     /// Errors are fatal (reject startup); WARN-band deviations log a warning
     /// but proceed.
     pub fn validate(&self) -> anyhow::Result<()> {
-        // URL MUST use TLS (RFC 0001 §13.5 RL2).
+        // URL MUST use TLS (RFC 0001 §13.5 RL1).
         if !(self.url.starts_with("tls://") || self.url.starts_with("nats+tls://")) {
             anyhow::bail!(
                 "bus.url MUST use TLS (tls://... or nats+tls://...): got {}",

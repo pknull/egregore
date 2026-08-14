@@ -11,7 +11,7 @@
 //!   calls `publish_attempt` directly, bypassing the enqueue step.
 //! - `subscribe` (Wave 2 Step 10) — spawn_blocking ingest, ack-handle
 //!   retention in `pending_acks`, self-echo rule (amendments §C.2,
-//!   §C.4, §C.9).
+//!   §C.9; RFC 0002 §18 item A1).
 //! - `request_from` (Wave 2 Step 11) — `bus_author_seq_index` lookup +
 //!   ephemeral ordered consumer (amendment §C.3).
 //! - `start` is an idempotent no-op marker (the async-nats client
@@ -95,7 +95,7 @@ pub struct BusTransport {
 
     /// Local identity. Used by `derive_consumer_name` at construction
     /// time and by Wave 2 `subscribe` to skip self-authored echoes
-    /// (amendment §C.4).
+    /// (RFC 0002 §18 item A1).
     #[allow(dead_code)] // consumed in Wave 2 Step 10
     identity: Identity,
 
@@ -134,7 +134,7 @@ pub struct BusTransport {
     /// short codes per security-auditor A2 guidance.
     last_error: Arc<RwLock<Option<String>>>,
 
-    /// Wave 4 Step 22 retcon: bus self-echo counter (amendment §C.4).
+    /// Wave 4 Step 22 retcon: bus self-echo counter (RFC 0002 §18 item A1).
     ///
     /// Incremented by `subscribe`'s `DuplicateMessage` branch — a
     /// bus-sourced message we already have locally (typically because
@@ -265,7 +265,7 @@ impl BusTransport {
         self.pending_acks.len()
     }
 
-    /// Snapshot of the bus self-echo counter (amendment §C.4). Incremented
+    /// Snapshot of the bus self-echo counter (RFC 0002 §18 item A1). Incremented
     /// once per `DuplicateMessage` observed on the subscribe path. The
     /// composite's `BridgeQueuesHealth` aggregation reads this for bus
     /// children; gossip children always surface zero (they have no
@@ -419,7 +419,7 @@ impl BusTransport {
 
     /// Ack the NATS consumer message whose `hash` is `message_hash`.
     /// Called by `CompositeTransport`'s egress after ALL destinations
-    /// have resolved (amendments §A.1 #5, §C.5). No-op if no pending
+    /// have resolved (amendment §A.1 #5; RFC 0002 §18 item A2). No-op if no pending
     /// ack exists (e.g., the message was already acked or we're
     /// acking a gossip-sourced message — gossip has no ack equivalent).
     ///
@@ -452,7 +452,7 @@ impl Transport for BusTransport {
         &self,
         filter: TopicFilter,
     ) -> Result<(SubscriptionHandle, BoxStream<'static, Message>)> {
-        // Amendments §C.2, §C.4, §C.9 — durable-local-ingest precondition
+        // Amendments §C.2 and §C.9 plus RFC 0002 §18 item A1 — durable-local-ingest precondition
         // before yielding, ack-handle retention, self-echo rule (ack but
         // do not yield on DuplicateMessage), spawn_blocking for SQLite.
         //
@@ -558,7 +558,7 @@ impl Transport for BusTransport {
                                 yield decoded;
                             }
                             Ok(Err(EgreError::DuplicateMessage { .. })) => {
-                                // §C.4 self-echo rule: the message is
+                                // RFC 0002 §18 item A1 self-echo rule: the message is
                                 // already in local SQLite (we authored
                                 // it, or a prior redelivery landed it).
                                 // Ack so the broker stops redelivering;
@@ -568,7 +568,7 @@ impl Transport for BusTransport {
                                 //
                                 // Wave 4 Step 22 retcon: count the
                                 // self-echo on the bus transport itself
-                                // (canonical location — §C.4). The
+                                // (canonical location — RFC 0002 §18 item A1). The
                                 // composite's BridgeQueuesHealth
                                 // aggregation reads from here for bus
                                 // children.
@@ -743,11 +743,10 @@ impl Transport for BusTransport {
 
         TransportHealth {
             connected,
-            backend: "bus",
+            backend: "nats",
             last_successful_publish: *self.last_successful_publish.read(),
             last_peer_contact: *self.last_peer_contact.read(),
-            // Wave 2+ populates this from `pending_forwarding` row count.
-            unreplicated_count: 0,
+            unreplicated_count: self.engine.store().bus_pending_forwarding_count(),
             inflight_publishes: self.inflight_publishes.load(Ordering::Acquire),
             last_error: self.last_error.read().clone(),
             children: vec![],
@@ -759,13 +758,13 @@ impl Transport for BusTransport {
 
     /// Override the trait default to drain `pending_acks` on broker-side
     /// resolution. Composite egress calls this on the source bus child once
-    /// every destination has been published (RFC 0002 §C.5).
+    /// every destination has been published (RFC 0002 §18 item A2).
     async fn ack_after_publish(&self, message_hash: &str) -> Result<()> {
         BusTransport::ack_after_publish(self, message_hash).await
     }
 
     /// Override the trait default to expose the canonical self-echo counter
-    /// (amendment §C.4 retcon). Composite health aggregation reads this for
+    /// (RFC 0002 §18 item A1). Composite health aggregation reads this for
     /// bus children; gossip and other non-bus children keep the default 0.
     fn self_echo_total(&self) -> u64 {
         BusTransport::self_echo_total(self)
@@ -797,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn health_backend_string_is_bus() {
+    fn health_backend_string_is_nats() {
         // The normative backend string — scry and /v1/status consumers
         // branch on this exact literal. Asserting it here protects against
         // an accidental rename in Wave 2+ refactors.
@@ -805,7 +804,7 @@ mod tests {
         // We can't construct a BusTransport without a live NATS server,
         // but we can assert the constant via a static lifetime binding
         // that matches the health() return site's shape.
-        const BACKEND: &str = "bus";
-        assert_eq!(BACKEND, "bus");
+        const BACKEND: &str = "nats";
+        assert_eq!(BACKEND, "nats");
     }
 }

@@ -16,6 +16,9 @@
 //!   incremented `attempt_count` and PII-scrubbed `last_error`.
 //! - `ack_after_publish_releases_pending_acks_entry` — the inherent
 //!   ack drain removes the map entry.
+//! - `bus_health_reports_nats_backend_and_durable_outbox_depth` — health
+//!   uses the observable backend discriminator and the store-owned outbox
+//!   projection.
 //!
 //! All tests are marked `#[ignore]`. `cargo test` in environments
 //! without Docker + network access skips them; CI enables them via
@@ -23,7 +26,7 @@
 //!
 //! ## Plaintext test bus
 //!
-//! The NATS testcontainer runs without TLS — the RFC 0001 §13.5 RL2
+//! The NATS testcontainer runs without TLS — the RFC 0001 §13.5 RL1
 //! mandate still applies in production, but in-CI the test harness
 //! uses `BusTransport::new_for_testing` which bypasses NKey credential
 //! loading. The production `new` constructor remains unchanged.
@@ -156,7 +159,39 @@ fn sign_insight(
 fn _force_brokerdetails_used(_: BrokerDetails) {}
 
 // ---------------------------------------------------------------------------
-// 1. Publish PubAck records the (author, author_seq) → stream_seq index.
+// 1. Health exposes NATS and the durable bus outbox projection.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn bus_health_reports_nats_backend_and_durable_outbox_depth() {
+    let container = NatsImage.start().await.expect("start nats testcontainer");
+    let port = container
+        .get_host_port_ipv4(4222)
+        .await
+        .expect("nats port map");
+    let url = format!("nats://127.0.0.1:{port}");
+
+    let (engine, identity, transport) = build_bus(&url, "health").await;
+    let msg = sign_insight(&engine, &identity, 1);
+    engine
+        .store()
+        .pending_forwarding_enqueue("bus", &msg)
+        .expect("durable enqueue");
+
+    let health = transport.health();
+    assert_eq!(health.backend, "nats");
+    assert_eq!(health.unreplicated_count, 1);
+
+    engine
+        .store()
+        .pending_forwarding_complete("bus", &msg.hash)
+        .expect("durable completion");
+    assert_eq!(transport.health().unreplicated_count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// 2. Publish PubAck records the (author, author_seq) → stream_seq index.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

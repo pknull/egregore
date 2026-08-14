@@ -80,7 +80,7 @@ pub struct BridgeQueuesHealth {
     pub authors_active: u64,
     /// Monotonic counter of upstream-ingress block events since process start.
     pub backpressure_events_total: u64,
-    /// Amendment §C.4: monotonic counter of bus self-echoes dropped at
+    /// RFC 0002 §18 item A1: monotonic counter of bus self-echoes dropped at
     /// ingest (DuplicateMessage returns on bus-sourced messages). Distinct
     /// from backpressure_events.
     pub self_echo_total: u64,

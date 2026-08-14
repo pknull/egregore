@@ -21,6 +21,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -32,6 +33,13 @@ use crate::identity::PublicId;
 #[derive(Clone)]
 pub struct FeedStore {
     conn: Arc<Mutex<Connection>>,
+    /// Synchronous projection of the durable NATS outbox depth.
+    ///
+    /// The durable storage identifier remains `"bus"`, even though the
+    /// observable transport backend is `"nats"`. Keeping this projection
+    /// with the store ensures every enqueue/completion caller updates the
+    /// same source used by synchronous transport health snapshots.
+    bus_pending_forwarding_count: Arc<AtomicU64>,
 }
 
 /// An address-only peer record (from manual add or LAN discovery).
@@ -172,8 +180,10 @@ impl FeedStore {
         Self::configure_runtime_pragmas(&conn, true)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
+            bus_pending_forwarding_count: Arc::new(AtomicU64::new(0)),
         };
         store.init_schema()?;
+        store.initialize_bus_pending_forwarding_count()?;
         Ok(store)
     }
 
@@ -183,8 +193,10 @@ impl FeedStore {
         Self::configure_runtime_pragmas(&conn, false)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
+            bus_pending_forwarding_count: Arc::new(AtomicU64::new(0)),
         };
         store.init_schema()?;
+        store.initialize_bus_pending_forwarding_count()?;
         Ok(store)
     }
 
@@ -216,6 +228,29 @@ impl FeedStore {
         conn.execute_batch(SCHEMA_DDL)?;
         Self::run_post_schema_migrations(&conn)?;
         Ok(())
+    }
+
+    /// Initialize the in-memory bus outbox projection from durable state.
+    /// Called once after schema creation/migration and before the store is
+    /// returned to callers.
+    fn initialize_bus_pending_forwarding_count(&self) -> Result<()> {
+        let count = {
+            let conn = self.conn();
+            conn.query_row(
+                "SELECT COUNT(*) FROM pending_forwarding WHERE transport_id = 'bus'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )? as u64
+        };
+        self.bus_pending_forwarding_count
+            .store(count, Ordering::Release);
+        Ok(())
+    }
+
+    /// Read the durable bus outbox projection without acquiring SQLite's
+    /// mutex. This is safe for synchronous `Transport::health()` calls.
+    pub fn bus_pending_forwarding_count(&self) -> u64 {
+        self.bus_pending_forwarding_count.load(Ordering::Acquire)
     }
 
     /// Migrations that must run BEFORE SCHEMA_DDL (column additions).

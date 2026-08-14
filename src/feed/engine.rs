@@ -348,8 +348,9 @@ impl FeedEngine {
     }
 
     /// Determine which attached transport backends require durable pending
-    /// tracking for a freshly-published message. Wave 4 Step 21 only
-    /// recognizes `"bus"`; future backends can extend the match here.
+    /// tracking for a freshly-published message. The observable NATS backend
+    /// maps to the durable `"bus"` storage id; future backends can extend the
+    /// match here.
     ///
     /// Implementation note: we query `health().backend` on each attached
     /// transport. The call is cheap (a handful of atomic loads per
@@ -360,16 +361,16 @@ impl FeedEngine {
         let mut out: Vec<&'static str> = Vec::new();
         for t in guard.iter() {
             match t.health().backend {
-                "bus" if !out.contains(&"bus") => {
+                "nats" if !out.contains(&"bus") => {
                     out.push("bus");
                 }
                 "composite" => {
                     // Composite surfaces its children's backends via
-                    // `health().children`. If any child is bus, the
+                    // `health().children`. If any child is NATS, the
                     // composite is a bus-bearing transport and we need a
                     // pending row.
                     for child in t.health().children {
-                        if child.backend == "bus" && !out.contains(&"bus") {
+                        if child.backend == "nats" && !out.contains(&"bus") {
                             out.push("bus");
                         }
                     }
@@ -696,6 +697,19 @@ impl FeedEngine {
     /// WARN log in `main.rs` (plan §4 Step 8) and by Phase 2 dispatch logic.
     pub fn transport_count(&self) -> usize {
         self.transports.read().len()
+    }
+
+    /// Sum the monotonic self-echo counters exposed by attached transports.
+    /// The transport metrics updater uses this read-through in bridge mode so
+    /// its composite dedup counter reflects the live child adapters rather
+    /// than a second independently-instrumented forwarding path.
+    pub(crate) fn transport_self_echo_total(&self) -> u64 {
+        self.transports
+            .read()
+            .iter()
+            .fold(0u64, |total, transport| {
+                total.saturating_add(transport.self_echo_total())
+            })
     }
 
     /// Aggregate transport health for `/v1/status` consumers.
@@ -1659,6 +1673,7 @@ mod tests {
     /// `tests/common/mock_transport.rs` and arrives in Step 9.
     struct InlineMock {
         health: TransportHealth,
+        self_echo_total: u64,
     }
 
     impl InlineMock {
@@ -1675,7 +1690,16 @@ mod tests {
                     children: vec![],
                     bridge_queues: None,
                 },
+                self_echo_total: 0,
             })
+        }
+
+        fn with_self_echo(backend: &'static str, self_echo_total: u64) -> Arc<Self> {
+            let mut mock = Self::new(true, backend);
+            Arc::get_mut(&mut mock)
+                .expect("new InlineMock has one owner")
+                .self_echo_total = self_echo_total;
+            mock
         }
     }
 
@@ -1710,6 +1734,10 @@ mod tests {
 
         fn health(&self) -> TransportHealth {
             self.health.clone()
+        }
+
+        fn self_echo_total(&self) -> u64 {
+            self.self_echo_total
         }
     }
 
@@ -1755,6 +1783,17 @@ mod tests {
             2,
             "aggregate retains per-transport children for operator visibility"
         );
+    }
+
+    #[test]
+    fn transport_self_echo_total_sums_attached_children() {
+        let store = FeedStore::open_memory().unwrap();
+        let engine = FeedEngine::new(store);
+
+        engine.attach_transport(InlineMock::with_self_echo("gossip", 0));
+        engine.attach_transport(InlineMock::with_self_echo("nats", 7));
+
+        assert_eq!(engine.transport_self_echo_total(), 7);
     }
 
     #[test]
@@ -1813,12 +1852,12 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn publish_full_enqueues_pending_when_bus_transport_attached() {
+    async fn publish_full_enqueues_bus_pending_when_nats_transport_attached() {
         let store = FeedStore::open_memory().unwrap();
         let engine = FeedEngine::new(store);
         let identity = Identity::generate();
 
-        engine.attach_transport(InlineMock::new(true, "bus"));
+        engine.attach_transport(InlineMock::new(true, "nats"));
 
         let msg = engine
             .publish(
@@ -1829,13 +1868,13 @@ mod tests {
             )
             .unwrap();
 
-        // Pending row must exist for "bus" because a bus-backend
-        // transport is attached.
+        // Pending row uses the durable "bus" id even though the attached
+        // transport's observable backend is "nats".
         let pending = engine.store().pending_forwarding_list("bus", 10).unwrap();
         assert_eq!(
             pending.len(),
             1,
-            "bus-attached publish must create a pending_forwarding row"
+            "nats-attached publish must create a bus pending_forwarding row"
         );
         assert_eq!(pending[0].message_hash, msg.hash);
     }
@@ -1871,7 +1910,7 @@ mod tests {
         let engine = FeedEngine::new(store);
         let identity = Identity::generate();
 
-        engine.attach_transport(InlineMock::new(true, "bus"));
+        engine.attach_transport(InlineMock::new(true, "nats"));
 
         let (tx, mut rx) = mpsc::channel::<DispatchTicket>(4);
         engine.set_dispatch_sender(tx);
@@ -1905,7 +1944,7 @@ mod tests {
         let engine = FeedEngine::new(store);
         let identity = Identity::generate();
 
-        engine.attach_transport(InlineMock::new(true, "bus"));
+        engine.attach_transport(InlineMock::new(true, "nats"));
 
         // Capacity 1 and we never recv: the first publish fills the
         // channel; the second hits TrySendError::Full and must still
@@ -1945,7 +1984,7 @@ mod tests {
         let engine = FeedEngine::new(store);
         let identity = Identity::generate();
 
-        engine.attach_transport(InlineMock::new(true, "bus"));
+        engine.attach_transport(InlineMock::new(true, "nats"));
 
         // Create the channel, wire the sender, then drop the receiver —
         // any subsequent `try_send` returns `Closed`. publish_full must

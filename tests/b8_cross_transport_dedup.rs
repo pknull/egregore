@@ -101,12 +101,16 @@ impl Harness {
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let engine_for_task = engine.clone();
-        let composite_for_task = composite.clone();
+        // Open the subscription before returning the harness. Previously the
+        // subscribe call lived inside the spawned task, so an immediate
+        // `inject_inbound` could race subscriber registration and make the
+        // full suite intermittently time out.
+        let (subscription_handle, mut stream) = composite
+            .subscribe(TopicFilter::default())
+            .await
+            .expect("composite subscribe");
         let consumer_task = tokio::spawn(async move {
-            let (_handle, mut stream) = composite_for_task
-                .subscribe(TopicFilter::default())
-                .await
-                .expect("composite subscribe");
+            let _subscription_handle = subscription_handle;
             loop {
                 tokio::select! {
                     biased;

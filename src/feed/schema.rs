@@ -144,6 +144,59 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
 }"#,
     ),
     (
+        "assign_task.v1.json",
+        r#"{
+  "content_type": "assign_task",
+  "version": 1,
+  "description": "Typed operator command assigning one task offer to an executor",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "task_id", "task_hash", "offer_hash", "executor", "assigner", "command_id", "attempt_id", "expires_at"],
+    "properties": {
+      "type": { "const": "assign_task" },
+      "task_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "task_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "offer_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "executor": { "type": "string", "minLength": 12, "maxLength": 128, "pattern": "^@.+\\.ed25519$" },
+      "assigner": { "type": "string", "minLength": 12, "maxLength": 128, "pattern": "^@.+\\.ed25519$" },
+      "predecessor": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+      "command_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "attempt_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "expires_at": { "type": "string", "format": "date-time" }
+    },
+    "additionalProperties": false
+  }
+}"#,
+    ),
+    (
+        "assign_task_result.v1.json",
+        r#"{
+  "content_type": "assign_task_result",
+  "version": 1,
+  "description": "Servitor-owned durable result for an AssignTaskV1 command",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "command_id", "status", "task_id"],
+    "properties": {
+      "type": { "const": "assign_task_result" },
+      "command_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "status": { "type": "string", "enum": ["accepted", "rejected", "superseded"] },
+      "task_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "reason": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "lifecycle_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "task_state": { "type": "string", "minLength": 1, "maxLength": 64 }
+    },
+    "additionalProperties": false
+  }
+}"#,
+    ),
+    (
         "response.v1.json",
         r#"{
   "content_type": "response",
@@ -912,6 +965,8 @@ mod tests {
         assert!(registry.get("profile/v1").is_some());
         assert!(registry.get("message/v1").is_some());
         assert!(registry.get("node_status/v1").is_some());
+        assert!(registry.get("assign_task/v1").is_some());
+        assert!(registry.get("assign_task_result/v1").is_some());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -950,6 +1005,74 @@ mod tests {
             "error should mention missing field: {}",
             err
         );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn validate_assign_task_and_result_schemas() {
+        let (registry, temp_dir) = registry_with_defaults(true);
+        let identity = "@jAIbQChO7oD0V6inSad/KLXNXpMV4TQwao1tqZrR0MI=.ed25519";
+        let hash = "a".repeat(64);
+
+        let command = serde_json::json!({
+            "type": "assign_task",
+            "task_id": "task-1",
+            "task_hash": hash,
+            "offer_hash": "b".repeat(64),
+            "executor": identity,
+            "assigner": identity,
+            "predecessor": "b".repeat(64),
+            "command_id": "command-1",
+            "attempt_id": "attempt-1",
+            "expires_at": "2026-08-14T23:59:59Z"
+        });
+        assert!(registry.validate(&command, Some("assign_task/v1")).is_ok());
+
+        let result = serde_json::json!({
+            "type": "assign_task_result",
+            "command_id": "command-1",
+            "status": "accepted",
+            "task_id": "task-1",
+            "lifecycle_hash": "c".repeat(64),
+            "task_state": "assigned"
+        });
+        assert!(registry
+            .validate(&result, Some("assign_task_result/v1"))
+            .is_ok());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn assignment_schemas_reject_malformed_or_extra_fields() {
+        let (registry, temp_dir) = registry_with_defaults(true);
+        let identity = "@jAIbQChO7oD0V6inSad/KLXNXpMV4TQwao1tqZrR0MI=.ed25519";
+        let malformed = serde_json::json!({
+            "type": "assign_task",
+            "task_id": "task-1",
+            "task_hash": "not-a-hash",
+            "offer_hash": "b".repeat(64),
+            "executor": identity,
+            "assigner": identity,
+            "command_id": "command-1",
+            "attempt_id": "attempt-1",
+            "expires_at": "2026-08-14T23:59:59Z",
+            "unexpected": true
+        });
+        assert!(registry
+            .validate(&malformed, Some("assign_task/v1"))
+            .is_err());
+
+        let invalid_status = serde_json::json!({
+            "type": "assign_task_result",
+            "command_id": "command-1",
+            "status": "maybe",
+            "task_id": "task-1"
+        });
+        assert!(registry
+            .validate(&invalid_status, Some("assign_task_result/v1"))
+            .is_err());
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
@@ -1195,8 +1318,8 @@ mod tests {
         let (registry, temp_dir) = registry_with_defaults(false);
         let all = registry.list_all();
 
-        // Should have all default schemas, including private_box and node_status.
-        assert_eq!(all.len(), 9);
+        // Should have all default schemas, including assignment lifecycle schemas.
+        assert_eq!(all.len(), 11);
 
         let schema_ids: Vec<&str> = all.iter().map(|s| s.schema_id.as_str()).collect();
         assert!(schema_ids.contains(&"insight/v1"));
@@ -1204,6 +1327,8 @@ mod tests {
         assert!(schema_ids.contains(&"profile/v1"));
         assert!(schema_ids.contains(&"message/v1"));
         assert!(schema_ids.contains(&"private_box/v1"));
+        assert!(schema_ids.contains(&"assign_task/v1"));
+        assert!(schema_ids.contains(&"assign_task_result/v1"));
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
@@ -1214,7 +1339,7 @@ mod tests {
 
         let registry = SchemaRegistry::with_schemas_dir(false, &temp_dir);
 
-        // Should have created all 7 default schemas
+        // Should have created the full default schema set.
         assert!(registry.get("message/v1").is_some());
         assert!(registry.get("insight/v1").is_some());
         assert!(registry.get("endorsement/v1").is_some());
@@ -1222,10 +1347,14 @@ mod tests {
         assert!(registry.get("query/v1").is_some());
         assert!(registry.get("response/v1").is_some());
         assert!(registry.get("profile/v1").is_some());
+        assert!(registry.get("assign_task/v1").is_some());
+        assert!(registry.get("assign_task_result/v1").is_some());
 
         // Files should exist
         assert!(temp_dir.join("message.v1.json").exists());
         assert!(temp_dir.join("insight.v1.json").exists());
+        assert!(temp_dir.join("assign_task.v1.json").exists());
+        assert!(temp_dir.join("assign_task_result.v1.json").exists());
 
         // Clean up
         let _ = std::fs::remove_dir_all(&temp_dir);

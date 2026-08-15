@@ -4,7 +4,7 @@
 //! broadcast channel and executes all matching hooks in parallel.
 //!
 //! Each hook entry can define:
-//! - A subprocess (on_message) — message JSON piped to stdin
+//! - A deprecated, compatibility-gated subprocess (on_message) — message JSON piped to stdin
 //! - A webhook URL — message JSON POSTed
 //! - A content type filter — only fire for matching messages
 //! - A timeout — per-hook execution deadline
@@ -127,7 +127,16 @@ impl IdempotencyTracker {
     /// Check if hook should be executed. Returns Ok(attempt_number) if should execute,
     /// Err(reason) if should skip.
     pub fn should_execute(&self, message_hash: &str, hook: &HookEntry) -> Result<u32, String> {
-        let key = Self::key(message_hash, &hook.unique_id());
+        self.should_execute_with_id(message_hash, hook, &hook.unique_id())
+    }
+
+    fn should_execute_with_id(
+        &self,
+        message_hash: &str,
+        hook: &HookEntry,
+        hook_id: &str,
+    ) -> Result<u32, String> {
+        let key = Self::key(message_hash, hook_id);
 
         match self.state.get(&key) {
             Some(entry) => {
@@ -278,28 +287,71 @@ impl HookResult {
 /// Executes hook scripts and webhooks when messages arrive.
 pub struct HookExecutor {
     hooks: Vec<HookEntry>,
+    hook_ids: Vec<String>,
     http_client: Client,
     tracker: Arc<IdempotencyTracker>,
 }
 
 impl HookExecutor {
     /// Create a hook executor if any hooks are configured.
+    ///
+    /// Subprocess handlers are removed unless `allow_subprocess_hooks` is true;
+    /// webhook handlers remain active independently.
     /// Returns None if the list is empty or all entries are inactive.
-    pub fn new(hooks: Vec<HookEntry>) -> Option<Self> {
-        Self::with_tracker(hooks, Arc::new(IdempotencyTracker::new()))
+    pub fn new(hooks: Vec<HookEntry>, allow_subprocess_hooks: bool) -> Option<Self> {
+        Self::with_tracker(
+            hooks,
+            allow_subprocess_hooks,
+            Arc::new(IdempotencyTracker::new()),
+        )
     }
 
-    /// Create a hook executor with a shared idempotency tracker.
-    pub fn with_tracker(hooks: Vec<HookEntry>, tracker: Arc<IdempotencyTracker>) -> Option<Self> {
-        let active: Vec<HookEntry> = hooks.into_iter().filter(|h| h.is_active()).collect();
-        if active.is_empty() {
+    /// Create a hook executor with a shared idempotency tracker and subprocess policy.
+    pub fn with_tracker(
+        hooks: Vec<HookEntry>,
+        allow_subprocess_hooks: bool,
+        tracker: Arc<IdempotencyTracker>,
+    ) -> Option<Self> {
+        let mut active_hooks = Vec::new();
+        let mut hook_ids = Vec::new();
+
+        for mut hook in hooks {
+            let hook_id = hook.unique_id();
+            if hook.on_message.is_some() {
+                if allow_subprocess_hooks {
+                    tracing::warn!(
+                        hook_name = %hook_id,
+                        "subprocess hooks are deprecated, enabled via compatibility flag, and scheduled for removal; migrate by expressing automation as Servitor work"
+                    );
+                } else {
+                    tracing::warn!(
+                        hook_name = %hook_id,
+                        "subprocess hooks are deprecated, disabled by default, and require allow_subprocess_hooks = true"
+                    );
+                    hook.on_message = None;
+                }
+            }
+
+            if hook.is_active() {
+                active_hooks.push(hook);
+                hook_ids.push(hook_id);
+            }
+        }
+
+        if active_hooks.is_empty() {
             return None;
         }
         Some(Self {
-            hooks: active,
+            hooks: active_hooks,
+            hook_ids,
             http_client: Client::new(),
             tracker,
         })
+    }
+
+    /// Return the active, policy-sanitized hook entries.
+    pub fn hooks(&self) -> &[HookEntry] {
+        &self.hooks
     }
 
     /// Get the idempotency tracker (for testing/metrics).
@@ -312,20 +364,22 @@ impl HookExecutor {
         let futures: Vec<_> = self
             .hooks
             .iter()
-            .map(|hook| self.execute_one(hook, msg))
+            .zip(&self.hook_ids)
+            .map(|(hook, hook_id)| self.execute_one(hook, hook_id, msg))
             .collect();
         futures::future::join_all(futures).await;
     }
 
     /// Execute a single hook entry (subprocess + webhook) with idempotency.
-    async fn execute_one(&self, hook: &HookEntry, msg: &Message) {
-        let hook_id = hook.unique_id();
-
+    async fn execute_one(&self, hook: &HookEntry, hook_id: &str, msg: &Message) {
         // Check idempotency if enabled
         let attempt = if hook.idempotent {
-            match self.tracker.should_execute(&msg.hash, hook) {
+            match self
+                .tracker
+                .should_execute_with_id(&msg.hash, hook, hook_id)
+            {
                 Ok(attempt) => {
-                    self.tracker.mark_processing(&msg.hash, &hook_id, attempt);
+                    self.tracker.mark_processing(&msg.hash, hook_id, attempt);
                     attempt
                 }
                 Err(reason) => {
@@ -368,7 +422,7 @@ impl HookExecutor {
                 && webhook_result.as_ref().is_none_or(|r| r.is_success());
 
             if all_success {
-                self.tracker.mark_completed(&msg.hash, &hook_id);
+                self.tracker.mark_completed(&msg.hash, hook_id);
                 tracing::debug!(
                     hook_name = ?hook.name,
                     message_hash = %msg.hash,
@@ -384,7 +438,7 @@ impl HookExecutor {
                     _ => "unknown error".to_string(),
                 };
                 self.tracker
-                    .mark_failed(&msg.hash, &hook_id, attempt, &error);
+                    .mark_failed(&msg.hash, hook_id, attempt, &error);
                 tracing::warn!(
                     hook_name = ?hook.name,
                     message_hash = %msg.hash,
@@ -567,22 +621,66 @@ mod tests {
 
     #[test]
     fn executor_returns_none_without_hooks() {
-        assert!(HookExecutor::new(vec![]).is_none());
+        assert!(HookExecutor::new(vec![], false).is_none());
     }
 
     #[test]
     fn executor_returns_none_with_inactive_hooks() {
         let hooks = vec![HookEntry::default(), HookEntry::default()];
-        assert!(HookExecutor::new(hooks).is_none());
+        assert!(HookExecutor::new(hooks, false).is_none());
     }
 
     #[test]
-    fn executor_returns_some_with_path() {
+    fn executor_drops_subprocess_only_hook_when_disabled() {
         let hooks = vec![HookEntry {
             on_message: Some(PathBuf::from("/bin/true")),
             ..Default::default()
         }];
-        assert!(HookExecutor::new(hooks).is_some());
+        assert!(HookExecutor::new(hooks, false).is_none());
+    }
+
+    #[test]
+    fn executor_preserves_mixed_hook_webhook_when_subprocesses_disabled() {
+        let hooks = vec![HookEntry {
+            name: Some("mixed".to_string()),
+            on_message: Some(PathBuf::from("/bin/true")),
+            webhook_url: Some("https://example.com/webhook".to_string()),
+            timeout_secs: Some(12),
+            max_retries: 2,
+            retry_delay_secs: 7,
+            idempotent: true,
+        }];
+
+        let executor = HookExecutor::new(hooks, false).unwrap();
+        let active_hooks = executor.hooks();
+
+        assert_eq!(active_hooks.len(), 1);
+        assert_eq!(active_hooks[0].name.as_deref(), Some("mixed"));
+        assert!(active_hooks[0].on_message.is_none());
+        assert_eq!(
+            active_hooks[0].webhook_url.as_deref(),
+            Some("https://example.com/webhook")
+        );
+        assert_eq!(active_hooks[0].timeout_secs, Some(12));
+        assert_eq!(active_hooks[0].max_retries, 2);
+        assert_eq!(active_hooks[0].retry_delay_secs, 7);
+        assert!(active_hooks[0].idempotent);
+    }
+
+    #[test]
+    fn executor_keeps_subprocess_only_hook_when_enabled() {
+        let hooks = vec![HookEntry {
+            on_message: Some(PathBuf::from("/bin/true")),
+            ..Default::default()
+        }];
+
+        let executor = HookExecutor::new(hooks, true).unwrap();
+
+        assert_eq!(executor.hooks().len(), 1);
+        assert_eq!(
+            executor.hooks()[0].on_message.as_deref(),
+            Some(std::path::Path::new("/bin/true"))
+        );
     }
 
     #[test]
@@ -591,7 +689,7 @@ mod tests {
             webhook_url: Some("https://example.com/webhook".to_string()),
             ..Default::default()
         }];
-        assert!(HookExecutor::new(hooks).is_some());
+        assert!(HookExecutor::new(hooks, false).is_some());
     }
 
     #[test]
@@ -604,8 +702,24 @@ mod tests {
             },
             HookEntry::default(), // inactive
         ];
-        let executor = HookExecutor::new(hooks).unwrap();
+        let executor = HookExecutor::new(hooks, true).unwrap();
         assert_eq!(executor.hooks.len(), 1);
+    }
+
+    #[test]
+    fn disabled_mixed_hook_preserves_pre_sanitization_id() {
+        let hook = HookEntry {
+            on_message: Some(PathBuf::from("/bin/true")),
+            webhook_url: Some("https://example.com/webhook".to_string()),
+            idempotent: true,
+            ..Default::default()
+        };
+        let original_id = hook.unique_id();
+
+        let executor = HookExecutor::new(vec![hook], false).unwrap();
+
+        assert_eq!(executor.hook_ids, vec![original_id]);
+        assert!(executor.hooks()[0].on_message.is_none());
     }
 
     // Idempotency tracker tests

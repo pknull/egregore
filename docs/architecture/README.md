@@ -16,6 +16,7 @@ For usage and operator workflows, use [`docs/features/README.md`](../features/RE
 | Identity and Network Trust | [identity-and-security.md](./identity-and-security.md) | [`docs/features/identity-and-security.md`](../features/identity-and-security.md) |
 | Signed Feeds and Query | [feeds-and-query.md](./feeds-and-query.md) | [`docs/features/feeds-and-query.md`](../features/feeds-and-query.md) |
 | Mesh Replication | [mesh-replication.md](./mesh-replication.md) | [`docs/features/mesh-replication.md`](../features/mesh-replication.md) |
+| Transport Abstraction and Bridge Mode | [transport-abstraction.md](./transport-abstraction.md) | [Bus](../../../docs/deployment/bus.md), [bridge](../../../docs/deployment/bridge.md), and [migration](../../../docs/deployment/migration-gossip-bus.md) guides |
 | Peer Discovery | [peer-discovery.md](./peer-discovery.md) | [`docs/features/peer-discovery.md`](../features/peer-discovery.md) |
 | Selective Replication | [selective-replication.md](./selective-replication.md) | [`docs/features/selective-replication.md`](../features/selective-replication.md) |
 | Schema Registry | [schema-registry.md](./schema-registry.md) | [`docs/features/schema-registry.md`](../features/schema-registry.md) |

@@ -9,10 +9,10 @@
 //!
 //! Both paths use async-nats's `get_or_create_*` primitives so re-running
 //! against an existing stream/consumer with the SAME config is a no-op.
-//! Divergent config is surfaced by the NATS server as an error at
-//! creation time — we do not attempt to reconcile mismatched config
-//! client-side (operators reset the stream/consumer deliberately when
-//! semantics need to change; see `docs/deployment/disaster-recovery.md`,
+//! The returned live configurations are then validated for the ordering
+//! requirements that NATS permits but egregore forbids. Divergence is never
+//! reconciled automatically; operators reset the stream/consumer deliberately
+//! when semantics need to change (see `docs/deployment/disaster-recovery.md`,
 //! Wave 4 Step 28).
 //!
 //! Stream parameters (amendment §C.7 binding):
@@ -36,13 +36,13 @@
 //! - max_ack_pending: `BusConfig::max_ack_pending` — validates to a
 //!   bridge-capacity-sized window.
 //!
-//! Integration tests requiring a running NATS server are deferred to
-//! Wave 2 Step 13 (testcontainers plumbing). This file intentionally
-//! contains no unit tests — the logic is thin wiring over async-nats
-//! helpers that are exercised by their own test suite upstream; a mock
-//! would only re-assert the wiring itself.
+//! Live broker behavior is covered by the ignored testcontainers smoke suite;
+//! the startup-refusal predicates below have pure unit tests.
 
-use async_nats::jetstream::consumer::{pull as pull_consumer, AckPolicy, Consumer, DeliverPolicy};
+use async_nats::jetstream::consumer::{
+    pull as pull_consumer, AckPolicy, Config as ConsumerConfig, Consumer, DeliverPolicy,
+};
+use async_nats::jetstream::context::ConsumerInfoErrorKind;
 use async_nats::jetstream::stream::{
     Config as StreamConfig, DiscardPolicy, RetentionPolicy, StorageType, Stream,
 };
@@ -61,6 +61,59 @@ pub type PullConsumer = Consumer<pull_consumer::Config>;
 /// KB leaves headroom without requiring operators to reconfigure when new
 /// fields land. Documented in `docs/deployment/bus.md` (Wave 4 Step 28).
 pub const STREAM_MAX_MSG_SIZE: i32 = 131_072;
+
+/// Refuse live stream configurations that can distribute one author's
+/// messages across competing consumers or omit part of the feed namespace.
+fn validate_stream_config(config: &StreamConfig) -> Result<()> {
+    if config.retention == RetentionPolicy::WorkQueue {
+        return Err(EgreError::Config {
+            reason: "RFC 0001 §9.2: nats stream retention MUST NOT be WorkQueue (per-author ordering cannot be guaranteed)".to_string(),
+        });
+    }
+    if !config
+        .subjects
+        .iter()
+        .any(|subject| subject_covers_feed_prefix(subject))
+    {
+        return Err(EgreError::Config {
+            reason: format!(
+                "RFC 0001 §9.2: nats stream subjects must cover {WILDCARD_FILTER}; got {:?}",
+                config.subjects
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Refuse queue-group consumers: a deliver group may split one author's
+/// ordered feed across bridge instances.
+fn validate_consumer_config(config: &ConsumerConfig) -> Result<()> {
+    if config.deliver_group.is_some() {
+        return Err(EgreError::Config {
+            reason: "RFC 0001 §9.2: nats consumer deliver_group MUST be unset (per-author ordering cannot be guaranteed)".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Return true when a stream subject includes every subject matched by
+/// `egregore.feed.>`. Broader terminal-wildcard subjects such as
+/// `egregore.>` and `>` are valid coverage; narrower subjects are not.
+fn subject_covers_feed_prefix(subject: &str) -> bool {
+    const REQUIRED_PREFIX: [&str; 2] = ["egregore", "feed"];
+
+    let tokens: Vec<&str> = subject.split('.').collect();
+    let Some(wildcard_index) = tokens.iter().position(|token| *token == ">") else {
+        return false;
+    };
+
+    wildcard_index <= REQUIRED_PREFIX.len()
+        && wildcard_index + 1 == tokens.len()
+        && tokens[..wildcard_index]
+            .iter()
+            .zip(REQUIRED_PREFIX)
+            .all(|(actual, required)| *actual == required || *actual == "*")
+}
 
 /// Idempotently create or reuse the `egregore-feed` stream.
 ///
@@ -82,11 +135,14 @@ pub async fn bootstrap_stream(ctx: &Context, config: &BusConfig) -> Result<Strea
         ..Default::default()
     };
 
-    ctx.get_or_create_stream(stream_cfg)
+    let stream = ctx
+        .get_or_create_stream(stream_cfg)
         .await
         .map_err(|e| EgreError::Peer {
             reason: format!("nats bootstrap_stream failed: {e}"),
-        })
+        })?;
+    validate_stream_config(&stream.cached_info().config)?;
+    Ok(stream)
 }
 
 /// Idempotently create or reuse a durable pull consumer on the given
@@ -120,10 +176,113 @@ pub async fn bootstrap_consumer(
         ..Default::default()
     };
 
-    stream
+    // Inspect generic metadata before asking async-nats for a typed pull
+    // consumer. A queue-group consumer is push-based, so typed conversion
+    // would reject it before `validate_consumer_config` could produce the
+    // RFC-specific startup refusal required by RFC 0001 §9.2.
+    match stream.consumer_info(consumer_name).await {
+        Ok(info) => validate_consumer_config(&info.config)?,
+        Err(error) if error.kind() == ConsumerInfoErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(EgreError::Peer {
+                reason: format!("RFC 0001 §9.2: nats consumer ordering preflight failed: {error}"),
+            });
+        }
+    }
+
+    let consumer = stream
         .get_or_create_consumer(consumer_name, consumer_cfg)
         .await
         .map_err(|e| EgreError::Peer {
-            reason: format!("nats bootstrap_consumer failed: {e}"),
-        })
+            reason: format!("RFC 0001 §9.2: nats bootstrap_consumer failed: {e}"),
+        })?;
+    validate_consumer_config(&consumer.cached_info().config)?;
+    Ok(consumer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_nats::jetstream::consumer::Config as ConsumerConfig;
+
+    #[test]
+    fn stream_validation_rejects_work_queue_retention() {
+        let config = StreamConfig {
+            subjects: vec![WILDCARD_FILTER.to_string()],
+            retention: RetentionPolicy::WorkQueue,
+            ..Default::default()
+        };
+
+        let error = validate_stream_config(&config).unwrap_err();
+        assert!(error.to_string().contains("RFC 0001 §9.2"));
+    }
+
+    #[test]
+    fn stream_validation_rejects_missing_feed_wildcard_coverage() {
+        let config = StreamConfig {
+            subjects: vec!["some.other.subject.>".to_string()],
+            retention: RetentionPolicy::Limits,
+            ..Default::default()
+        };
+
+        let error = validate_stream_config(&config).unwrap_err();
+        assert!(error.to_string().contains("RFC 0001 §9.2"));
+    }
+
+    #[test]
+    fn stream_validation_accepts_limits_with_feed_wildcard() {
+        let config = StreamConfig {
+            subjects: vec![WILDCARD_FILTER.to_string()],
+            retention: RetentionPolicy::Limits,
+            ..Default::default()
+        };
+
+        assert!(validate_stream_config(&config).is_ok());
+    }
+
+    #[test]
+    fn stream_validation_accepts_broader_terminal_wildcard() {
+        let config = StreamConfig {
+            subjects: vec!["egregore.>".to_string()],
+            retention: RetentionPolicy::Limits,
+            ..Default::default()
+        };
+
+        assert!(validate_stream_config(&config).is_ok());
+    }
+
+    #[test]
+    fn stream_validation_rejects_narrower_subject_pattern() {
+        let config = StreamConfig {
+            subjects: vec!["egregore.feed.*".to_string()],
+            retention: RetentionPolicy::Limits,
+            ..Default::default()
+        };
+
+        let error = validate_stream_config(&config).unwrap_err();
+        assert!(error.to_string().contains("RFC 0001 §9.2"));
+    }
+
+    #[test]
+    fn consumer_validation_rejects_deliver_group() {
+        let config = ConsumerConfig {
+            deliver_group: Some("competing-workers".to_string()),
+            filter_subject: WILDCARD_FILTER.to_string(),
+            ..Default::default()
+        };
+
+        let error = validate_consumer_config(&config).unwrap_err();
+        assert!(error.to_string().contains("RFC 0001 §9.2"));
+    }
+
+    #[test]
+    fn consumer_validation_accepts_ungrouped_feed_wildcard() {
+        let config = ConsumerConfig {
+            deliver_group: None,
+            filter_subject: WILDCARD_FILTER.to_string(),
+            ..Default::default()
+        };
+
+        assert!(validate_consumer_config(&config).is_ok());
+    }
 }

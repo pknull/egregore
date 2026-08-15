@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{EgreError, Result};
 use crate::feed::models::Message;
 use crate::identity::PublicId;
+use crate::metrics;
 use crate::transport::filter::TopicFilter;
 use crate::transport::health::TransportHealth;
 use crate::transport::subscription::SubscriptionHandle;
@@ -126,6 +127,7 @@ impl CompositeTransport {
         let directions = (0..children.len())
             .map(|_| Arc::new(DirectionState::new()))
             .collect();
+        metrics::set_transport_composite_children(children.len());
 
         Ok(Self {
             children,
@@ -158,7 +160,16 @@ impl Transport for CompositeTransport {
         let futures = self
             .children
             .iter()
-            .map(|child| child.publish(msg))
+            .map(|child| async move {
+                let child_backend = child.health().backend;
+                let started = std::time::Instant::now();
+                let result = child.publish(msg).await;
+                metrics::record_transport_composite_forward_latency(
+                    child_backend,
+                    started.elapsed().as_secs_f64(),
+                );
+                result
+            })
             .collect::<Vec<_>>();
         let results = futures::future::join_all(futures).await;
 
@@ -488,6 +499,12 @@ impl Transport for CompositeTransport {
     /// Each child's `bridge_queues` describes its INBOUND queues
     /// (`directions[j]`: messages going TO child `j` from every other child).
     fn health(&self) -> TransportHealth {
+        metrics::set_transport_composite_children(self.children.len());
+        let dedup_drops_total = self.children.iter().fold(0u64, |total, child| {
+            total.saturating_add(child.self_echo_total())
+        });
+        metrics::set_transport_composite_dedup_drops_absolute(dedup_drops_total);
+
         let children: Vec<TransportHealth> = self
             .children
             .iter()

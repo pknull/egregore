@@ -20,6 +20,7 @@ For architecture internals (module boundaries, invariants, storage ownership), s
 | Identity and Network Trust | Node identity, network isolation, key-at-rest handling | [identity-and-security.md](./identity-and-security.md) |
 | Signed Feeds and Query | Publish, verify, query, and search signed messages | [feeds-and-query.md](./feeds-and-query.md) |
 | Mesh Replication | Pull/push gossip synchronization and flow control | [mesh-replication.md](./mesh-replication.md) |
+| Transport Abstraction and Bridge Mode | Default gossip, opt-in NATS JetStream, and composite forwarding | [Architecture slice](../architecture/transport-abstraction.md) |
 | Peer Discovery | Static peers, LAN UDP discovery, and mDNS discovery | [peer-discovery.md](./peer-discovery.md) |
 | Selective Replication | Author (`follows`) and topic (`topics`) replication filters | [selective-replication.md](./selective-replication.md) |
 | Schema Registry | Message schema contracts and strict-mode enforcement | [schema-registry.md](./schema-registry.md) |

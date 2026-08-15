@@ -13,11 +13,9 @@
 //! - `subjects` — NATS subject mapping helpers (author → subject, consumer name)
 //! - `consumer` — JetStream stream + consumer bootstrap
 //! - `transport` — `BusTransport` struct + `Transport` trait impl
-//! - `ingest` — durable-local-ingest precondition (RFC 0002 §8.2)
 
 pub mod config;
 pub mod consumer;
-pub mod ingest;
 pub mod subjects;
 pub mod transport;
 

@@ -75,8 +75,9 @@ pub struct HookEntry {
     /// Human-readable label for logging.
     #[serde(default)]
     pub name: Option<String>,
-    /// Path to executable called when a message arrives.
+    /// Deprecated path to an executable called when a message arrives.
     /// Message JSON is passed on stdin.
+    /// Requires the top-level `allow_subprocess_hooks` compatibility flag.
     pub on_message: Option<PathBuf>,
     /// URL to POST message JSON to when a message arrives.
     pub webhook_url: Option<String>,
@@ -158,6 +159,11 @@ pub struct Config {
     /// Multiple hook configurations for event-driven handlers.
     #[serde(default)]
     pub hooks: Vec<HookEntry>,
+    /// Allow deprecated message-triggered subprocess hooks.
+    ///
+    /// Disabled by default. Webhook handlers remain enabled independently.
+    #[serde(default)]
+    pub allow_subprocess_hooks: bool,
     /// Enable persistent push-based connections.
     /// When enabled, after initial replication, connections attempt to
     /// negotiate persistent mode for real-time message propagation.
@@ -308,6 +314,7 @@ impl Default for Config {
             lan_discovery: false,
             discovery_port: DEFAULT_DISCOVERY_PORT,
             hooks: Vec::new(),
+            allow_subprocess_hooks: false,
             push_enabled: true,
             max_persistent_connections: DEFAULT_MAX_PERSISTENT_CONNECTIONS,
             reconnect_initial_secs: DEFAULT_RECONNECT_INITIAL_SECS,
@@ -467,13 +474,15 @@ impl Config {
             tracing::warn!("mcp_enabled=true has no effect when api_enabled=false");
         }
         for hook in &self.hooks {
-            if let Some(ref path) = hook.on_message {
-                if !path.exists() {
-                    tracing::warn!(
-                        hook_name = ?hook.name,
-                        path = %path.display(),
-                        "hook script does not exist"
-                    );
+            if self.allow_subprocess_hooks {
+                if let Some(ref path) = hook.on_message {
+                    if !path.exists() {
+                        tracing::warn!(
+                            hook_name = ?hook.name,
+                            path = %path.display(),
+                            "hook script does not exist"
+                        );
+                    }
                 }
             }
             if let Some(ref url) = hook.webhook_url {
@@ -675,6 +684,7 @@ mod tests {
             api_auth_enabled: true,
             api_auth_token: Some("test-token".to_string()),
             mcp_enabled: false,
+            allow_subprocess_hooks: true,
             hooks: vec![
                 HookEntry {
                     name: Some("test-hook".to_string()),
@@ -700,6 +710,7 @@ mod tests {
         assert!(parsed.api_auth_enabled);
         assert_eq!(parsed.api_auth_token.as_deref(), Some("test-token"));
         assert!(!parsed.mcp_enabled);
+        assert!(parsed.allow_subprocess_hooks);
         assert!(!parsed.node_status_enabled);
         assert_eq!(parsed.hooks.len(), 2);
         assert_eq!(parsed.hooks[0].name.as_deref(), Some("test-hook"));
@@ -718,6 +729,7 @@ mod tests {
         assert!(!config.api_auth_enabled);
         assert!(config.api_auth_token.is_none());
         assert!(config.mcp_enabled);
+        assert!(!config.allow_subprocess_hooks);
         assert!(!config.node_status_enabled);
         assert!(config.hooks.is_empty());
     }

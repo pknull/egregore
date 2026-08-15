@@ -91,7 +91,7 @@ pub trait Transport: Send + Sync + 'static {
     /// internal (e.g. `gossip::health`); this is the wire-agnostic summary.
     fn health(&self) -> TransportHealth;
 
-    /// Composite-only extension hook (RFC 0002 §C.5): finalize broker-side
+    /// Composite-only extension hook (RFC 0002 §18 item A2): finalize broker-side
     /// acknowledgment for a forwarded message after the per-message
     /// `AckBarrier` resolves to zero.
     ///
@@ -104,7 +104,7 @@ pub trait Transport: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Composite-only extension hook (amendment §C.4 retcon): expose the
+    /// Composite-only extension hook (RFC 0002 §18 item A1): expose the
     /// canonical self-echo counter so the bridge can surface it through
     /// `BridgeQueuesHealth`.
     ///

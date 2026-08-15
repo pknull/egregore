@@ -76,6 +76,11 @@ paths:
                   feed_count: 5
                   follow_count: 4
                   uptime_secs: 3600
+                  transport:
+                    connected: true
+                    backend: gossip
+                    unreplicated_count: 0
+                    inflight_publishes: 0
 
   /v1/identity:
     get:
@@ -943,6 +948,124 @@ components:
           description: Base64-encoded Ed25519 signature of the hash bytes.
           example: "c2lnbmF0dXJlIGV4YW1wbGUgYmFzZTY0"
 
+    BridgeQueuesHealth:
+      type: object
+      description: |
+        Aggregate state for queues forwarding messages to one child of a
+        composite transport. Optional fields are omitted when no corresponding
+        queue or error state exists.
+      required:
+        - destination
+        - depth_total
+        - authors_backpressured
+        - authors_active
+        - backpressure_events_total
+        - self_echo_total
+        - ack_on_error_total
+        - nats_redelivery_total
+      properties:
+        destination:
+          type: string
+          description: Backend name of the destination transport.
+          example: nats
+        depth_total:
+          type: integer
+          format: uint64
+          description: Total messages queued for this destination across all authors.
+          example: 12
+        authors_backpressured:
+          type: integer
+          format: uint64
+          description: Author queues currently at or above the high watermark.
+          example: 1
+        authors_active:
+          type: integer
+          format: uint64
+          description: Non-empty author queues currently forwarding to this destination.
+          example: 3
+        backpressure_events_total:
+          type: integer
+          format: uint64
+          description: Upstream-ingress block events since process start.
+          example: 4
+        self_echo_total:
+          type: integer
+          format: uint64
+          description: Bus self-echoes dropped at ingest since process start.
+          example: 2
+        oldest_queued_age_secs:
+          type: integer
+          format: uint64
+          description: Age of the oldest queued message in seconds. Omitted when no message is queued.
+          example: 5
+        publish_in_flight_age_secs:
+          type: integer
+          format: uint64
+          description: Age of the current destination publish in seconds. Omitted when no publish is in flight.
+          example: 1
+        ack_on_error_total:
+          type: integer
+          format: uint64
+          description: Destination publish errors acknowledged under the bridge ack-on-error policy.
+          example: 0
+        nats_redelivery_total:
+          type: integer
+          format: uint64
+          description: NATS ack-wait expiries that caused redelivery.
+          example: 0
+        last_error:
+          type: string
+          description: Most recent direction-specific error. Omitted when no error is recorded.
+          example: "destination publish error"
+
+    TransportHealth:
+      type: object
+      description: |
+        Coarse transport liveness and forwarding state. Composite transports
+        include recursive child health; leaf transports omit `children` and
+        `bridge_queues`.
+      required:
+        - connected
+        - backend
+        - unreplicated_count
+        - inflight_publishes
+      properties:
+        connected:
+          type: boolean
+          description: Whether the transport currently has a live path to peers or brokers.
+        backend:
+          type: string
+          enum: [gossip, nats, composite, mock]
+          description: Transport adapter name.
+        last_successful_publish:
+          type: string
+          format: date-time
+          description: Most recent successful transport publish. Omitted until one occurs.
+        last_peer_contact:
+          type: string
+          format: date-time
+          description: Most recent inbound peer or broker contact. Omitted until one occurs.
+        unreplicated_count:
+          type: integer
+          format: uint64
+          description: Messages accepted locally but not yet confirmed replicated.
+          example: 0
+        inflight_publishes:
+          type: integer
+          minimum: 0
+          description: Publish calls currently in flight.
+          example: 0
+        last_error:
+          type: string
+          description: Most recent adapter-level error. Omitted when no error is recorded.
+        children:
+          type: array
+          description: Per-child health for a composite transport. Omitted when empty.
+          items:
+            $ref: "#/components/schemas/TransportHealth"
+        bridge_queues:
+          $ref: "#/components/schemas/BridgeQueuesHealth"
+
     StatusInfo:
       type: object
       required:
@@ -998,6 +1121,8 @@ components:
           format: uint64
           description: Seconds since the node process started.
           example: 3600
+        transport:
+          $ref: "#/components/schemas/TransportHealth"
 
     MeshPeerInfo:
       type: object

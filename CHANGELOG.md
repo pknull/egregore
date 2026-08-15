@@ -2,6 +2,21 @@
 
 All notable changes to egregore are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/) post-1.0.
 
+## [Unreleased]
+
+### Added
+
+- Built-in `assign_task/v1` and `assign_task_result/v1` schemas for the RFC 0003 typed assignment command and owner-published result.
+
+### Changed
+
+- Deprecated message-triggered subprocess hooks are default-off behind the top-level `allow_subprocess_hooks` compatibility gate; enabling them emits startup warnings and the migration path is structured Servitor work.
+- Promoted transport architecture, feature, and deployment documentation into the current Thallus documentation boundary.
+
+### Fixed
+
+- Closed RFC 0001/0002 conformance gaps in bus backlog reporting, the `nats` transport-health discriminator, RFC 0001 §9.2 broker-ordering validation, `(author, sequence)` retry ordering, and composite transport metrics.
+
 ## [2.0.1] - 2026-04-27
 
 ### Fixed

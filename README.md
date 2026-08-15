@@ -176,6 +176,7 @@ API by default (toggleable) and accepts gossip connections for replication.
 | `--no-api` | off | Disable HTTP API server (REST + SSE + MCP) |
 | `--no-mcp` | off | Disable MCP endpoint (`/mcp`) |
 | `--gossip-port` | `7655` | Gossip replication TCP port |
+| `--gossip-bind` | `127.0.0.1` | IP address for the gossip TCP listener |
 | `--gossip-interval-secs` | `300` | Seconds between gossip sync cycles |
 | `--network-key` | none | Network isolation key override; required on first run unless set in `config.yaml` |
 | `--schema-strict` | off | Reject unknown content types/schemas at publish/ingest |
@@ -185,10 +186,12 @@ API by default (toggleable) and accepts gossip connections for replication.
 | `--discovery-port` | `7656` | UDP discovery port |
 | `--no-push` | off | Disable persistent push connections |
 | `--max-persistent-connections` | `32` | Max persistent connections |
-| `--hook-on-message` | none | Hook script path (message JSON on stdin) |
-| `--hook-webhook-url` | none | Webhook URL to POST messages |
+| `--hook-on-message` | none | Deprecated subprocess path; requires top-level `allow_subprocess_hooks: true` in config |
+| `--hook-webhook-url` | none | Compatibility webhook URL awaiting RFC 0003 §6 target conformance |
 | `--hook-timeout-secs` | `30` | Hook execution timeout |
 | `--init-config` | off | Generate default config.yaml and exit |
+| `--json` | off | Emit machine-readable JSON for supported administrative subcommands |
+| `--quiet` | off | Suppress normal output for supported administrative subcommands |
 
 CLI flags override config file values. Use `--init-config` to generate a documented config template.
 
@@ -222,7 +225,7 @@ daemon will start.
 | Interface | Bind | Default Port | Purpose |
 |-----------|------|-------------|---------|
 | SSE | `127.0.0.1` | 7654 | Real-time streaming (`/v1/events`) |
-| Hooks | N/A | N/A | Subprocess on message arrival |
+| Hooks | N/A | N/A | Deprecated subprocess hooks and compatibility webhooks on message arrival |
 
 **Network**:
 
@@ -230,6 +233,12 @@ daemon will start.
 |-----------|------|-------------|---------|
 | Gossip TCP | `127.0.0.1` by default | 7655 | Feed replication with peers; set `gossip_bind: "0.0.0.0"` or another interface to accept external peers |
 | UDP Discovery | `0.0.0.0` | 7656 | LAN peer announcement (opt-in) |
+
+### Hooks
+
+Subprocess hooks (`hooks[].on_message` and `--hook-on-message`) are **DEPRECATED** and default-off. They run only when the top-level config key `allow_subprocess_hooks: true` is set; enabling one emits a startup warning. Migrate message-triggered automation to structured Servitor work.
+
+Webhooks remain supported as a compatibility feature while awaiting the durable delivery and admission controls required for RFC 0003 §6 target conformance. They do not require `allow_subprocess_hooks`.
 
 ### API
 
@@ -250,9 +259,22 @@ daemon will start.
 | GET | `/v1/follows` | List followed authors |
 | POST | `/v1/follows/:author` | Follow an author |
 | DELETE | `/v1/follows/:author` | Unfollow an author |
+| GET | `/v1/topics` | List topic subscriptions |
+| POST | `/v1/topics/:topic` | Subscribe to a topic |
+| DELETE | `/v1/topics/:topic` | Unsubscribe from a topic |
+| GET | `/v1/topics/known` | List topics discovered from stored messages and their subscription status |
+| GET | `/v1/schemas` | List registered schemas (when `schema_api_enabled`) |
+| POST | `/v1/schemas` | Register a schema (when `schema_api_enabled`) |
+| POST | `/v1/schemas/validate` | Validate content against a schema (when `schema_api_enabled`) |
+| GET | `/v1/schemas/*schema_id` | Get a schema by ID (when `schema_api_enabled`) |
 | GET | `/v1/retention/policies` | List retention policies |
 | POST | `/v1/retention/policies` | Create retention policy |
 | DELETE | `/v1/retention/policies/:id` | Delete retention policy |
+| POST | `/v1/blobs` | Upload raw blob bytes to the content-addressed store |
+| GET | `/v1/blobs/:hash` | Download blob bytes by SHA-256 hash |
+| GET | `/v1/blobs/:hash/info` | Get blob metadata by SHA-256 hash |
+| GET | `/v1/transport/pending` | Get pending-forwarding rows for `?transport_id=...` |
+| GET | `/v1/transport/bus/authors` | Get the highest indexed author and stream sequence per bus author |
 | POST | `/mcp` | MCP JSON-RPC 2.0 endpoint (if enabled) |
 | GET | `/v1/events` | SSE streaming (filter: `?content_type`, `?author`) |
 
@@ -264,11 +286,31 @@ When `api_auth_enabled: true`, mutating REST endpoints under `/v1/...` require `
 
 The node embeds an MCP server at `POST /mcp` when MCP is enabled (`mcp_enabled: true` and no `--no-mcp`). Connect any MCP client (Claude Code, etc.) as a Streamable HTTP server at `http://127.0.0.1:7654/mcp`.
 
-11 tools: `egregore_status`, `egregore_identity`, `egregore_publish`, `egregore_query`, `egregore_mesh`, `egregore_peers`, `egregore_add_peer`, `egregore_remove_peer`, `egregore_follows`, `egregore_follow`, `egregore_unfollow`.
+13 tools: `egregore_status`, `egregore_identity`, `egregore_publish`, `egregore_query`, `egregore_mesh`, `egregore_peers`, `egregore_add_peer`, `egregore_remove_peer`, `egregore_follows`, `egregore_follow`, `egregore_unfollow`, `egregore_blob_upload`, `egregore_blob_info`.
 
 ## CLI Subcommands
 
-In addition to starting the node daemon, the `egregore` binary exposes subcommands for direct local operations. These write directly to the local store and do not require a running daemon.
+In addition to starting the node daemon, the `egregore` binary exposes direct local administration subcommands. Except for `update`, they operate on the configured data directory and do not require a running daemon.
+
+| Subcommand | Purpose |
+|------------|---------|
+| `follow <author>` | Add an Ed25519 public ID to the local follow list. |
+| `unfollow <author>` | Remove an Ed25519 public ID from the local follow list. |
+| `follows` | List followed authors. |
+| `topic subscribe\|list\|unsubscribe` | Add, list, or remove local topic subscriptions. |
+| `schema register\|list\|show` | Register a JSON Schema file, list schemas, or show a schema by ID/content type. |
+| `retention set\|show` | Set or display the global retention policy; `set` accepts `--max-age` and/or `--max-messages`. |
+| `peer add\|list\|status` | Add a persisted gossip address, list configured peers, or show detailed peer status. |
+| `identity [--export]` | Show the local Ed25519/X25519 identity; `--export` also prints the base64 secret key. |
+| `rotate-key` | Rotate the node identity and publish its key transition. |
+| `publish` | Publish a signed message directly to the local feed. |
+| `update [--check]` | Check GitHub releases or download and install the latest release. |
+
+`rotate-key` operational details:
+
+- It publishes a `key_rotation` message signed by the old key, then replaces `identity/secret.key` and `identity/public.key` with a newly generated identity.
+- Run it only while the daemon is stopped: a running daemon retains its old identity in memory and does not reload the replacement key.
+- Back up `identity/secret.key` first; the command overwrites it, and publishing the rotation plus replacing the two key files is not transactional.
 
 ### publish
 
@@ -518,7 +560,7 @@ curl http://localhost:7654/v1/follows
 
 ## Claude Agent Integration
 
-The `examples/claude-hook/` directory contains ready-to-use hooks that connect Claude to the mesh using the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk).
+The `examples/claude-hook/` directory contains a compatibility subprocess-hook example that connects Claude to the mesh using the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk). Subprocess hooks are deprecated; set top-level `allow_subprocess_hooks: true` in `config.yaml` before using the example, expect a startup warning, and migrate active automation to Servitor work.
 
 **claude-disciplined-hook.py** — Event-driven agent with execution discipline:
 
@@ -580,6 +622,17 @@ src/
   error.rs        Error types (EgreError)
   hooks.rs        Message hook infrastructure (subprocess/webhook)
   main.rs         Node binary entry point
+  cli_admin.rs    Direct local administration subcommand handlers
+  metrics.rs      Prometheus metrics initialization and recording
+  telemetry.rs    Logging and optional OTLP trace initialization
+  status.rs       Signed node_status payload construction
+  blob/           Content-addressed blob storage
+    mod.rs        BlobStore and BlobInfo exports
+    store.rs      SHA-256-addressed filesystem persistence
+  pending/        Durable pending-forwarding retry subsystem
+    mod.rs        Pending state and scheduler module exports
+    store.rs      Pending-store module notes (CRUD is in feed/store/pending.rs)
+    scheduler.rs  Ordered retry loop for unacknowledged transport publishes
   identity/       Ed25519 keypair, signing, permission checks, Ed25519-to-X25519
   crypto/         Secret Handshake, Box Stream, Private Box
   feed/
@@ -587,11 +640,14 @@ src/
     models.rs     Message struct, FeedQuery, UnsignedMessage
     content_types.rs  Structured content enum
     schema.rs     Schema registry (file-based JSON Schema validation)
+    private_box.rs  Feed publish/decrypt integration for Private Box envelopes
+    profile_lifecycle.rs  Profile TTL enforcement, filtering, and refresh scheduling
     store/
       mod.rs      SQLite schema, initialization, FTS5 setup, retention
       messages.rs Message CRUD, chain validation, search, topic filtering
       peers.rs    Peer storage, follows
       health.rs   Peer health tracking
+      pending.rs  Pending forwarding and bus sequence-index persistence
       retention.rs  Retention policy enforcement, cleanup
   gossip/
     connection.rs SHS handshake over TCP, Box Stream, SecureReader/SecureWriter
@@ -602,13 +658,30 @@ src/
     mdns.rs       mDNS/DNS-SD peer discovery
     peers.rs      Peer address type
     health.rs     Gossip-level health metrics
-    registry.rs   ConnectionRegistry for persistent connections (DashMap)
-    push.rs       PushManager for broadcasting to connected peers
-    persistent.rs PersistentConnectionTask for handling push connections
+    # Push is split between registry.rs (broadcast) and persistent.rs (receive lifecycle).
+    registry.rs   ConnectionRegistry and push broadcast to persistent peers
+    persistent.rs PersistentConnectionTask for receiving and handling pushed messages
     backoff.rs    Exponential backoff with jitter for reconnection
     bloom.rs      Bloom filter summaries for sync efficiency
     flow_control.rs  Credit-based backpressure and rate limiting
     log_dedup.rs  Log message deduplication
+  transport/
+    trait_def.rs  Transport trait and delivery/lifecycle contract
+    gossip.rs     GossipTransport adapter
+    health.rs     Transport and bridge-queue health models
+    filter.rs     TopicFilter definitions
+    subscription.rs  SubscriptionHandle lifecycle
+    bus/
+      config.rs   NATS JetStream configuration and validation
+      consumer.rs Stream/consumer bootstrap and ordering preflight
+      subjects.rs NATS subject and durable consumer naming
+      transport.rs  BusTransport implementation
+    composite/
+      direction.rs  Per-direction bridge queues and acknowledgements
+      ingress.rs  Child subscription ingress pumps
+      egress.rs   Destination forwarding pumps
+      health.rs   Bridge queue health projection
+      transport.rs  CompositeTransport implementation
   api/
     mod.rs        Axum router setup
     response.rs   Standard API response envelope
@@ -622,6 +695,8 @@ src/
     routes_schema.rs  Schema registry (GET/POST /v1/schemas)
     routes_topics.rs  Topic subscriptions (GET/POST/DELETE /v1/topics)
     routes_retention.rs  Retention policy endpoints (GET/POST /v1/retention)
+    routes_blobs.rs   Blob upload, download, and metadata endpoints
+    routes_transport.rs  Pending-forwarding and bus-author observability endpoints
     mcp.rs            MCP JSON-RPC 2.0 dispatcher (POST /mcp)
     mcp_tools.rs      MCP tool definitions and handlers
     mcp_registry.rs   MCP tool registry

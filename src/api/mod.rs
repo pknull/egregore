@@ -13,8 +13,8 @@
 //! `application/x-www-form-urlencoded` or `multipart/form-data`. JavaScript fetch()
 //! with custom headers triggers CORS preflight, which fails cross-origin to localhost.
 //!
-//! Routes include feed queries, publish, peer management, follows, consumer
-//! groups, identity, status, and SSE at GET /v1/events. MCP is enabled
+//! Routes include feed queries, publish, peer management, follows, identity,
+//! status, and SSE at GET /v1/events. MCP is enabled
 //! conditionally.
 
 pub mod mcp;

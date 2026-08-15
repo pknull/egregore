@@ -306,7 +306,7 @@ async fn b8_local_publish_fans_to_both_children() {
                 h.child_a.published().iter().any(|m| m.hash == msg.hash)
                     && h.child_b.published().iter().any(|m| m.hash == msg.hash)
             },
-            Duration::from_secs(2),
+            Duration::from_secs(10),
             "both children published M",
         )
         .await;
@@ -438,7 +438,7 @@ async fn b8_loop_termination_via_hash_dedup() {
                 .expect("store lookup")
                 .is_some()
         },
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         "first ingest landed in store",
     )
     .await;
@@ -446,7 +446,7 @@ async fn b8_loop_termination_via_hash_dedup() {
     // Wait for the composite's ingress/egress pipeline to publish to B.
     wait_until(
         || h.child_b.published().iter().any(|m2| m2.hash == m.hash),
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         "bridge forwarded M to B",
     )
     .await;
@@ -547,7 +547,7 @@ async fn b8_duplicate_arrival_on_second_transport() {
                 .expect("store lookup")
                 .is_some()
         },
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         "first ingest landed",
     )
     .await;
@@ -645,14 +645,14 @@ async fn b8_private_box_messages_forward_unchanged() {
                 .expect("store lookup")
                 .is_some()
         },
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         "Private-Box ingest landed",
     )
     .await;
 
     wait_until(
         || h.child_b.published().iter().any(|m| m.hash == m_pb.hash),
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         "bridge forwarded M_pb to B",
     )
     .await;

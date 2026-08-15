@@ -35,6 +35,16 @@ tags:
     description: Manage gossip peer connections.
   - name: Follows
     description: Manage feed subscriptions for replication.
+  - name: Topics
+    description: Manage topic subscriptions and inspect topics seen in stored messages.
+  - name: Schemas
+    description: Manage and validate versioned content schemas.
+  - name: Retention
+    description: Manage persisted message-retention policies.
+  - name: Blobs
+    description: Store and retrieve content-addressed binary blobs.
+  - name: Transport
+    description: Inspect pending forwarding and bus author-index state.
   - name: Mesh
     description: |
       Mesh-wide peer health visibility. Returns aggregated observations from
@@ -561,6 +571,423 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /v1/topics:
+    get:
+      operationId: getTopicSubscriptions
+      tags: [Topics]
+      summary: List topic subscriptions
+      responses:
+        "200":
+          description: Topic subscriptions retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopicListResponse"
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/topics/{topic}:
+    parameters:
+      - name: topic
+        in: path
+        required: true
+        description: Topic name after trimming; must contain 1-256 characters.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 256
+    post:
+      operationId: addTopicSubscription
+      tags: [Topics]
+      summary: Subscribe to a topic
+      responses:
+        "201":
+          description: Topic subscription created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopicResponse"
+        "400":
+          description: Topic is empty or longer than 256 characters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: removeTopicSubscription
+      tags: [Topics]
+      summary: Unsubscribe from a topic
+      responses:
+        "204":
+          description: Topic subscription removed successfully. No response body.
+        "400":
+          description: Topic is empty or longer than 256 characters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/topics/known:
+    get:
+      operationId: getKnownTopics
+      tags: [Topics]
+      summary: List known topics
+      description: Returns topics discovered from stored messages with their local subscription status.
+      responses:
+        "200":
+          description: Known topics retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnownTopicListResponse"
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/schemas:
+    get:
+      operationId: listSchemas
+      tags: [Schemas]
+      summary: List registered schemas
+      description: Available when `schema_api_enabled` is true.
+      responses:
+        "200":
+          description: Schema summaries retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SchemaListResponse"
+    post:
+      operationId: registerSchema
+      tags: [Schemas]
+      summary: Register a schema
+      description: Available when `schema_api_enabled` is true.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterSchemaRequest"
+      responses:
+        "201":
+          description: Schema registered successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SchemaInfoResponse"
+        "400":
+          description: Invalid content type, version, JSON body, or JSON Schema shape.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Schema registration failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/schemas/validate:
+    post:
+      operationId: validateSchemaContent
+      tags: [Schemas]
+      summary: Validate content against a schema
+      description: |
+        Available when `schema_api_enabled` is true. If `schema_id` is omitted,
+        the registry attempts to infer it from the content's `type` field.
+        Schema validation failures return HTTP 200 with `valid: false`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidateSchemaRequest"
+      responses:
+        "200":
+          description: Validation completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidateSchemaResponse"
+        "400":
+          description: Invalid JSON body or an explicitly empty schema ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/schemas/{schema_id}:
+    get:
+      operationId: getSchema
+      tags: [Schemas]
+      summary: Get a schema by ID
+      description: Available when `schema_api_enabled` is true.
+      parameters:
+        - name: schema_id
+          in: path
+          required: true
+          description: URL-encoded schema ID, such as `insight%2Fv1`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Schema retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SchemaDefinitionResponse"
+        "404":
+          description: Schema not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/retention/policies:
+    get:
+      operationId: listRetentionPolicies
+      tags: [Retention]
+      summary: List retention policies
+      responses:
+        "200":
+          description: Retention policies retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetentionPolicyListResponse"
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: createRetentionPolicy
+      tags: [Retention]
+      summary: Create a retention policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRetentionPolicyRequest"
+      responses:
+        "201":
+          description: Retention policy created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetentionPolicyResponse"
+        "400":
+          description: Invalid scope, zero-valued limit, empty compaction key, or missing criterion.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/retention/policies/{id}:
+    delete:
+      operationId: deleteRetentionPolicy
+      tags: [Retention]
+      summary: Delete a retention policy
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "204":
+          description: Retention policy deleted successfully. No response body.
+        "404":
+          description: Retention policy not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/blobs:
+    post:
+      operationId: uploadBlob
+      tags: [Blobs]
+      summary: Upload a blob
+      description: Stores up to 100 MiB of raw bytes under their SHA-256 hash. Re-uploading identical bytes is idempotent.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+          application/json:
+            schema:
+              description: Any JSON value; its encoded request bytes are stored verbatim.
+      responses:
+        "200":
+          description: Blob stored successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlobInfoResponse"
+        "400":
+          description: Request body is empty.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Blob exceeds the 100 MiB limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Content type is not `application/octet-stream` or `application/json`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Blob storage failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/blobs/{hash}:
+    get:
+      operationId: downloadBlob
+      tags: [Blobs]
+      summary: Download a blob
+      parameters:
+        - $ref: "#/components/parameters/BlobHashParam"
+      responses:
+        "200":
+          description: Raw blob bytes.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Blob not found or hash is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Blob read failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/blobs/{hash}/info:
+    get:
+      operationId: getBlobInfo
+      tags: [Blobs]
+      summary: Get blob metadata
+      parameters:
+        - $ref: "#/components/parameters/BlobHashParam"
+      responses:
+        "200":
+          description: Blob metadata retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlobInfoResponse"
+        "404":
+          description: Blob not found or hash is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Blob metadata read failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/transport/pending:
+    get:
+      operationId: getTransportPending
+      tags: [Transport]
+      summary: Inspect pending transport forwarding
+      description: Returns the total pending count and at most 100 rows for one transport ID.
+      parameters:
+        - name: transport_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pending-forwarding summary retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransportPendingResponse"
+        "500":
+          description: Pending-forwarding state could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/transport/bus/authors:
+    get:
+      operationId: getBusAuthors
+      tags: [Transport]
+      summary: Inspect the bus author sequence index
+      description: Returns one row per author with the highest indexed author/stream sequence pair and last index timestamp.
+      responses:
+        "200":
+          description: Bus author-index summary retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BusAuthorsResponse"
+        "500":
+          description: Bus author-index state could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /v1/mesh:
     get:
       operationId: getMesh
@@ -693,8 +1120,8 @@ paths:
       summary: MCP JSON-RPC endpoint
       description: |
         Model Context Protocol endpoint using JSON-RPC 2.0 over Streamable HTTP.
-        This is the native LLM integration interface, exposing the same capabilities
-        as the REST API through 11 MCP tools.
+        This is the native LLM integration interface, exposing status, identity,
+        feed, peer/follow, mesh, and blob capabilities through 13 MCP tools.
 
         Supported methods:
         - `initialize` — Returns server capabilities and protocol version
@@ -848,6 +1275,15 @@ components:
           - query
           - response
           - profile
+
+    BlobHashParam:
+      name: hash
+      in: path
+      required: true
+      description: SHA-256 hash of the blob.
+      schema:
+        type: string
+        pattern: "^[0-9A-Fa-f]{64}$"
 
   schemas:
     # ---------------------------------------------------------------------------
@@ -1229,6 +1665,291 @@ components:
           description: Public ID of the followed author.
           example: "@vGHaz+WTpUNtTMsb5VKXhkk9YvE9bCm3p0Kx8nh+GfQ=.ed25519"
 
+    TopicInfo:
+      type: object
+      required: [topic]
+      properties:
+        topic:
+          type: string
+
+    KnownTopicInfo:
+      type: object
+      required: [topic, subscribed]
+      properties:
+        topic:
+          type: string
+        subscribed:
+          type: boolean
+
+    SchemaCodec:
+      type: string
+      enum: [json, protobuf, cbor]
+
+    SchemaCompatibilityMode:
+      type: string
+      enum: [backward, forward, full, none]
+
+    SchemaInfo:
+      type: object
+      required: [schema_id, content_type, version, codec, compatibility, description]
+      properties:
+        schema_id:
+          type: string
+          description: Computed as `{content_type}/v{version}`.
+        content_type:
+          type: string
+        version:
+          type: integer
+          format: uint32
+        codec:
+          $ref: "#/components/schemas/SchemaCodec"
+        compatibility:
+          $ref: "#/components/schemas/SchemaCompatibilityMode"
+        description:
+          type: string
+          nullable: true
+
+    SchemaDefinition:
+      type: object
+      required:
+        - schema_id
+        - content_type
+        - version
+        - json_schema
+        - codec
+        - compatibility
+        - description
+      properties:
+        schema_id:
+          type: string
+        content_type:
+          type: string
+        version:
+          type: integer
+          format: uint32
+        json_schema:
+          description: JSON Schema document registered for this version.
+        codec:
+          $ref: "#/components/schemas/SchemaCodec"
+        compatibility:
+          $ref: "#/components/schemas/SchemaCompatibilityMode"
+        description:
+          type: string
+          nullable: true
+
+    RegisterSchemaRequest:
+      type: object
+      required: [content_type, version, json_schema]
+      properties:
+        content_type:
+          type: string
+          minLength: 1
+        version:
+          type: integer
+          format: uint32
+          minimum: 1
+        json_schema:
+          type: object
+          additionalProperties: true
+        codec:
+          $ref: "#/components/schemas/SchemaCodec"
+        compatibility:
+          $ref: "#/components/schemas/SchemaCompatibilityMode"
+        description:
+          type: string
+          nullable: true
+
+    ValidateSchemaRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          description: JSON value to validate.
+        schema_id:
+          type: string
+          description: Optional exact schema ID; a provided value must be non-empty after trimming.
+
+    ValidateSchemaResult:
+      type: object
+      required: [valid, schema_id]
+      properties:
+        valid:
+          type: boolean
+        schema_id:
+          type: string
+          nullable: true
+        error:
+          type: string
+          description: Validation error text; omitted when validation succeeds.
+
+    RetentionScopeInput:
+      oneOf:
+        - type: string
+          enum: [global]
+        - type: object
+          anyOf:
+            - required: [topic]
+            - required: [author]
+            - required: [content_type]
+          properties:
+            topic:
+              type: string
+            author:
+              type: string
+            content_type:
+              type: string
+          description: At least one of `topic`, `author`, or `content_type` is required.
+
+    RetentionScopeResponse:
+      oneOf:
+        - type: string
+          enum: [global]
+        - type: object
+          required: [topic]
+          properties:
+            topic:
+              type: string
+          additionalProperties: false
+        - type: object
+          required: [author]
+          properties:
+            author:
+              type: string
+          additionalProperties: false
+        - type: object
+          required: [content_type]
+          properties:
+            content_type:
+              type: string
+          additionalProperties: false
+
+    CreateRetentionPolicyRequest:
+      type: object
+      required: [scope]
+      anyOf:
+        - required: [max_age_secs]
+        - required: [max_count]
+        - required: [max_bytes]
+        - required: [compact_key]
+      properties:
+        scope:
+          $ref: "#/components/schemas/RetentionScopeInput"
+        max_age_secs:
+          type: integer
+          format: uint64
+          minimum: 1
+        max_count:
+          type: integer
+          format: uint64
+          minimum: 1
+        max_bytes:
+          type: integer
+          format: uint64
+          minimum: 1
+        compact_key:
+          type: string
+          description: JSON path used as a compaction key; must be non-empty after trimming.
+
+    RetentionPolicy:
+      type: object
+      required: [id, scope]
+      properties:
+        id:
+          type: integer
+          format: int64
+        scope:
+          $ref: "#/components/schemas/RetentionScopeResponse"
+        max_age_secs:
+          type: integer
+          format: uint64
+        max_count:
+          type: integer
+          format: uint64
+        max_bytes:
+          type: integer
+          format: uint64
+        compact_key:
+          type: string
+
+    BlobInfo:
+      type: object
+      required: [hash, size]
+      properties:
+        hash:
+          type: string
+          pattern: "^[0-9A-Fa-f]{64}$"
+        size:
+          type: integer
+          format: uint64
+        created_at:
+          type: string
+          format: date-time
+          description: Best-effort filesystem timestamp; omitted when unavailable.
+
+    PendingForwardingRow:
+      type: object
+      required: [message_hash, author, sequence, enqueued_at, attempt_count]
+      properties:
+        message_hash:
+          type: string
+        author:
+          type: string
+        sequence:
+          type: integer
+          format: uint64
+        enqueued_at:
+          type: string
+          format: date-time
+        last_attempt_at:
+          type: string
+          format: date-time
+        attempt_count:
+          type: integer
+          format: uint32
+        last_error:
+          type: string
+          description: Scrubbed error text; omitted when no failure is recorded.
+
+    TransportPendingSummary:
+      type: object
+      required: [transport_id, count, rows]
+      properties:
+        transport_id:
+          type: string
+        count:
+          type: integer
+          format: uint64
+        rows:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/PendingForwardingRow"
+
+    BusAuthorRow:
+      type: object
+      required: [author, last_indexed_at, author_seq, stream_seq]
+      properties:
+        author:
+          type: string
+        last_indexed_at:
+          type: string
+          format: date-time
+        author_seq:
+          type: integer
+          format: uint64
+        stream_seq:
+          type: integer
+          format: uint64
+
+    BusAuthorsSummary:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/BusAuthorRow"
+
     # ---------------------------------------------------------------------------
     # Content types (discriminated by `type` field)
     # ---------------------------------------------------------------------------
@@ -1517,6 +2238,138 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/FollowInfo"
+
+    TopicResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/TopicInfo"
+
+    TopicListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopicInfo"
+
+    KnownTopicListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/KnownTopicInfo"
+
+    SchemaListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          type: object
+          required: [schemas]
+          properties:
+            schemas:
+              type: array
+              items:
+                $ref: "#/components/schemas/SchemaInfo"
+
+    SchemaInfoResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/SchemaInfo"
+
+    SchemaDefinitionResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/SchemaDefinition"
+
+    ValidateSchemaResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/ValidateSchemaResult"
+
+    RetentionPolicyResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/RetentionPolicy"
+
+    RetentionPolicyListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/RetentionPolicy"
+
+    BlobInfoResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/BlobInfo"
+
+    TransportPendingResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/TransportPendingSummary"
+
+    BusAuthorsResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: "#/components/schemas/BusAuthorsSummary"
 
     # ---------------------------------------------------------------------------
     # MCP / JSON-RPC schemas

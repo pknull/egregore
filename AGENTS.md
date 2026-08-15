@@ -37,7 +37,7 @@ The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`).
 | `feed/profile_lifecycle.rs` | Profile TTL self-enforce, peer soft filter, refresh scheduler (Phase 1; RFC 0001 §11.2) | — |
 | `feed/store/` | SQLite persistence, FTS5 search | `mod.rs`, `messages.rs`, `peers.rs` |
 | `gossip/` | Encrypted TCP replication, LAN discovery | `client.rs`, `server.rs`, `replication.rs`, `discovery.rs` |
-| `transport/` | `Transport` trait layer + `GossipTransport` adapter (Phase 1; RFC 0001 §5) | `mod.rs`, `trait_def.rs`, `gossip.rs`, `health.rs`, `filter.rs`, `subscription.rs` |
+| `transport/` | `Transport` trait layer, gossip/NATS adapters, and composite bridge (RFC 0001/0002) | `mod.rs`, `trait_def.rs`, `gossip.rs`, `bus/`, `composite/`, `health.rs`, `filter.rs`, `subscription.rs` |
 | `api/` | Axum HTTP routes + embedded MCP server | `routes_*.rs`, `mcp.rs`, `mcp_tools.rs` |
 
 ## Testing
@@ -52,4 +52,4 @@ Refer to `docs/` for protocol specification, operational procedures, and OpenAPI
 
 ## MCP Integration
 
-The node embeds an MCP server at `POST /mcp` on the HTTP API port (default 7654). Ten tools expose the full node API over JSON-RPC 2.0. See `docs/operations.md` section 10 for connection details.
+The node embeds an MCP server at `POST /mcp` on the HTTP API port (default 7654). Thirteen tools expose feed, peer/follow, mesh, and blob operations over JSON-RPC 2.0. See `docs/operations.md` section 6 for connection details.

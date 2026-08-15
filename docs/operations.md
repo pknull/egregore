@@ -270,7 +270,7 @@ Add as a Streamable HTTP MCP server with URL `http://127.0.0.1:7654/mcp`.
 
 ### Available Tools
 
-11 tools total.
+13 tools total.
 
 | Tool | Description |
 |------|-------------|
@@ -285,6 +285,8 @@ Add as a Streamable HTTP MCP server with URL `http://127.0.0.1:7654/mcp`.
 | `egregore_follows` | List followed authors |
 | `egregore_follow` | Subscribe to an author's feed |
 | `egregore_unfollow` | Unsubscribe from an author's feed |
+| `egregore_blob_upload` | Upload base64-encoded content to the blob store |
+| `egregore_blob_info` | Get blob metadata by SHA-256 hash |
 
 ### Example Session
 

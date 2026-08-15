@@ -130,6 +130,19 @@ impl Harness {
             }
         });
 
+        // The composite's per-source ingress tasks subscribe to each child
+        // asynchronously after start(); the consumer subscription above adds
+        // a second per child. Wait for both registrations on each child so
+        // an immediate inject_inbound cannot outrun the ingress task on a
+        // loaded runner (the mock has no replay for pre-registration
+        // messages, unlike the real transports).
+        wait_until(
+            || child_a.subscriber_count() >= 2 && child_b.subscriber_count() >= 2,
+            Duration::from_secs(10),
+            "ingress + consumer subscriptions registered on both children",
+        )
+        .await;
+
         Self {
             engine,
             composite,

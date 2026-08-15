@@ -112,6 +112,16 @@ impl MockTransport {
         self.published.lock().clone()
     }
 
+    /// Number of live subscriptions. Harnesses use this to wait until the
+    /// composite's asynchronously-spawned ingress task has registered its
+    /// subscription before injecting inbound traffic — `inject_inbound`
+    /// fans out only to already-registered subscribers, and unlike the real
+    /// transports the mock has no durable replay or pull-sync recovery for
+    /// a message that arrives before registration.
+    pub fn subscriber_count(&self) -> usize {
+        self.subs.lock().len()
+    }
+
     /// Inject a message into every active subscriber as if it arrived on the
     /// wire. Used by B.5 to inject `m_80` directly into a subscriber after
     /// the `request_from` stream has been truncated.

@@ -18,10 +18,10 @@ dist/
 # Claude Code
 .claude/
 
-# Asha
-.asha/
-Memory/
+# Asha (Memory v2 pair and .asha/config.json are tracked; see managed block)
 Work/
+.asha/cache/
+.asha/state/
 
 # IDE / Local
 .idea/
@@ -29,3 +29,10 @@ Work/
 
 # asha issue-loop per-issue worktrees (never committed)
 .asha/worktrees/
+# Asha Memory v2 recovery (managed)
+/Work/memory-migration/
+/Work/session-state/
+# Asha Control private context (managed)
+/.asha/control-task.json
+/.asha/result.json
+/.asha/outbox/

@@ -1,0 +1,8 @@
+{
+  "_comment": "Issue-to-merge loop opt-in (asha /code:issue-loop). Half of the dual opt-in — this repo must also be listed under issue_loop.repos in ~/.asha/config.json on the running machine. The loop opens DRAFT PRs only, never merges, never pushes master.",
+  "enabled": true,
+  "test_command": "cargo test",
+  "attempt_cap": 3,
+  "branch_prefix": "issue-loop/",
+  "max_issues": 3
+}

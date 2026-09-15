@@ -17,6 +17,11 @@
 //! status, and SSE at GET /v1/events. MCP is enabled
 //! conditionally.
 
+// Handlers use axum `Response` as their error channel by design; the type is
+// large, and boxing it would cost ergonomics across every route. Clippy on
+// rustc >= 1.98 flags this as `result_large_err`.
+#![allow(clippy::result_large_err)]
+
 pub mod mcp;
 pub mod mcp_registry;
 pub mod mcp_tools;

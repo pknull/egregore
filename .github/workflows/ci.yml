@@ -17,6 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Reject tracked private workspace files
+        shell: bash
+        run: |
+          tracked_private=$(git ls-files -- Memory/ knowledge/ Work/)
+          if [ -n "$tracked_private" ]; then
+            printf '%s\n' 'Private workspace files must not be tracked:' "$tracked_private"
+            exit 1
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

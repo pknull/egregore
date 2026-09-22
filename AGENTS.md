@@ -50,6 +50,10 @@ The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`).
 
 Refer to `docs/` for protocol specification, operational procedures, and OpenAPI specs. See `CLAUDE.md` for the full file index.
 
+## Distribution
+
+Distribution is GitHub release assets; deployment hosts never build Egregore locally.
+
 ## MCP Integration
 
 The node embeds an MCP server at `POST /mcp` on the HTTP API port (default 7654). Thirteen tools expose feed, peer/follow, mesh, and blob operations over JSON-RPC 2.0. See `docs/operations.md` section 6 for connection details.

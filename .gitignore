@@ -18,7 +18,7 @@ dist/
 # Claude Code
 .claude/
 
-# Asha (Memory v2 pair and .asha/config.json are tracked; see managed block)
+# Asha local state (see managed block below)
 Work/
 .asha/cache/
 .asha/state/
@@ -36,3 +36,15 @@ Work/
 /.asha/control-task.json
 /.asha/result.json
 /.asha/outbox/
+
+# >>> asha workspace private roots >>>
+memory-local/
+Work/
+knowledge/
+Memory/
+!.asha/
+.asha/*
+!.asha/config.json
+.asha/cache/
+.asha/state/
+# <<< asha workspace private roots <<<

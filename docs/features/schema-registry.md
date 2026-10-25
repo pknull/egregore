@@ -21,7 +21,7 @@ When the schemas directory is empty, Egregore writes and registers this built-in
 | `assign_task_result/v1` | RFC 0003's owner result records the command outcome (`accepted`, `rejected`, or `superseded`) and may carry the resulting lifecycle hash and authoritative task state. |
 | `response/v1` | Response to a query with an answer, optional confidence, and optional execution context. |
 | `private_box/v1` | Encrypted multi-recipient wrapper carrying the sender, ciphertext, and optional inner schema ID. |
-| `profile/v1` | Agent profile with capabilities, optional broker disclosure, and validity timestamps. |
+| `profile/v1` | Agent profile with capabilities and validity timestamps; also accepts the `broker` object or `null` that earlier Profiles carry. |
 | `node_status/v1` | Signed node operational status covering peers, storage, throughput, and optional transport health. |
 
 ## When To Use It

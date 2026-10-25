@@ -15,7 +15,7 @@
 use chrono::{DateTime, Duration, Utc};
 
 use crate::error::Result;
-use crate::feed::content_types::{BrokerDetails, Content};
+use crate::feed::content_types::Content;
 use crate::feed::engine::FeedEngine;
 use crate::identity::{Identity, PublicId};
 
@@ -154,22 +154,9 @@ pub fn peer_profile_validity(
 /// 3. Otherwise (Profile is fresh and outside the refresh window): no-op.
 ///
 /// When publishing a fresh Profile, prior identity fields (`name`,
-/// `description`, `capabilities`, `broker`) are carried forward from the
-/// previous Profile when one exists. Otherwise a minimal default Profile is
+/// `description`, `capabilities`) are carried forward from the previous
+/// Profile when one exists. Otherwise a minimal default Profile is
 /// synthesized.
-///
-/// ## `broker_override` semantics (Phase 2 Wave 2 Step 12)
-///
-/// - `broker_override = Some(b)` → the fresh Profile's `broker` field is
-///   `Some(b)`. Wins over any prior Profile's broker. This is the path
-///   main.rs takes when `config.bus` is configured: the currently-deployed
-///   broker details take precedence over whatever the last Profile
-///   advertised.
-/// - `broker_override = None` AND prior Profile exists → carry forward
-///   the prior's broker (which may itself be `None` on pre-Phase-2
-///   nodes). This preserves the existing Phase 1 behavior.
-/// - `broker_override = None` AND no prior Profile → the default
-///   identity fields are used (broker = None).
 ///
 /// On publish failure (anything other than `DuplicateMessage` — which cannot
 /// occur on a single-author publish path), the error is propagated and
@@ -179,7 +166,6 @@ pub fn ensure_valid_profile(
     identity: &Identity,
     ttl_days: u32,
     clock: &dyn Clock,
-    broker_override: Option<BrokerDetails>,
 ) -> Result<()> {
     let author = identity.public_id();
 
@@ -221,27 +207,20 @@ pub fn ensure_valid_profile(
     }
 
     // Step 3: build the fresh Profile, preserving prior identity fields.
-    // Broker resolution order (Step 12):
-    //   override Some(b) → use b (wins over prior)
-    //   override None + prior Profile → carry forward prior.broker
-    //   override None + no prior → None (from default_identity_fields)
-    let (name, description, capabilities, prior_broker) = match prior_profile {
+    let (name, description, capabilities) = match prior_profile {
         Some(Content::Profile {
             name,
             description,
             capabilities,
-            broker,
             ..
-        }) => (name, description, capabilities, broker),
+        }) => (name, description, capabilities),
         _ => default_identity_fields(identity),
     };
-    let broker = broker_override.or(prior_broker);
 
     let fresh = Content::Profile {
         name,
         description,
         capabilities,
-        broker,
         valid_from: Some(now),
         valid_until: Some(now + Duration::days(ttl_days as i64)),
     };
@@ -273,7 +252,6 @@ pub async fn run_profile_refresh(
     ttl_days: u32,
     clock: std::sync::Arc<dyn Clock>,
     poll_interval: std::time::Duration,
-    broker_override: Option<BrokerDetails>,
 ) {
     loop {
         tokio::time::sleep(poll_interval).await;
@@ -284,15 +262,8 @@ pub async fn run_profile_refresh(
         let engine_ref = engine.clone();
         let identity_ref = identity.clone();
         let clock_ref = clock.clone();
-        let broker_ref = broker_override.clone();
         let result = tokio::task::spawn_blocking(move || {
-            ensure_valid_profile(
-                &engine_ref,
-                &identity_ref,
-                ttl_days,
-                &*clock_ref,
-                broker_ref,
-            )
+            ensure_valid_profile(&engine_ref, &identity_ref, ttl_days, &*clock_ref)
         })
         .await;
         match result {
@@ -312,13 +283,11 @@ pub async fn run_profile_refresh(
 /// Build sensible default identity fields for a first-ever Profile publish.
 /// The name is a truncated PublicId substring so operators can see something
 /// human-ish on day-0; the rest is empty.
-fn default_identity_fields(
-    identity: &Identity,
-) -> (String, Option<String>, Vec<String>, Option<BrokerDetails>) {
+fn default_identity_fields(identity: &Identity) -> (String, Option<String>, Vec<String>) {
     let pid = identity.public_id().0;
     let display_len = pid.len().min(DEFAULT_NAME_DISPLAY_LEN);
     let name = pid[..display_len].to_string();
-    (name, None, Vec::new(), None)
+    (name, None, Vec::new())
 }
 
 #[cfg(test)]
@@ -396,7 +365,7 @@ mod tests {
         let now = Utc::now();
         let clock = MockClock::new(now);
 
-        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock, None)
+        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock)
             .expect("publish must succeed on empty feed");
 
         assert_eq!(
@@ -411,14 +380,12 @@ mod tests {
                 name,
                 description,
                 capabilities,
-                broker,
                 valid_from,
                 valid_until,
             } => {
                 assert_eq!(name, expected_default_name(&identity));
                 assert!(description.is_none());
                 assert!(capabilities.is_empty());
-                assert!(broker.is_none(), "Phase 1 gossip-only: broker is None");
                 assert_eq!(valid_from, Some(now));
                 assert_eq!(
                     valid_until,
@@ -440,7 +407,6 @@ mod tests {
             name: "legacy-node".to_string(),
             description: Some("pre-upgrade".to_string()),
             capabilities: vec!["insight".to_string()],
-            broker: None,
             valid_from: None,
             valid_until: None,
         };
@@ -448,7 +414,7 @@ mod tests {
             .publish_with_schema(&identity, old.to_value(), None, None, vec![])
             .expect("publish old-style Profile");
 
-        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock, None)
+        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock)
             .expect("publish must succeed");
 
         assert_eq!(
@@ -490,7 +456,6 @@ mod tests {
             name: "shortlived".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: Some(t0),
             valid_until: Some(t0 + Duration::days(10)),
         };
@@ -502,7 +467,7 @@ mod tests {
         clock.advance(Duration::days(20));
         let t1 = clock.now();
 
-        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock, None)
+        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock)
             .expect("publish must succeed for expired Profile");
 
         assert_eq!(count_profile_messages(&engine, &identity), 2);
@@ -533,7 +498,6 @@ mod tests {
             name: "in-window".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: Some(t0),
             valid_until: Some(t0 + Duration::days(5)),
         };
@@ -541,7 +505,7 @@ mod tests {
             .publish_with_schema(&identity, within_window.to_value(), None, None, vec![])
             .expect("publish refresh-window Profile");
 
-        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock, None)
+        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock)
             .expect("publish must succeed for refresh-window");
 
         assert_eq!(
@@ -562,7 +526,6 @@ mod tests {
             name: "fresh".to_string(),
             description: Some("recent".to_string()),
             capabilities: vec!["a".to_string()],
-            broker: None,
             valid_from: Some(t0),
             valid_until: Some(t0 + Duration::days(DEFAULT_PROFILE_TTL_DAYS as i64)),
         };
@@ -570,7 +533,7 @@ mod tests {
             .publish_with_schema(&identity, fresh.to_value(), None, None, vec![])
             .expect("publish fresh Profile");
 
-        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock, None)
+        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock)
             .expect("no-op must succeed");
 
         assert_eq!(
@@ -581,43 +544,54 @@ mod tests {
     }
 
     #[test]
-    fn ensure_preserves_name_description_capabilities_broker_from_prior() {
+    fn ensure_preserves_identity_fields_from_prior_profile_carrying_broker() {
         let (engine, identity) = setup();
         let t0 = Utc::now();
         let clock = MockClock::new(t0);
 
-        let broker = BrokerDetails {
-            operator_name: "Acme Ops".to_string(),
-            jurisdiction: "US-DE".to_string(),
-            disclosure_policy: "rfc-0002-disclosure-v1".to_string(),
-            tenancy: "dedicated".to_string(),
-            broker_endpoint: "nats://broker.example:4222".to_string(),
-            backend: "nats".to_string(),
-        };
-        let prior = Content::Profile {
-            name: "carry-forward".to_string(),
-            description: Some("preserved description".to_string()),
-            capabilities: vec!["insight".to_string(), "endorsement".to_string()],
-            broker: Some(broker.clone()),
-            valid_from: Some(t0),
-            valid_until: Some(t0 + Duration::days(30)),
-        };
+        // Prior own-feed Profile as a node signed it while the variant still
+        // carried a `broker` field (RFC 0001 §19 A6).
+        let prior = serde_json::json!({
+            "type": "profile",
+            "name": "carry-forward",
+            "description": "preserved description",
+            "capabilities": ["insight", "endorsement"],
+            "broker": {
+                "operator_name": "Acme Ops",
+                "jurisdiction": "US-DE",
+                "disclosure_policy": "rfc-0002-disclosure-v1",
+                "tenancy": "dedicated",
+                "broker_endpoint": "nats://broker.example:4222",
+                "backend": "nats",
+            },
+            "valid_from": t0,
+            "valid_until": t0 + Duration::days(30),
+        });
         engine
-            .publish_with_schema(&identity, prior.to_value(), None, None, vec![])
+            .publish_with_schema(&identity, prior, None, None, vec![])
             .expect("publish prior Profile");
 
         // Move well past valid_until.
         clock.advance(Duration::days(95));
 
-        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock, None)
+        ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock)
             .expect("publish must succeed");
 
+        assert_eq!(count_profile_messages(&engine, &identity), 2);
+        let republished = engine
+            .store()
+            .get_latest_by_content_type(&identity.public_id(), PROFILE_CONTENT_TYPE)
+            .unwrap()
+            .expect("fresh Profile on own feed");
+        assert!(
+            republished.content.get("broker").is_none(),
+            "the fresh Profile must not carry `broker` forward"
+        );
         match latest_profile(&engine, &identity) {
             Content::Profile {
                 name,
                 description,
                 capabilities,
-                broker: carried_broker,
                 ..
             } => {
                 assert_eq!(name, "carry-forward");
@@ -626,153 +600,6 @@ mod tests {
                     capabilities,
                     vec!["insight".to_string(), "endorsement".to_string()]
                 );
-                let b = carried_broker.expect("broker must be carried forward");
-                assert_eq!(b.operator_name, broker.operator_name);
-                assert_eq!(b.jurisdiction, broker.jurisdiction);
-                assert_eq!(b.disclosure_policy, broker.disclosure_policy);
-                assert_eq!(b.tenancy, broker.tenancy);
-                assert_eq!(b.broker_endpoint, broker.broker_endpoint);
-                assert_eq!(b.backend, broker.backend);
-            }
-            other => panic!("expected Profile, got {:?}", other),
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Step 12 — broker_override path tests
-    //
-    // Covers the two amendment §12 behaviors:
-    //   1. On an empty feed with broker_override = Some(b), the first
-    //      Profile published has broker = Some(b).
-    //   2. When the prior Profile has broker = Some(A) but the current
-    //      override is broker = Some(B), the re-published Profile has
-    //      broker = Some(B) — the override wins over the prior.
-    //
-    // The existing `ensure_preserves_name_description_capabilities_broker_from_prior`
-    // test covers the override=None + prior=Some case (carry forward).
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn ensure_populates_broker_from_override_on_first_publish() {
-        let (engine, identity) = setup();
-        let now = Utc::now();
-        let clock = MockClock::new(now);
-
-        let override_broker = BrokerDetails {
-            operator_name: "First Broker".to_string(),
-            jurisdiction: "CH".to_string(),
-            disclosure_policy: "rfc-0002-disclosure-v1".to_string(),
-            tenancy: "dedicated".to_string(),
-            broker_endpoint: "nats://first.example:4222".to_string(),
-            backend: "nats".to_string(),
-        };
-
-        ensure_valid_profile(
-            &engine,
-            &identity,
-            DEFAULT_PROFILE_TTL_DAYS,
-            &clock,
-            Some(override_broker.clone()),
-        )
-        .expect("publish must succeed on empty feed");
-
-        assert_eq!(
-            count_profile_messages(&engine, &identity),
-            1,
-            "exactly one Profile should be on the feed"
-        );
-
-        match latest_profile(&engine, &identity) {
-            Content::Profile {
-                broker: published_broker,
-                ..
-            } => {
-                let b = published_broker
-                    .expect("broker override must populate the fresh Profile's broker");
-                assert_eq!(b.operator_name, override_broker.operator_name);
-                assert_eq!(b.jurisdiction, override_broker.jurisdiction);
-                assert_eq!(b.disclosure_policy, override_broker.disclosure_policy);
-                assert_eq!(b.tenancy, override_broker.tenancy);
-                assert_eq!(b.broker_endpoint, override_broker.broker_endpoint);
-                assert_eq!(b.backend, override_broker.backend);
-            }
-            other => panic!("expected Profile, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn ensure_updates_broker_when_override_changes_from_prior() {
-        let (engine, identity) = setup();
-        let t0 = Utc::now();
-        let clock = MockClock::new(t0);
-
-        // Prior Profile advertises broker A.
-        let broker_a = BrokerDetails {
-            operator_name: "Broker A".to_string(),
-            jurisdiction: "US-DE".to_string(),
-            disclosure_policy: "policy-a".to_string(),
-            tenancy: "shared".to_string(),
-            broker_endpoint: "nats://a.example:4222".to_string(),
-            backend: "nats".to_string(),
-        };
-        let prior = Content::Profile {
-            name: "switching-broker".to_string(),
-            description: None,
-            capabilities: vec![],
-            broker: Some(broker_a.clone()),
-            valid_from: Some(t0),
-            valid_until: Some(t0 + Duration::days(30)),
-        };
-        engine
-            .publish_with_schema(&identity, prior.to_value(), None, None, vec![])
-            .expect("publish prior Profile with broker A");
-
-        // Advance past valid_until so ensure_valid_profile re-publishes.
-        clock.advance(Duration::days(95));
-
-        // Current deployment uses broker B — override must win over prior A.
-        let broker_b = BrokerDetails {
-            operator_name: "Broker B".to_string(),
-            jurisdiction: "EU-DE".to_string(),
-            disclosure_policy: "policy-b".to_string(),
-            tenancy: "dedicated".to_string(),
-            broker_endpoint: "nats://b.example:4222".to_string(),
-            backend: "nats".to_string(),
-        };
-
-        ensure_valid_profile(
-            &engine,
-            &identity,
-            DEFAULT_PROFILE_TTL_DAYS,
-            &clock,
-            Some(broker_b.clone()),
-        )
-        .expect("publish must succeed");
-
-        match latest_profile(&engine, &identity) {
-            Content::Profile {
-                name,
-                broker: republished_broker,
-                ..
-            } => {
-                assert_eq!(
-                    name, "switching-broker",
-                    "name preserved from prior Profile"
-                );
-                let b = republished_broker.expect("broker override must populate");
-                assert_eq!(
-                    b.operator_name, broker_b.operator_name,
-                    "override wins over prior: must be broker B"
-                );
-                assert_ne!(
-                    b.operator_name, broker_a.operator_name,
-                    "must NOT carry forward prior broker A"
-                );
-                assert_eq!(b.jurisdiction, broker_b.jurisdiction);
-                assert_eq!(b.disclosure_policy, broker_b.disclosure_policy);
-                assert_eq!(b.tenancy, broker_b.tenancy);
-                assert_eq!(b.broker_endpoint, broker_b.broker_endpoint);
-                assert_eq!(b.backend, broker_b.backend);
             }
             other => panic!("expected Profile, got {:?}", other),
         }
@@ -805,8 +632,7 @@ mod tests {
         // accidentally swallowing the return into Ok(())) are caught.
         let (engine, identity) = setup();
         let clock = MockClock::new(Utc::now());
-        let result =
-            ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock, None);
+        let result = ensure_valid_profile(&engine, &identity, DEFAULT_PROFILE_TTL_DAYS, &clock);
         assert!(
             result.is_ok(),
             "healthy engine + empty feed must succeed: {:?}",
@@ -848,7 +674,6 @@ mod tests {
             name: "legacy-peer".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: None,
             valid_until: None,
         };
@@ -883,7 +708,6 @@ mod tests {
             name: "current-peer".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: Some(now),
             valid_until: Some(now + Duration::days(30)),
         };
@@ -910,7 +734,6 @@ mod tests {
             name: "soon-expired".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: Some(t0),
             valid_until: Some(t0 + Duration::days(10)),
         };
@@ -941,7 +764,6 @@ mod tests {
             name: "first".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: Some(t0),
             valid_until: Some(t0 + Duration::days(5)),
         };
@@ -949,7 +771,6 @@ mod tests {
             name: "second".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: Some(t0),
             valid_until: Some(t0 + Duration::days(10)),
         };
@@ -957,7 +778,6 @@ mod tests {
             name: "third".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: Some(t0),
             valid_until: Some(t0 + Duration::days(60)),
         };
@@ -1024,7 +844,6 @@ mod tests {
             name: "backdated-attempt".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: Some(clock.now() - Duration::days(400)),
             valid_until: Some(clock.now() - Duration::days(1)),
         };
@@ -1050,7 +869,6 @@ mod tests {
             name: "current".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: Some(clock.now()),
             valid_until: Some(clock.now() + Duration::days(60)),
         };
@@ -1150,7 +968,6 @@ mod tests {
             name: "seed".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: Some(t0),
             valid_until: Some(t0 + Duration::days(10)),
         };
@@ -1170,7 +987,6 @@ mod tests {
                 DEFAULT_PROFILE_TTL_DAYS,
                 refresh_clock,
                 StdDuration::from_millis(10),
-                None,
             )
             .await;
         });
@@ -1231,7 +1047,6 @@ mod tests {
             name: "fresh-seed".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: Some(t0),
             valid_until: Some(t0 + Duration::days(DEFAULT_PROFILE_TTL_DAYS as i64)),
         };
@@ -1251,7 +1066,6 @@ mod tests {
                 DEFAULT_PROFILE_TTL_DAYS,
                 refresh_clock,
                 StdDuration::from_millis(10),
-                None,
             )
             .await;
         });

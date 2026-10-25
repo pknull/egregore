@@ -1,27 +1,25 @@
 //! `TransportHealth` — see RFC 0001 §5.2.
 //!
-//! Coarse liveness signal surfaced by each `Transport` implementation and
-//! aggregated across children by composite transports. The `/v1/status`
-//! endpoint surfaces this type in Phase 2; Phase 1 ships the type and the
-//! aggregation helper so composite transports in Phase 2 do not re-touch
-//! this file.
+//! Coarse liveness signal surfaced by each `Transport` implementation on
+//! `/v1/status`. When an engine holds several transports, their health is
+//! combined by the aggregation helper per RFC 0001 §5.2.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Coarse liveness signal for a transport.
 ///
-/// Emitted by each `Transport::health()` impl. Composite transports aggregate
-/// children via `TransportHealth::aggregate` per RFC 0001 §5.2.
+/// Emitted by each `Transport::health()` impl. Several attached transports
+/// are combined via `TransportHealth::aggregate` per RFC 0001 §5.2.
 ///
 /// Serde attributes preserve byte-for-byte output compatibility with the
 /// single-transport case: empty `children`, `None` options, etc. are omitted.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransportHealth {
-    /// True when the transport has at least one live path to peers/brokers.
+    /// True when the transport has at least one live path to peers.
     pub connected: bool,
 
-    /// Adapter name: `"gossip"`, `"nats"`, `"composite"`, `"mock"`.
+    /// Adapter name: `"gossip"`, `"composite"` for an aggregate, `"mock"`.
     pub backend: &'static str,
 
     /// Wall-clock of the most recent successful `publish` (local observation).
@@ -33,7 +31,7 @@ pub struct TransportHealth {
     pub last_peer_contact: Option<DateTime<Utc>>,
 
     /// Messages accepted locally but not yet confirmed replicated to at least
-    /// one peer. Summed across children in composite aggregation.
+    /// one peer. Summed across children in an aggregate.
     pub unreplicated_count: u64,
 
     /// In-flight `publish` calls not yet resolved. Summed across children.
@@ -43,71 +41,11 @@ pub struct TransportHealth {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 
-    /// Per-child health for composite transports. Omitted from serialized
-    /// output when empty (the single-transport case) so `/v1/status` retains
+    /// Per-child health of an aggregate. Omitted from serialized output when
+    /// empty (the single-transport case) so `/v1/status` retains
     /// byte-for-byte compatibility with the pre-abstraction shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<TransportHealth>,
-
-    /// Phase 2 + composite only. Present on children of a `CompositeTransport`
-    /// to describe the INBOUND queue state for that child-as-destination
-    /// (RFC 0002 §8.4). Absent on leaf transports and on single-transport
-    /// deployments.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bridge_queues: Option<BridgeQueuesHealth>,
-}
-
-/// Per-direction aggregate metrics for a composite transport's destination
-/// (RFC 0002 §8.4).
-///
-/// Each `TransportHealth.children[j].bridge_queues` describes the queues
-/// holding messages going TO child `j` (from every other child). Operators
-/// watch `depth_total` + `authors_backpressured` + `oldest_queued_age_secs`
-/// to distinguish healthy-bursting from stuck-destination.
-///
-/// Serde: optional stuck-detection fields use `skip_serializing_if = "Option::is_none"`
-/// so the JSON stays quiet on idle directions. `last_error` MUST NOT carry
-/// Ed25519 pubkeys, hashes, or ciphertext — auditor A2.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BridgeQueuesHealth {
-    /// Destination transport backend: `"nats"`, `"gossip"`, `"mock"`.
-    pub destination: String,
-    /// Total messages across all per-author queues going to this destination.
-    pub depth_total: u64,
-    /// Count of author queues currently at or past the high watermark.
-    pub authors_backpressured: u64,
-    /// Count of author queues in this direction with len > 0.
-    pub authors_active: u64,
-    /// Monotonic counter of upstream-ingress block events since process start.
-    pub backpressure_events_total: u64,
-    /// RFC 0002 §18 item A1: monotonic counter of bus self-echoes dropped at
-    /// ingest (DuplicateMessage returns on bus-sourced messages). Distinct
-    /// from backpressure_events.
-    pub self_echo_total: u64,
-
-    /// Age in seconds of the oldest queued message across all author queues
-    /// in this direction. `None` if no messages currently queued. A steady
-    /// high value with low `depth_total` is the signature of a hung
-    /// destination with shallow queues.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oldest_queued_age_secs: Option<u64>,
-    /// Age in seconds of the currently-in-flight `publish` call on this
-    /// direction, if any. Hung destinations surface here as a climbing
-    /// value past a sane threshold.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub publish_in_flight_age_secs: Option<u64>,
-    /// Monotonic counter of destination publishes that returned `Err(_)`
-    /// and were acked anyway per §8.2 ack-on-destination-error policy.
-    pub ack_on_error_total: u64,
-    /// Monotonic counter of NATS `ack_wait` expiries that caused redelivery
-    /// (bus-side destinations only; zero for gossip destinations).
-    pub nats_redelivery_total: u64,
-    /// Most recent direction-specific error, distinct from the aggregate
-    /// `TransportHealth.last_error`. Auditor A2: MUST NOT contain Ed25519
-    /// pubkeys, hashes, or ciphertext. Use short codes + destination/source
-    /// identifiers only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_error: Option<String>,
 }
 
 impl TransportHealth {
@@ -115,7 +53,7 @@ impl TransportHealth {
     ///
     /// Aggregation rules:
     /// - `connected`: logical AND across children — any disconnected child
-    ///   marks the composite disconnected.
+    ///   marks the aggregate disconnected.
     /// - `unreplicated_count`: saturating sum (never panics on `u64::MAX`).
     /// - `inflight_publishes`: saturating sum.
     /// - `last_successful_publish`, `last_peer_contact`: `max` (most recent).
@@ -128,7 +66,7 @@ impl TransportHealth {
     /// # Panics
     ///
     /// Debug builds `debug_assert!` that `children.len() >= 2`. `aggregate`
-    /// is only valid for composite transports with at least two children;
+    /// is only valid for two or more children;
     /// single-transport health is returned by each adapter directly. In
     /// release builds the empty/single case produces a degenerate result.
     pub fn aggregate(backend: &'static str, children: Vec<TransportHealth>) -> Self {
@@ -173,12 +111,6 @@ impl TransportHealth {
             inflight_publishes,
             last_error,
             children,
-            // `bridge_queues` on the top-level aggregate is always None —
-            // the field describes per-destination queue state for a
-            // CompositeTransport's CHILDREN (each child's bridge_queues
-            // describes its inbound queues). The top-level aggregate
-            // itself has no queue state of its own.
-            bridge_queues: None,
         }
     }
 }
@@ -198,7 +130,6 @@ mod tests {
             inflight_publishes: 0,
             last_error: None,
             children: vec![],
-            bridge_queues: None,
         }
     }
 
@@ -283,7 +214,7 @@ mod tests {
         c2.last_peer_contact = Some(t2);
 
         let mut c3 = base(false);
-        c3.last_error = Some("newer: broker unreachable".to_string());
+        c3.last_error = Some("newer: peer unreachable".to_string());
         c3.last_peer_contact = Some(t2);
 
         let agg = TransportHealth::aggregate("composite", vec![c1, c2, c3]);
@@ -292,7 +223,7 @@ mod tests {
         // share t2; c2 has no error so c3's error is the only candidate at t2.
         assert_eq!(
             agg.last_error.as_deref(),
-            Some("newer: broker unreachable"),
+            Some("newer: peer unreachable"),
             "latest error (by last_peer_contact) surfaces"
         );
     }

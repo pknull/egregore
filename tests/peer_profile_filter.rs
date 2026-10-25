@@ -46,7 +46,6 @@ fn publish_expired_profile(engine: &FeedEngine, peer: &Identity) {
         name: "expired-peer".to_string(),
         description: None,
         capabilities: vec![],
-        broker: None,
         valid_from: Some(now - Duration::days(30)),
         valid_until: Some(now - Duration::days(1)),
     };
@@ -197,7 +196,6 @@ fn messages_from_expired_peer_still_ingest() {
         name: "expired-peer".to_string(),
         description: None,
         capabilities: vec![],
-        broker: None,
         valid_from: Some(now - Duration::days(30)),
         valid_until: Some(now - Duration::days(1)),
     };
@@ -237,21 +235,20 @@ fn messages_from_expired_peer_still_ingest() {
 // Phase 2 Wave 5 Step 25 — node_status/v1 lock-step with TransportHealth.
 // Same pattern as the profile_expired lock-step test above: the Rust
 // struct's `transport_health` field MUST be permitted by the embedded
-// JSON Schema (src/feed/schema.rs), including the nested
-// `BridgeQueuesHealth` sub-schema for composite/bridge deployments.
+// JSON Schema (src/feed/schema.rs), including the recursive `children`
+// branch of an aggregate.
 // ----------------------------------------------------------------------
 
-use egregore::transport::health::{BridgeQueuesHealth, TransportHealth};
+use egregore::transport::health::TransportHealth;
 
 #[tokio::test]
 async fn node_status_with_transport_health_validates_against_schema() {
-    // Constructs a fully-populated `TransportHealth` — including
-    // composite children with `bridge_queues` — and asserts
-    // `publish_with_schema("node_status/v1", ...)` accepts it.
+    // Constructs a fully-populated aggregate `TransportHealth` with two
+    // children and asserts `publish_with_schema("node_status/v1", ...)`
+    // accepts it.
     //
     // This exercises the deepest branch of the schema: the
-    // `$defs/transport_health` recursive reference (`children[]`) and
-    // the `$defs/bridge_queues_health` branch for per-direction metrics.
+    // `$defs/transport_health` recursive reference (`children[]`).
     let self_identity = Identity::generate();
     let temp_dir = std::env::temp_dir().join(format!(
         "egregore_step25_with_th_{}_{}",
@@ -268,63 +265,23 @@ async fn node_status_with_transport_health_validates_against_schema() {
     let engine = FeedEngine::with_schemas_dir(store, &temp_dir);
 
     let now = Utc::now();
-    let child_bus = TransportHealth {
+    let child = |backend: &'static str, last_error: Option<&str>| TransportHealth {
         connected: true,
-        backend: "nats",
-        last_successful_publish: Some(now),
-        last_peer_contact: Some(now),
-        unreplicated_count: 3,
-        inflight_publishes: 1,
-        last_error: None,
-        children: vec![],
-        bridge_queues: Some(BridgeQueuesHealth {
-            destination: "nats".to_string(),
-            depth_total: 12,
-            authors_backpressured: 0,
-            authors_active: 2,
-            backpressure_events_total: 0,
-            self_echo_total: 4,
-            oldest_queued_age_secs: Some(7),
-            publish_in_flight_age_secs: Some(1),
-            ack_on_error_total: 0,
-            nats_redelivery_total: 0,
-            last_error: None,
-        }),
-    };
-    let child_gossip = TransportHealth {
-        connected: true,
-        backend: "gossip",
+        backend,
         last_successful_publish: Some(now),
         last_peer_contact: Some(now),
         unreplicated_count: 0,
-        inflight_publishes: 0,
-        last_error: None,
-        children: vec![],
-        bridge_queues: Some(BridgeQueuesHealth {
-            destination: "gossip".to_string(),
-            depth_total: 0,
-            authors_backpressured: 0,
-            authors_active: 0,
-            backpressure_events_total: 0,
-            self_echo_total: 0,
-            oldest_queued_age_secs: None,
-            publish_in_flight_age_secs: None,
-            ack_on_error_total: 0,
-            nats_redelivery_total: 0,
-            last_error: None,
-        }),
-    };
-    let composite = TransportHealth {
-        connected: true,
-        backend: "composite",
-        last_successful_publish: Some(now),
-        last_peer_contact: Some(now),
-        unreplicated_count: 3,
         inflight_publishes: 1,
-        last_error: None,
-        children: vec![child_bus, child_gossip],
-        bridge_queues: None,
+        last_error: last_error.map(str::to_string),
+        children: vec![],
     };
+    let composite = TransportHealth::aggregate(
+        "composite",
+        vec![
+            child("gossip", None),
+            child("mock", Some("peer unreachable")),
+        ],
+    );
 
     let status = egregore::status::NodeStatusMessage {
         msg_type: "node_status".to_string(),
@@ -364,6 +321,55 @@ async fn node_status_with_transport_health_validates_against_schema() {
     assert_eq!(message.schema_id.as_deref(), Some("node_status/v1"));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+/// node_status/v1 messages signed by earlier nodes may carry `bridge_queues`
+/// on transport children. The embedded schema sets `additionalProperties:
+/// false`, so it must keep accepting that shape (RFC 0001 §19 A6).
+#[test]
+fn node_status_schema_accepts_legacy_bridge_queues() {
+    let schemas = tempfile::tempdir().unwrap();
+    let engine = FeedEngine::with_schemas_dir(FeedStore::open_memory().unwrap(), schemas.path());
+    let now = Utc::now().to_rfc3339();
+    let legacy_child = |backend: &str| {
+        serde_json::json!({
+            "connected": true,
+            "backend": backend,
+            "unreplicated_count": 0,
+            "inflight_publishes": 0,
+            "bridge_queues": {
+                "destination": backend,
+                "depth_total": 0,
+                "authors_backpressured": 0,
+                "authors_active": 0,
+                "backpressure_events_total": 0,
+                "self_echo_total": 0,
+                "ack_on_error_total": 0,
+                "nats_redelivery_total": 0,
+            },
+        })
+    };
+    let legacy_status = serde_json::json!({
+        "type": "node_status",
+        "node": Identity::generate().public_id().0,
+        "ts": now,
+        "version": "2.0.1",
+        "uptime_secs": 1,
+        "peers": { "connected": 0, "known": 0, "health": [] },
+        "storage": { "bytes": 0, "message_count": 0, "feed_count": 0 },
+        "throughput": { "msgs_in_last_hour": 0, "msgs_out_last_hour": 0 },
+        "transport_health": {
+            "connected": true,
+            "backend": "composite",
+            "unreplicated_count": 0,
+            "inflight_publishes": 0,
+            "children": [legacy_child("gossip"), legacy_child("nats")],
+        },
+    });
+    engine
+        .schema_registry()
+        .validate(&legacy_status, Some("node_status/v1"))
+        .expect("a legacy node_status carrying bridge_queues must still validate");
 }
 
 #[tokio::test]

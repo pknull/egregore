@@ -8,7 +8,6 @@ pub mod gossip;
 pub mod hooks;
 pub mod identity;
 pub mod metrics;
-pub mod pending;
 pub mod status;
 pub mod telemetry;
 pub mod transport;

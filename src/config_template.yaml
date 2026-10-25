@@ -86,45 +86,6 @@ mdns_service: "_egregore._tcp.local."
 #   - relay.example.com:7661
 peers: []
 
-# Optional NATS JetStream transport. Leave the entire block commented out for
-# gossip-only operation. See the Thallus umbrella guide at
-# docs/deployment/bus.md for provisioning, sizing, monitoring, and recovery.
-#
-# Startup validation requires:
-#   - url begins with tls:// or nats+tls://
-#   - credentials_path exists and has Unix mode <= 0600
-#   - max_ack_pending is in [1, 65535]
-#   - every broker field is non-empty
-# The RFC 0001 §9.2 ordering preflight also refuses WorkQueue stream retention,
-# stream subjects that do not cover egregore.feed.>, and consumers with a
-# deliver_group (queue group).
-#
-# bus:
-#   # Required TLS NATS URL.
-#   url: "tls://nats.example.com:4222"
-#   # Required NKey/JWT credentials file.
-#   credentials_path: "./data/nats.creds"
-#   # JetStream stream name. Default: egregore-feed
-#   stream_name: "egregore-feed"
-#   # Durable consumer name. Omit to derive it from the node identity.
-#   consumer_name: "egregore-bridge"
-#   # Required broker disclosure fields published in the node Profile.
-#   broker:
-#     operator_name: "Example Operations"
-#     jurisdiction: "US"
-#     disclosure_policy: "https://example.com/broker-disclosure"
-#     tenancy: "dedicated"
-#     broker_endpoint: "nats.example.com:4222"
-#     backend: "nats"
-#   # Pending-ack window. Default: 512; valid range: 1-65535.
-#   max_ack_pending: 512
-#   # Optional ack-wait override in seconds. When omitted, the effective value
-#   # is max(30s, 256 * expected_publish_latency_ms). Values outside 5-3600s
-#   # emit a warning but do not block startup.
-#   ack_wait_secs: 52
-#   # Expected destination publish latency used by the derivation. Default: 200.
-#   expected_publish_latency_ms: 200
-
 # Allow deprecated message-triggered subprocess hooks (`on_message`).
 # DEPRECATED and disabled by default for security containment. When true,
 # each configured subprocess hook runs and emits a startup warning.

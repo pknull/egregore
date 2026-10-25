@@ -142,7 +142,6 @@ mod tests {
             name: "test".to_string(),
             description: None,
             capabilities: vec![],
-            broker: None,
             valid_from: None,
             valid_until: None,
         };
@@ -152,7 +151,6 @@ mod tests {
             "name": "test",
             "description": null,
             "capabilities": [],
-            "broker": null,
             "valid_from": null,
             "valid_until": null,
         });

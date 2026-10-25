@@ -13,9 +13,9 @@ All notable changes to egregore are documented here. The format follows [Keep a 
 - Deprecated message-triggered subprocess hooks are default-off behind the top-level `allow_subprocess_hooks` compatibility gate; enabling them emits startup warnings and the migration path is structured Servitor work.
 - Promoted transport architecture, feature, and deployment documentation into the current Thallus documentation boundary.
 
-### Fixed
+### Removed
 
-- Closed RFC 0001/0002 conformance gaps in bus backlog reporting, the `nats` transport-health discriminator, RFC 0001 §9.2 broker-ordering validation, `(author, sequence)` retry ordering, and composite transport metrics.
+- **Bus and bridge transports (RFC 0001 §19).** Removed the NATS JetStream bus adapter and its `async-nats` dependency, the `bus:` configuration key, the pending-forwarding outbox and its retry scheduler, the `CompositeTransport` bridge and its multi-transport startup banner, the `/v1/transport/pending` and `/v1/transport/bus/authors` routes, the `egregore_bridge_*`, `egregore_transport_composite_*` and `egregore_transport_nats_author_silence_seconds` metrics, `TransportHealth.bridge_queues`, the bridge-only `Transport::ack_after_publish` and `Transport::self_echo_total` members, and `Content::Profile.broker` with `BrokerDetails`. New databases no longer create the `pending_forwarding`, `bus_author_seq_index` and `bus_stream_identity` tables; existing ones are left untouched. Profiles and `node_status` messages signed with the removed fields still ingest, because the embedded `profile/v1` and `node_status/v1` schemas keep accepting them.
 
 ## [2.0.1] - 2026-04-27
 

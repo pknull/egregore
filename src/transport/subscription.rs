@@ -23,14 +23,10 @@ pub struct SubscriptionHandle {
 /// have their own loop structures. Senders are dropped (not sent on) in
 /// the `Drop` impl; the receiver's `.await` returns `Err(RecvError)` which
 /// adapters treat as a cancel signal.
-///
-/// Phase 2 adds `Nats(oneshot::Sender<()>)` and
-/// `Composite(Vec<SubscriptionHandle>)` variants.
 pub(crate) enum SubscriptionInner {
     /// Generic oneshot-based cancel channel, used by both the `GossipTransport`
     /// adapter and test-only adapters (`MockTransport`). A single variant
-    /// suffices because all current adapters share the same cancel shape;
-    /// Phase 2 adds additional variants as new wire backends land.
+    /// suffices because all current adapters share the same cancel shape.
     OneshotCancel(oneshot::Sender<()>),
 }
 
@@ -59,7 +55,7 @@ impl Drop for SubscriptionHandle {
         // `oneshot::Receiver::recv().await` on the adapter side resolves to
         // `Err(RecvError)` which the adapter interprets as "stop".
         //
-        // This branch exists so future variants (Nats, Composite) have a
+        // This branch exists so future variants have a
         // dedicated hook; today it is effectively a no-op because drop of
         // the struct already drops its fields.
         match &mut self.inner {

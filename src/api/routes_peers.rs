@@ -67,13 +67,11 @@ pub struct StatusInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<HealthIndicators>,
 
-    /// Phase 2 Wave 5 Step 24: transport health from
-    /// `engine.transport_health()`. Present when `transport_count() >= 1`.
-    /// Composite deployments carry `TransportHealth.children` with per-child
-    /// `BridgeQueuesHealth` (RFC 0002 §8.4). Pre-Phase-2 deployments (no
-    /// transports attached; test harnesses) omit the field entirely — the
+    /// Transport health from `engine.transport_health()`. Present when
+    /// `transport_count() >= 1`. Nodes with no attached transport (test
+    /// harnesses) omit the field entirely — the
     /// `#[serde(default, skip_serializing_if = "Option::is_none")]` pair
-    /// preserves byte-for-byte compatibility with the pre-Phase-2 shape.
+    /// preserves byte-for-byte compatibility with the pre-transport shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<TransportHealth>,
 }
@@ -470,7 +468,6 @@ mod tests {
                 inflight_publishes: 0,
                 last_error: None,
                 children: vec![],
-                bridge_queues: None,
             },
         }));
 

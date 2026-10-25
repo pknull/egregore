@@ -639,25 +639,9 @@ async fn main() -> anyhow::Result<()> {
     // indirection keeps time mockable in tests for the refresh task.
     let clock: Arc<dyn egregore::feed::profile_lifecycle::Clock> =
         Arc::new(egregore::feed::profile_lifecycle::SystemClock);
-    // Phase 2 Wave 2 Step 12: when `config.bus` is configured, the currently-
-    // deployed broker details take precedence over any prior Profile's
-    // broker field. This ensures operators who switch brokers see the new
-    // details propagate on the next Profile publish (startup or refresh
-    // window). When `config.bus` is None, we pass None — the lifecycle
-    // helper carries the prior Profile's broker forward.
-    let broker_override: Option<egregore::feed::content_types::BrokerDetails> = config
-        .bus
-        .as_ref()
-        .map(|bus_cfg| bus_cfg.broker.clone().into());
     {
         use egregore::feed::profile_lifecycle::ensure_valid_profile;
-        ensure_valid_profile(
-            &engine,
-            &identity,
-            config.profile_ttl_days,
-            &*clock,
-            broker_override.clone(),
-        )?;
+        ensure_valid_profile(&engine, &identity, config.profile_ttl_days, &*clock)?;
     }
 
     // Phase 1 Step 13: re-publish scheduler. Polls every hour (plan §6.4);
@@ -673,7 +657,6 @@ async fn main() -> anyhow::Result<()> {
         let refresh_identity = identity.clone();
         let refresh_clock = clock.clone();
         let refresh_ttl_days = config.profile_ttl_days;
-        let refresh_broker_override = broker_override.clone();
         tokio::spawn(async move {
             run_profile_refresh(
                 refresh_engine,
@@ -681,7 +664,6 @@ async fn main() -> anyhow::Result<()> {
                 refresh_ttl_days,
                 refresh_clock,
                 std::time::Duration::from_secs(3600),
-                refresh_broker_override,
             )
             .await;
         });
@@ -824,20 +806,18 @@ async fn main() -> anyhow::Result<()> {
             .await;
     });
 
-    // Phase 1 Step 5 / Phase 2 Wave 4 Step 22: construct a `GossipTransport`
-    // and attach it. Under Phase 1 this was the only transport; under Phase 2
-    // `BusTransport` may also be attached below and a `CompositeTransport`
-    // wraps the pair. The trait-object `gossip_transport` and the concrete
-    // `gossip_arc` are kept so we can hand the trait object to the composite
-    // child list and still interact with the gossip transport if we need to
-    // (today, for local fan-out via the composite's `publish` path).
+    // Phase 1 Step 5: construct a `GossipTransport` and attach it. It is the
+    // effective transport: the `publish_dispatcher` task below hands it
+    // locally-authored messages, and `GossipTransport::publish` calls
+    // `registry.broadcast(msg)` — semantically identical to Phase 1's
+    // PushManager-on-broadcast-channel path.
     //
     // When `config.push_enabled == false`, there is no `ConnectionRegistry`
     // (it is only created in the `push_enabled` branch above), so we skip
     // attachment. This matches the pre-Phase-1 reality: a node without push
     // had no transport abstraction in the first place, so leaving
     // `transport_count() == 0` preserves zero observable change.
-    let gossip_transport: Option<Arc<dyn egregore::transport::Transport>> =
+    let effective_transport: Option<Arc<dyn egregore::transport::Transport>> =
         if let Some(gossip_registry) = registry.as_ref() {
             let transport: Arc<dyn egregore::transport::Transport> =
                 Arc::new(egregore::transport::gossip::GossipTransport::new(
@@ -855,95 +835,15 @@ async fn main() -> anyhow::Result<()> {
             None
         };
 
-    // Phase 2 Wave 4 Step 22: construct `BusTransport` when `config.bus` is
-    // configured, attach it to the engine's transport list (so health()
-    // aggregation sees it), and retain the concrete Arc for later wiring
-    // (the retry scheduler calls `publish_attempt` directly, not via the
-    // trait — amendment §C.10).
-    let bus_transport_arc: Option<Arc<egregore::transport::bus::BusTransport>> = if let Some(
-        bus_cfg,
-    ) =
-        config.bus.as_ref()
-    {
-        let bus_cfg_arc = Arc::new(bus_cfg.clone());
-        match egregore::transport::bus::BusTransport::new(
-            bus_cfg_arc,
-            identity.clone(),
-            engine.clone(),
-        )
-        .await
-        {
-            Ok(bus) => {
-                let bus_arc = Arc::new(bus);
-                let bus_as_trait: Arc<dyn egregore::transport::Transport> = bus_arc.clone();
-                engine.attach_transport(bus_as_trait);
-                Some(bus_arc)
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "bus transport construction failed; continuing without bus");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // RFC 0002 §4 Principle 7: emit WARN line if this node is running with
-    // ≥ 2 transports (emergent bridge mode). No-op when `transport_count() < 2`.
-    // Placed after attach and before LAN/mDNS discovery spawns so operators
-    // see the line before inbound traffic starts.
-    egregore::transport::announce_if_multi_transport(&engine);
-
-    // Phase 2 Wave 4 Step 22: construct the effective transport — either a
-    // single child (single-transport deployment, Phase 1 posture) or a
-    // `CompositeTransport` wrapping gossip + bus.
-    //
-    // The effective transport is what the `publish_dispatcher` task hands
-    // locally-authored messages to. For single-transport gossip
-    // deployments, `effective_transport.publish(&msg)` == `GossipTransport::publish`
-    // == `registry.broadcast(msg)` — semantically identical to Phase 1's
-    // PushManager-on-broadcast-channel path. For multi-transport
-    // deployments, the composite fans to every child and the ingress/egress
-    // tasks bridge cross-transport traffic.
-    use egregore::feed::engine::DispatchTicket;
-    use egregore::transport::composite::transport::{ChildSpec, CompositeTransport};
-    let mut child_specs: Vec<ChildSpec> = Vec::new();
-    if let Some(gossip) = gossip_transport.as_ref() {
-        child_specs.push(ChildSpec::new(gossip.clone()));
-    }
-    if let Some(bus_arc) = bus_transport_arc.as_ref() {
-        let bus_as_trait: Arc<dyn egregore::transport::Transport> = bus_arc.clone();
-        child_specs.push(ChildSpec::new(bus_as_trait));
-    }
-    let effective_transport: Option<Arc<dyn egregore::transport::Transport>> =
-        match child_specs.len() {
-            0 => None,
-            1 => {
-                let mut iter = child_specs.into_iter();
-                Some(iter.next().unwrap().transport)
-            }
-            _ => match CompositeTransport::new(child_specs) {
-                Ok(c) => Some(Arc::new(c) as Arc<dyn egregore::transport::Transport>),
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "composite transport construction failed; falling back to no dispatcher"
-                    );
-                    None
-                }
-            },
-        };
-
     // Spawn the publish_dispatcher: reads DispatchTicket values from the
     // engine's bounded mpsc and calls `effective_transport.publish(&msg)`
-    // for each. Errors are logged WARN; durability is via the
-    // pending_forwarding row already written in `publish_full` (for bus-
-    // bearing deployments) so a failed dispatch is recovered by the
-    // retry scheduler.
+    // for each. Errors are logged WARN; the message is already durable in
+    // SQLite and gossip Have/Want reconciliation recovers delivery.
     //
     // We spawn the dispatcher ONLY when there is an effective transport —
-    // a transport-less test harness (no gossip, no bus) has nowhere to
-    // dispatch to and the mpsc would grow unbounded.
+    // a transport-less test harness has nowhere to dispatch to and the
+    // mpsc would grow unbounded.
+    use egregore::feed::engine::DispatchTicket;
     if let Some(dispatch_transport) = effective_transport.clone() {
         let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel::<DispatchTicket>(64);
         engine.set_dispatch_sender(dispatch_tx);
@@ -953,7 +853,7 @@ async fn main() -> anyhow::Result<()> {
                     tracing::warn!(
                         hash = %ticket.message.hash,
                         error = %e,
-                        "publish_dispatcher: transport.publish failed; pending retry covers"
+                        "publish_dispatcher: transport.publish failed; gossip reconciliation covers"
                     );
                 }
             }
@@ -961,51 +861,12 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Start the effective transport. For a single GossipTransport this is
-    // a no-op (Phase 1 left `start()` unimplemented for that adapter); for
-    // a CompositeTransport this spawns ingress + egress tasks per child
-    // (Wave 3 Step 19).
+    // Start the effective transport. `GossipTransport::start` binds its own
+    // gossip server on `server_config.bind_addr` and spawns a sync loop.
     if let Some(t) = effective_transport.as_ref() {
         if let Err(e) = t.start().await {
             tracing::error!(error = %e, "effective transport start failed");
         }
-    }
-
-    // Phase 2 Wave 4 Step 22 (+ Wave 1 Step 8 handoff): spawn the pending-
-    // forwarding retry scheduler bound to `BusTransport::publish_attempt`.
-    // Amendment §C.10: retries MUST bypass `publish` (which re-enqueues)
-    // and call `publish_attempt` directly. We achieve this by capturing a
-    // `Weak<BusTransport>` inside the callback — Weak so a shutdown that
-    // drops the bus arc causes the callback to see `None` and surface a
-    // short peer error (safe no-op).
-    if let Some(bus_arc) = bus_transport_arc.as_ref() {
-        use egregore::error::EgreError;
-        use egregore::pending::scheduler::{run_retry_scheduler, PublishCallback};
-        let scheduler_engine = engine.clone();
-        let bus_weak = Arc::downgrade(bus_arc);
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let callback: PublishCallback = Arc::new(move |msg| {
-            let bus = bus_weak.upgrade();
-            let msg_clone = msg.clone();
-            Box::pin(async move {
-                match bus {
-                    Some(b) => b.publish_attempt(&msg_clone).await,
-                    None => Err(EgreError::Peer {
-                        reason: "bus transport dropped".into(),
-                    }),
-                }
-            })
-        });
-        tokio::spawn(async move {
-            run_retry_scheduler(
-                scheduler_engine,
-                "bus",
-                callback,
-                std::time::Duration::from_secs(30),
-                cancel,
-            )
-            .await;
-        });
     }
 
     // Start LAN discovery if enabled
@@ -1101,13 +962,11 @@ async fn main() -> anyhow::Result<()> {
             }
         });
 
-        // Phase 2 Wave 5 Step 27 — transport + bridge + chain-gap
-        // gauges. Separate task from the db-size loop because it runs
-        // on a different cadence (30s vs 60s) and reads from two
-        // distinct subsystems (transport_health + store projections).
-        let transport_metrics_engine = engine.clone();
+        // Chain-gap gauges. Separate task from the db-size loop because it
+        // runs on a different cadence (30s vs 60s).
+        let chain_gap_metrics_engine = engine.clone();
         tokio::spawn(async move {
-            egregore::metrics::run_transport_metrics_updater(transport_metrics_engine).await;
+            egregore::metrics::run_chain_gap_metrics_updater(chain_gap_metrics_engine).await;
         });
     }
 

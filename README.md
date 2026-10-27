@@ -130,7 +130,7 @@ Or download manually from [GitHub Releases](https://github.com/pknull/egregore/r
 
 ### Build from Source
 
-Requires Rust 1.75+:
+Requires Rust 1.95+:
 
 ```bash
 cargo build --release

@@ -378,6 +378,28 @@ const REPO_OWNER: &str = "pknull";
 /// GitHub repository name for updates.
 const REPO_NAME: &str = "egregore";
 
+/// Result of `egregore update --check` against a release listing.
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateCheck {
+    /// The newest listed release differs from the running version.
+    Available(String),
+    UpToDate,
+    NoReleases,
+}
+
+/// Compare the newest listed release (the GitHub listing is newest-first)
+/// with the running version.
+fn check_latest(current_version: &str, releases: &self_update::Releases) -> UpdateCheck {
+    match releases.latest() {
+        // Release::version() is bare semver; the backend strips the tag's leading `v`.
+        Some(latest) if latest.version() != current_version => {
+            UpdateCheck::Available(latest.version().to_string())
+        }
+        Some(_) => UpdateCheck::UpToDate,
+        None => UpdateCheck::NoReleases,
+    }
+}
+
 /// Handle the `update` subcommand.
 fn handle_update(check_only: bool) -> anyhow::Result<()> {
     use self_update::cargo_crate_version;
@@ -393,19 +415,16 @@ fn handle_update(check_only: bool) -> anyhow::Result<()> {
             .build()?
             .fetch()?;
 
-        if let Some(latest) = releases.first() {
-            let latest_version = latest.version.trim_start_matches('v');
-            if latest_version != current_version {
+        match check_latest(current_version, &releases) {
+            UpdateCheck::Available(latest_version) => {
                 println!(
                     "New version available: {} -> {}",
                     current_version, latest_version
                 );
                 println!("Run `egregore update` to install");
-            } else {
-                println!("Already up to date");
             }
-        } else {
-            println!("No releases found");
+            UpdateCheck::UpToDate => println!("Already up to date"),
+            UpdateCheck::NoReleases => println!("No releases found"),
         }
     } else {
         // Download and install
@@ -421,14 +440,16 @@ fn handle_update(check_only: bool) -> anyhow::Result<()> {
             .build()?
             .update()?;
 
-        match status {
-            self_update::Status::UpToDate(v) => {
+        match &status {
+            self_update::VersionStatus::UpToDate(v) => {
                 println!("Already up to date ({})", v);
             }
-            self_update::Status::Updated(v) => {
+            self_update::VersionStatus::Updated(v) => {
                 println!("Updated to version {}", v);
                 println!("Restart egregore to use the new version");
             }
+            // VersionStatus is non_exhaustive; any later variant still carries a version.
+            _ => println!("Update finished ({})", status.version()),
         }
     }
 
@@ -1219,6 +1240,39 @@ async fn run_node_status_publisher(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A newest-first release listing, as `ReleaseList::fetch` returns it.
+    fn listing(versions: &[&str]) -> self_update::Releases {
+        let releases = versions
+            .iter()
+            .map(|v| self_update::Release::builder().version(*v).build().unwrap())
+            .collect();
+        self_update::Releases::from_listing(releases)
+    }
+
+    #[test]
+    fn update_check_reports_newer_release() {
+        assert_eq!(
+            check_latest("2.0.1", &listing(&["2.1.0", "2.0.1"])),
+            UpdateCheck::Available("2.1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn update_check_up_to_date_when_newest_matches() {
+        assert_eq!(
+            check_latest("2.0.1", &listing(&["2.0.1", "2.0.0"])),
+            UpdateCheck::UpToDate
+        );
+    }
+
+    #[test]
+    fn update_check_without_releases() {
+        assert_eq!(
+            check_latest("2.0.1", &listing(&[])),
+            UpdateCheck::NoReleases
+        );
+    }
 
     #[test]
     fn cli_parses_identity_export_and_quiet() {

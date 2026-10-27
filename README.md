@@ -137,6 +137,15 @@ cargo build --release
 # Binary: target/release/egregore
 ```
 
+### System packages
+
+Building from source needs a C toolchain for the bundled SQLite and the TLS
+crates. On Debian or Ubuntu:
+
+```bash
+sudo apt-get install build-essential
+```
+
 ### Updating
 
 Once installed, egregore can update itself:

@@ -128,10 +128,10 @@ impl FeedStore {
         )?;
         if changed == 1 && transport_id == "bus" {
             self.bus_pending_forwarding_count
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                     Some(count.saturating_sub(1))
                 })
-                .expect("bus pending count fetch_update closure always returns Some");
+                .expect("bus pending count try_update closure always returns Some");
         }
         Ok(())
     }

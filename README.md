@@ -130,11 +130,20 @@ Or download manually from [GitHub Releases](https://github.com/pknull/egregore/r
 
 ### Build from Source
 
-Requires Rust 1.75+:
+Requires Rust 1.95+:
 
 ```bash
 cargo build --release
 # Binary: target/release/egregore
+```
+
+### System packages
+
+Building from source needs a C toolchain for the bundled SQLite and the TLS
+crates. On Debian or Ubuntu:
+
+```bash
+sudo apt-get install build-essential
 ```
 
 ### Updating

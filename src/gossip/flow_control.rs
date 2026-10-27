@@ -165,7 +165,7 @@ impl PeerFlowState {
         // Atomically try to decrement credits (only if > 0)
         let credit_acquired = self
             .credits
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 if current > 0 {
                     Some(current - 1)
                 } else {
@@ -225,7 +225,7 @@ impl PeerFlowState {
         if self.credits_supported.load(Ordering::Acquire) {
             // Saturating sub to avoid underflow
             self.credits
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |c| {
                     Some(c.saturating_sub(1))
                 })
                 .ok();
@@ -248,9 +248,9 @@ impl PeerFlowState {
     /// Grant credits from the peer (they are ready to receive more).
     /// Credits are capped at MAX_CREDITS to prevent overflow attacks.
     pub async fn grant_credits(&self, amount: u32) {
-        // Use fetch_update with saturating_add and cap to prevent overflow
+        // Use try_update with saturating_add and cap to prevent overflow
         self.credits
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current.saturating_add(amount).min(MAX_CREDITS))
             })
             .ok();

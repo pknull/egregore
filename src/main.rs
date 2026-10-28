@@ -16,11 +16,10 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use std::path::PathBuf;
 
 use egregore::api;
-use egregore::config::{Config, HookEntry};
+use egregore::config::Config;
 use egregore::feed::engine::FeedEngine;
 use egregore::feed::store::FeedStore;
 use egregore::gossip;
-use egregore::hooks::HookExecutor;
 use egregore::identity::Identity;
 use egregore::status::build_node_status;
 use egregore::telemetry::{self, LoggingConfig, OtlpConfig};
@@ -94,18 +93,6 @@ struct Cli {
     /// Gossip sync interval in seconds
     #[arg(long)]
     gossip_interval_secs: Option<u64>,
-
-    /// Path to hook script called when messages arrive (use config file for multiple hooks)
-    #[arg(long)]
-    hook_on_message: Option<PathBuf>,
-
-    /// URL to POST message JSON when messages arrive (use config file for multiple hooks)
-    #[arg(long)]
-    hook_webhook_url: Option<String>,
-
-    /// Hook timeout in seconds
-    #[arg(long)]
-    hook_timeout_secs: Option<u64>,
 
     /// Generate a default config.yaml in data-dir and exit
     #[arg(long)]
@@ -343,18 +330,6 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
         config.peers.extend(cli.peer.iter().cloned());
         let mut seen = HashSet::new();
         config.peers.retain(|p| seen.insert(p.clone()));
-    }
-
-    // CLI hook flags create one additional hook entry appended to config file hooks
-    let cli_hook = HookEntry {
-        name: Some("cli".to_string()),
-        on_message: cli.hook_on_message.clone(),
-        webhook_url: cli.hook_webhook_url.clone(),
-        timeout_secs: cli.hook_timeout_secs,
-        ..Default::default()
-    };
-    if cli_hook.is_active() {
-        config.hooks.push(cli_hook);
     }
 
     // Push configuration (push is enabled by default, --no-push disables)
@@ -669,35 +644,6 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Start hook executor if configured
-    if let Some(executor) = HookExecutor::new(config.hooks.clone(), config.allow_subprocess_hooks) {
-        let hook_count = executor.hooks().len();
-        tracing::info!(hook_count, "hook executor enabled");
-        for hook in executor.hooks() {
-            tracing::info!(
-                name = ?hook.name,
-                on_message = ?hook.on_message,
-                webhook = ?hook.webhook_url,
-                "registered hook"
-            );
-        }
-        let mut hook_rx = engine.subscribe();
-        tokio::spawn(async move {
-            loop {
-                match hook_rx.recv().await {
-                    Ok(msg) => executor.execute(&msg).await,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(
-                            skipped = n,
-                            "hook receiver lagged, some messages were not processed"
-                        );
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
-
     // Initialize blob store
     let blob_store = egregore::blob::BlobStore::new(&config.data_dir);
 
@@ -758,13 +704,9 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Start gossip server
+    // Gossip server and sync loop configuration. They start once, below:
+    // through the gossip transport when push is enabled, directly otherwise.
     let gossip_bind = format!("{}:{}", config.gossip_bind, config.gossip_port);
-    tracing::info!(bind = %gossip_bind, "gossip server starting");
-    // Build the server config once so the Phase-1 `GossipTransport` (attached
-    // below) and the existing gossip-server spawn site can share it without
-    // drifting. `ServerConfig` derives `Clone`, so cloning for each consumer
-    // is free.
     let server_config = gossip::server::ServerConfig {
         bind_addr: gossip_bind,
         network_key: config.network_key_bytes(),
@@ -772,22 +714,8 @@ async fn main() -> anyhow::Result<()> {
         push_enabled: config.push_enabled,
         max_persistent_connections: config.max_persistent_connections,
     };
-    let gossip_engine = engine.clone();
-    let server_registry = registry.clone();
-    let spawn_server_config = server_config.clone();
-    tokio::spawn(async move {
-        if let Err(e) = gossip::server::run_server_with_push(
-            spawn_server_config,
-            gossip_engine,
-            server_registry,
-        )
-        .await
-        {
-            tracing::error!(error = %e, "gossip server failed");
-        }
-    });
 
-    // Start gossip sync loop (dynamic: reads DB peers each cycle)
+    // The sync loop reads DB peers each cycle.
     let mut sync_config = gossip::client::SyncConfig::new(
         config.peers.clone(),
         config.network_key_bytes(),
@@ -797,14 +725,6 @@ async fn main() -> anyhow::Result<()> {
     );
     sync_config.backoff_initial = std::time::Duration::from_secs(config.reconnect_initial_secs);
     sync_config.backoff_max = std::time::Duration::from_secs(config.reconnect_max_secs);
-
-    let sync_engine = engine.clone();
-    let sync_registry = registry.clone();
-    let spawn_sync_config = sync_config.clone();
-    tokio::spawn(async move {
-        gossip::client::run_sync_loop_with_push(spawn_sync_config, sync_engine, sync_registry)
-            .await;
-    });
 
     // Phase 1 Step 5: construct a `GossipTransport` and attach it. It is the
     // effective transport: the `publish_dispatcher` task below hands it
@@ -825,8 +745,8 @@ async fn main() -> anyhow::Result<()> {
                         registry: gossip_registry.clone(),
                         identity: identity.clone(),
                         engine: engine.clone(),
-                        server_config,
-                        sync_config,
+                        server_config: server_config.clone(),
+                        sync_config: sync_config.clone(),
                     },
                 ));
             engine.attach_transport(transport.clone());
@@ -861,12 +781,28 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Start the effective transport. `GossipTransport::start` binds its own
-    // gossip server on `server_config.bind_addr` and spawns a sync loop.
+    // Start gossip once. With push enabled, `GossipTransport::start` binds the
+    // gossip server and spawns the sync loop, and reports a bind failure, which
+    // stops the node. Without push there is no transport, so the node runs
+    // both directly.
+    tracing::info!(bind = %server_config.bind_addr, "gossip server starting");
     if let Some(t) = effective_transport.as_ref() {
-        if let Err(e) = t.start().await {
-            tracing::error!(error = %e, "effective transport start failed");
-        }
+        t.start()
+            .await
+            .map_err(|e| anyhow::anyhow!("gossip transport failed to start: {e}"))?;
+    } else {
+        let gossip_engine = engine.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                gossip::server::run_server_with_push(server_config, gossip_engine, None).await
+            {
+                tracing::error!(error = %e, "gossip server failed");
+            }
+        });
+        let sync_engine = engine.clone();
+        tokio::spawn(async move {
+            gossip::client::run_sync_loop_with_push(sync_config, sync_engine, None).await;
+        });
     }
 
     // Start LAN discovery if enabled

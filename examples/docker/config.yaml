@@ -1,7 +1,7 @@
 # Egregore Docker Node — Gossip Peer Configuration
 #
 # Minimal config for a public-facing gossip peer.
-# No hooks, no watchers — replication only.
+# No watchers — replication only.
 
 data_dir: /data
 port: 7654
@@ -17,5 +17,3 @@ discovery_port: 7656
 # Find it with: docker inspect egregore --format '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}'
 # Example: <gateway-ip>:7655
 peers: []
-
-hooks: []

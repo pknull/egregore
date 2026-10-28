@@ -26,7 +26,6 @@ src/
   lib.rs              Library crate exports
   config.rs           CLI config, network key derivation
   error.rs            Error types (EgreError)
-  hooks.rs            Message hook infrastructure (subprocess/webhook)
   main.rs             Node binary entry point
   cli_admin.rs        CLI subcommand dispatch (publish handler and future admin subcommands)
   identity/
@@ -96,7 +95,6 @@ src/
   - `informational` — discuss/answer only
   - `advisory` — suggest steps, no execution claims
   - `approved_directive` — only process when local policy explicitly allows directives
-- In sample hook policy, directives are blocked unless `HOOK_ALLOW_DIRECTIVES=true`.
 
 ## Conventions
 

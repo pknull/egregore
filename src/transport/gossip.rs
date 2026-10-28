@@ -12,9 +12,9 @@
 //! `gossip::client::run_sync_loop_with_push` did not expose cancel handles at
 //! the time of Phase 1 Step 3. We added parallel `_cancellable` variants in
 //! both files that take a `tokio_util::sync::CancellationToken`; the
-//! historical signatures delegate to those variants with a never-firing token
-//! so `main.rs` remains byte-for-byte unchanged in how it spawns and tears
-//! down the gossip stack.
+//! historical signatures delegate to those variants with a never-firing token.
+//! `main.rs` calls them only for a node without push, which has no transport;
+//! with push enabled it starts gossip solely through `GossipTransport::start`.
 //!
 //! `GossipTransport::start` spawns the cancellable variants with a shared
 //! `CancellationToken`; `GossipTransport::shutdown` fires the token,
@@ -481,7 +481,7 @@ impl Transport for GossipTransport {
         // Codex flagged this as a lifecycle footgun. The ready-signal
         // pattern closes the gap while keeping the legacy server signature
         // (with a never-firing token + None ready) unchanged for main.rs's
-        // Phase 1 boot path.
+        // pull-only boot path.
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<std::io::Result<()>>();
 
         let server_cfg = self.server_config.clone();

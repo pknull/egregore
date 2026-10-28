@@ -27,7 +27,7 @@ For architecture internals (module boundaries, invariants, storage ownership), s
 | Retention and Lifecycle | TTL, retention policies, compaction, tombstones | [retention-and-lifecycle.md](./retention-and-lifecycle.md) |
 | Mesh Health | Direct and transitive peer health visibility | [mesh-health.md](./mesh-health.md) |
 | REST API and MCP | Local integration surfaces for apps and agents | [integration-api-and-mcp.md](./integration-api-and-mcp.md) |
-| Events and Hooks | SSE event streaming and hook/webhook automation | [events-and-hooks.md](./events-and-hooks.md) |
+| Events | SSE event streaming | [events.md](./events.md) |
 | Private Box Utility | Multi-recipient encrypted payload helper module | [private-box.md](./private-box.md) |
 
 ## Gap Tracker

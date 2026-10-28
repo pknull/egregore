@@ -16,7 +16,6 @@ const DEFAULT_DISCOVERY_PORT: u16 = 7656;
 
 // Timing defaults
 const DEFAULT_GOSSIP_INTERVAL_SECS: u64 = 300; // 5 minutes
-const DEFAULT_HOOK_RETRY_DELAY_SECS: u64 = 5;
 const DEFAULT_RECONNECT_INITIAL_SECS: u64 = 5;
 const DEFAULT_RECONNECT_MAX_SECS: u64 = 300; // 5 minutes
 const DEFAULT_RETENTION_INTERVAL_SECS: u64 = 3600; // 1 hour
@@ -68,59 +67,6 @@ impl Default for MetricsConfig {
     }
 }
 
-/// A single hook definition. Each hook can be a subprocess, a webhook, or both.
-/// Each hook has its own filter and timeout.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct HookEntry {
-    /// Human-readable label for logging.
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Deprecated path to an executable called when a message arrives.
-    /// Message JSON is passed on stdin.
-    /// Requires the top-level `allow_subprocess_hooks` compatibility flag.
-    pub on_message: Option<PathBuf>,
-    /// URL to POST message JSON to when a message arrives.
-    pub webhook_url: Option<String>,
-    /// Timeout in seconds for hook/webhook execution (default: 30).
-    pub timeout_secs: Option<u64>,
-    /// Maximum number of retry attempts for failed/timed-out hooks (default: 0 = no retries).
-    #[serde(default)]
-    pub max_retries: u32,
-    /// Delay in seconds between retry attempts (default: 5).
-    #[serde(default = "default_retry_delay_secs")]
-    pub retry_delay_secs: u64,
-    /// Enable idempotency tracking to prevent duplicate hook execution (default: false).
-    /// When enabled, completed hooks are tracked and skipped on replay/restart.
-    #[serde(default)]
-    pub idempotent: bool,
-}
-
-fn default_retry_delay_secs() -> u64 {
-    DEFAULT_HOOK_RETRY_DELAY_SECS
-}
-
-impl HookEntry {
-    /// Returns true if this entry has at least one actionable handler.
-    pub fn is_active(&self) -> bool {
-        self.on_message.is_some() || self.webhook_url.is_some()
-    }
-
-    /// Returns a unique identifier for this hook based on name or path/URL.
-    /// Used as part of the idempotency key.
-    pub fn unique_id(&self) -> String {
-        if let Some(ref name) = self.name {
-            return name.clone();
-        }
-        if let Some(ref path) = self.on_message {
-            return format!("subprocess:{}", path.display());
-        }
-        if let Some(ref url) = self.webhook_url {
-            return format!("webhook:{}", url);
-        }
-        "unknown".to_string()
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub data_dir: PathBuf,
@@ -156,14 +102,6 @@ pub struct Config {
     pub peers: Vec<String>,
     pub lan_discovery: bool,
     pub discovery_port: u16,
-    /// Multiple hook configurations for event-driven handlers.
-    #[serde(default)]
-    pub hooks: Vec<HookEntry>,
-    /// Allow deprecated message-triggered subprocess hooks.
-    ///
-    /// Disabled by default. Webhook handlers remain enabled independently.
-    #[serde(default)]
-    pub allow_subprocess_hooks: bool,
     /// Enable persistent push-based connections.
     /// When enabled, after initial replication, connections attempt to
     /// negotiate persistent mode for real-time message propagation.
@@ -305,8 +243,6 @@ impl Default for Config {
             peers: Vec::new(),
             lan_discovery: false,
             discovery_port: DEFAULT_DISCOVERY_PORT,
-            hooks: Vec::new(),
-            allow_subprocess_hooks: false,
             push_enabled: true,
             max_persistent_connections: DEFAULT_MAX_PERSISTENT_CONNECTIONS,
             reconnect_initial_secs: DEFAULT_RECONNECT_INITIAL_SECS,
@@ -327,51 +263,6 @@ impl Default for Config {
             profile_ttl_days: default_profile_ttl_days(),
         }
     }
-}
-
-/// Check if a URL points to an internal/private address (SSRF risk).
-///
-/// Returns true for localhost, loopback, private IP ranges, and link-local addresses.
-fn is_internal_url(url: &str) -> bool {
-    use std::net::IpAddr;
-
-    // Parse URL to extract host
-    let host = match url::Url::parse(url) {
-        Ok(parsed) => match parsed.host_str() {
-            Some(h) => h.to_lowercase(),
-            None => return false,
-        },
-        Err(_) => return false,
-    };
-
-    // Check for localhost variants
-    if host == "localhost" || host.ends_with(".localhost") {
-        return true;
-    }
-
-    // Check for internal hostnames
-    if host.ends_with(".local") || host.ends_with(".internal") {
-        return true;
-    }
-
-    // Try to parse as IP address
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return match ip {
-            IpAddr::V4(v4) => {
-                v4.is_loopback()           // 127.0.0.0/8
-                    || v4.is_private()     // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-                    || v4.is_link_local()  // 169.254.0.0/16
-                    || v4.is_unspecified() // 0.0.0.0
-            }
-            IpAddr::V6(v6) => {
-                v6.is_loopback()       // ::1
-                    || v6.is_unspecified() // ::
-                                           // Note: is_unique_local() and is_unicast_link_local() are unstable
-            }
-        };
-    }
-
-    false
 }
 
 impl Config {
@@ -463,32 +354,6 @@ impl Config {
         }
         if !self.api_enabled && self.mcp_enabled {
             tracing::warn!("mcp_enabled=true has no effect when api_enabled=false");
-        }
-        for hook in &self.hooks {
-            if self.allow_subprocess_hooks {
-                if let Some(ref path) = hook.on_message {
-                    if !path.exists() {
-                        tracing::warn!(
-                            hook_name = ?hook.name,
-                            path = %path.display(),
-                            "hook script does not exist"
-                        );
-                    }
-                }
-            }
-            if let Some(ref url) = hook.webhook_url {
-                if !url.starts_with("http://") && !url.starts_with("https://") {
-                    anyhow::bail!("webhook_url must start with http:// or https://: {}", url);
-                }
-                // SSRF protection: warn about internal/private URLs
-                if is_internal_url(url) {
-                    tracing::warn!(
-                        hook_name = ?hook.name,
-                        url = %url,
-                        "webhook URL points to internal/private address - potential SSRF risk"
-                    );
-                }
-            }
         }
         // Profile TTL bounds (RFC 0001 §11.2; Phase 1 plan §6.5).
         if self.profile_ttl_days == 0 {
@@ -643,24 +508,6 @@ mod tests {
     }
 
     #[test]
-    fn hook_entry_is_active() {
-        let empty = HookEntry::default();
-        assert!(!empty.is_active());
-
-        let with_path = HookEntry {
-            on_message: Some(PathBuf::from("/bin/true")),
-            ..Default::default()
-        };
-        assert!(with_path.is_active());
-
-        let with_url = HookEntry {
-            webhook_url: Some("https://example.com".to_string()),
-            ..Default::default()
-        };
-        assert!(with_url.is_active());
-    }
-
-    #[test]
     fn yaml_round_trip() {
         let config = Config {
             peers: vec!["192.168.1.100:7655".to_string()],
@@ -668,20 +515,6 @@ mod tests {
             api_auth_enabled: true,
             api_auth_token: Some("test-token".to_string()),
             mcp_enabled: false,
-            allow_subprocess_hooks: true,
-            hooks: vec![
-                HookEntry {
-                    name: Some("test-hook".to_string()),
-                    on_message: Some(PathBuf::from("./hooks/test.sh")),
-                    timeout_secs: Some(10),
-                    ..Default::default()
-                },
-                HookEntry {
-                    name: Some("webhook".to_string()),
-                    webhook_url: Some("https://example.com/hook".to_string()),
-                    ..Default::default()
-                },
-            ],
             ..Config::default()
         };
 
@@ -694,18 +527,11 @@ mod tests {
         assert!(parsed.api_auth_enabled);
         assert_eq!(parsed.api_auth_token.as_deref(), Some("test-token"));
         assert!(!parsed.mcp_enabled);
-        assert!(parsed.allow_subprocess_hooks);
         assert!(!parsed.node_status_enabled);
-        assert_eq!(parsed.hooks.len(), 2);
-        assert_eq!(parsed.hooks[0].name.as_deref(), Some("test-hook"));
-        assert_eq!(
-            parsed.hooks[1].webhook_url.as_deref(),
-            Some("https://example.com/hook")
-        );
     }
 
     #[test]
-    fn yaml_empty_hooks_defaults() {
+    fn yaml_minimal_defaults() {
         let yaml = "data_dir: ./data\nport: 7654\ngossip_port: 7655\ngossip_interval_secs: 300\nnetwork_key: test\npeers: []\nlan_discovery: false\ndiscovery_port: 7656\n";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(!config.schema_strict);
@@ -713,9 +539,17 @@ mod tests {
         assert!(!config.api_auth_enabled);
         assert!(config.api_auth_token.is_none());
         assert!(config.mcp_enabled);
-        assert!(!config.allow_subprocess_hooks);
         assert!(!config.node_status_enabled);
-        assert!(config.hooks.is_empty());
+    }
+
+    #[test]
+    fn legacy_hook_keys_are_ignored() {
+        // Configs written before hook removal must keep loading: Config does
+        // not use deny_unknown_fields, so the stale keys are skipped.
+        let yaml = "data_dir: ./data\nport: 7654\ngossip_port: 7655\ngossip_interval_secs: 300\nnetwork_key: test\npeers: []\nlan_discovery: false\ndiscovery_port: 7656\nallow_subprocess_hooks: true\nhooks:\n  - name: old\n    on_message: ./hooks/old.sh\n    timeout_secs: 10\n  - webhook_url: https://example.com/hook\n    max_retries: 3\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.port, 7654);
+        assert_eq!(config.network_key, "test");
     }
 
     #[test]
@@ -755,32 +589,6 @@ mod tests {
         let config = Config {
             api_auth_enabled: true,
             api_auth_token: Some("secret-token".to_string()),
-            ..Config::default()
-        };
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn validate_bad_webhook_url() {
-        let config = Config {
-            hooks: vec![HookEntry {
-                webhook_url: Some("not-a-url".to_string()),
-                ..Default::default()
-            }],
-            api_auth_token: Some("test-token".to_string()),
-            ..Config::default()
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn validate_good_config() {
-        let config = Config {
-            hooks: vec![HookEntry {
-                webhook_url: Some("https://example.com/hook".to_string()),
-                ..Default::default()
-            }],
-            api_auth_token: Some("test-token".to_string()),
             ..Config::default()
         };
         assert!(config.validate().is_ok());

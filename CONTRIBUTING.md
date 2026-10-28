@@ -52,7 +52,7 @@ CI also runs `cargo audit` for security advisories. Install it once: `cargo inst
 - Bugs labeled `good first issue` on the issue tracker
 - Protocol improvements — discuss in an issue first
 - Documentation — always welcome
-- Examples and hooks — see `examples/` for the existing hook scripts
+- Examples — see `examples/` for existing integrations
 
 ## Areas That Need Care
 
@@ -81,7 +81,7 @@ Conventional format is preferred but not enforced:
 ```
 feat: add schema compatibility mode
 fix: handle empty peer list in gossip client
-docs: clarify hook script environment
+docs: clarify watcher script environment
 ```
 
 Write commit messages that explain *why* — the diff shows what.

@@ -23,7 +23,7 @@ For usage and operator workflows, use [`docs/features/README.md`](../features/RE
 | Retention and Lifecycle | [retention-and-lifecycle.md](./retention-and-lifecycle.md) | [`docs/features/retention-and-lifecycle.md`](../features/retention-and-lifecycle.md) |
 | Mesh Health | [mesh-health.md](./mesh-health.md) | [`docs/features/mesh-health.md`](../features/mesh-health.md) |
 | REST API and MCP | [integration-api-and-mcp.md](./integration-api-and-mcp.md) | [`docs/features/integration-api-and-mcp.md`](../features/integration-api-and-mcp.md) |
-| Events and Hooks | [events-and-hooks.md](./events-and-hooks.md) | [`docs/features/events-and-hooks.md`](../features/events-and-hooks.md) |
+| Events | [events.md](./events.md) | [`docs/features/events.md`](../features/events.md) |
 | Private Box Utility | [private-box.md](./private-box.md) | [`docs/features/private-box.md`](../features/private-box.md) |
 
 ## Shared Maps

@@ -8,7 +8,7 @@
 
 Add a `Publish` variant to the existing `Command` enum in `src/main.rs` that writes a signed, chained message directly to the local SQLite store. No running daemon required. The command loads identity from the data directory, opens the store, calls `FeedEngine::publish`, and prints the resulting message hash to stdout.
 
-This makes egregore independently useful as a CLI tool -- a developer can sign and store feed messages from shell scripts, cron jobs, CI pipelines, or hooks without running the daemon process.
+This makes egregore independently useful as a CLI tool -- a developer can sign and store feed messages from shell scripts, cron jobs, or CI pipelines without running the daemon process.
 
 ## CLI Interface
 

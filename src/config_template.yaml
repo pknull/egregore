@@ -86,45 +86,6 @@ mdns_service: "_egregore._tcp.local."
 #   - relay.example.com:7661
 peers: []
 
-# Allow deprecated message-triggered subprocess hooks (`on_message`).
-# DEPRECATED and disabled by default for security containment. When true,
-# each configured subprocess hook runs and emits a startup warning.
-# Migrate automation to structured Servitor work before removal.
-# Webhooks are independent of this gate and remain compatibility-only while
-# awaiting RFC 0003 §6 target conformance.
-# Default: false
-allow_subprocess_hooks: false
-
-# Hook definitions. Each hook fires independently on message events.
-# Hooks run in parallel. Each can have its own timeout.
-# CLI --hook-on-message/--hook-webhook-url append an additional hook.
-#
-# Hook fields:
-#   name:             Human-readable label (used as idempotency key)
-#   on_message:       DEPRECATED subprocess path; requires allow_subprocess_hooks: true
-#   webhook_url:      Compatibility webhook URL; does not require the subprocess gate
-#   timeout_secs:     Execution timeout (default: 30)
-#   max_retries:      Retry count for failures/timeouts (default: 0 = no retries)
-#   retry_delay_secs: Delay between retries (default: 5)
-#   idempotent:       Track completion to skip duplicates (default: false)
-#
-# Example:
-# hooks:
-#   - name: discord-notify
-#     on_message: ./hooks/discord-notify.sh
-#     timeout_secs: 10
-#   - name: insight-webhook
-#     webhook_url: https://example.com/hooks/egregore
-#     timeout_secs: 15
-#   - name: reliable-pipeline
-#     on_message: ./hooks/process.sh
-#     webhook_url: https://example.com/hooks/backup
-#     timeout_secs: 30
-#     max_retries: 3
-#     retry_delay_secs: 10
-#     idempotent: true
-hooks: []
-
 # Push-based replication settings.
 # When enabled, connections attempt to negotiate persistent mode for
 # real-time message propagation (in addition to periodic pull sync).

@@ -464,8 +464,10 @@ fn load_telemetry_config(cli: &Cli) -> PartialTelemetryConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut matches = Cli::command().get_matches();
-    let cli = Cli::from_arg_matches_mut(&mut matches)?;
+    // `from_arg_matches` copies values out, leaving `matches` intact for the
+    // `value_source` checks that let explicit flags override the config file.
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
 
     // Load telemetry config early for initialization.
     // We need to peek at the config file to get logging/OTLP settings before full config load.

@@ -40,7 +40,7 @@ src/
   feed/
     engine.rs           Publish (sign+chain), ingest (verify+validate), query, search; DispatchTicket + local_publish_tx (Phase 2 Wave 4)
     models.rs           Message struct, FeedQuery, UnsignedMessage
-    content_types.rs    Structured content enum (insight, profile, etc.); BrokerDetails (Phase 1 RFC 0001 §11.2)
+    content_types.rs    Structured content enum (insight, profile, etc.)
     profile_lifecycle.rs  Profile TTL self-enforce + peer soft filter + refresh scheduler + Clock abstraction
     private_box.rs      Private Box envelope prepare_for_publish / decrypt_for_identity
     schema.rs           Schema registry with JSON Schema validation
@@ -49,31 +49,15 @@ src/
       messages.rs       Message CRUD, chain validation, search, topic filtering; get_latest_by_content_type
       peers.rs          Peer storage, follows
       health.rs         Peer health tracking
-      pending.rs        pending_forwarding table CRUD (Phase 2 Wave 1)
       retention.rs      Retention policy (age + count sweeps)
-  metrics.rs            Prometheus metrics (ingest counters, transport health, bridge queues, chain-gap gauges) — Phase 2 Wave 5
+  metrics.rs            Prometheus metrics (ingest counters, replication, chain-gap gauges)
   transport/
-    mod.rs              Transport trait + announce_if_multi_transport warn shim (RFC 0001 §5, Phase 1)
+    mod.rs              Transport module root and re-exports (RFC 0001 §5, Phase 1)
     trait_def.rs        Four-method Transport trait with seven invariants
     filter.rs           TopicFilter (author + tag predicates)
     subscription.rs     Opaque SubscriptionHandle (drop-cancels)
-    health.rs           TransportHealth struct + BridgeQueuesHealth + aggregate helper for composite
+    health.rs           TransportHealth struct + aggregate helper (RFC 0001 §5.2)
     gossip.rs           GossipTransport adapter wrapping the gossip/ stack via delegation
-    bus/                BusTransport (NATS JetStream adapter) — Phase 2
-      config.rs           BusConfig + ack_wait derivation + startup validation
-      subjects.rs         Subject mapping: egregore.feed.{author}
-      consumer.rs         JetStream stream/consumer setup + live ordering validation
-      transport.rs        BusTransport + durable-local-ingest subscribe path + self_echo_total counter
-    composite/          CompositeTransport + DirectionState/AckBarrier — RFC 0002 §8
-      direction.rs        DirectionState + AuthorQueueEntry + AckBarrier (N>2 safe)
-      ingress.rs          Per-source ingress task (subscribe + forward to destination queues)
-      egress.rs           Per-destination egress drain task (publish + resolve ack barrier)
-      health.rs           BridgeQueuesHealth aggregation (read-through to bus self-echo counter)
-      transport.rs        CompositeTransport struct + ChildSpec + Transport trait impl
-  pending/
-    mod.rs              pending-forwarding module root (Phase 2 Wave 1)
-    scheduler.rs        run_retry_scheduler (bus-only, exponential backoff)
-    store.rs            row-type re-exports (CRUD lives in feed/store/pending.rs)
   gossip/
     connection.rs       SHS handshake over TCP, then Box Stream
     replication.rs      Have/Want/Messages/Done + Push/Subscribe/SubscribeAck protocol

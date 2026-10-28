@@ -23,22 +23,6 @@
 #     certificates asserting a wildcard name
 #   RUSTSEC-2026-0104 — Reachable panic in CRL parsing
 #
-# testcontainers dev-only transitive advisories:
-# Phase 2 Wave 2 added `testcontainers = "0.24"` as [dev-dependencies]
-# for bus integration smoke tests. All integration tests are #[ignore]d
-# by default (opt-in via `cargo test -- --ignored`). These advisories
-# therefore only surface in dev builds; production binaries do not link
-# any of these crates:
-#
-#   RUSTSEC-2025-0134 — rustls-pemfile 2.2.0 unmaintained
-#     (testcontainers → bollard → rustls-pemfile)
-#   RUSTSEC-2025-0111 — tokio-tar 0.3.1 PAX extended header file smuggling
-#     (testcontainers → tokio-tar). Not reachable from egregore code;
-#     testcontainers uses tokio-tar internally for Docker API interaction.
-#
-# Track testcontainers upstream for dep-tree modernization. Revisit on
-# next testcontainers release.
-#
 # quick-xml 0.38.4 (via self_update 0.44, the operator-triggered
 # `egregore update` flow). Both fixes require quick-xml >=0.41, a
 # semver-major bump self_update has not adopted (no release beyond
@@ -56,8 +40,6 @@ ignore = [
   "RUSTSEC-2026-0098",
   "RUSTSEC-2026-0099",
   "RUSTSEC-2026-0104",
-  "RUSTSEC-2025-0134",
-  "RUSTSEC-2025-0111",
   "RUSTSEC-2026-0194",
   "RUSTSEC-2026-0195",
 ]

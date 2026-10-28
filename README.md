@@ -70,9 +70,8 @@ Each agent gets an Ed25519 cryptographic identity and publishes signed messages 
 
 ### Transport Architecture
 
-Gossip is the default transport. A narrow `Transport` trait also supports an
-opt-in NATS JetStream bus backend; configuring two or more transports produces
-an emergent composite bridge that fans out and forwards between them. See the
+Gossip is the transport, behind a narrow `Transport` trait that keeps the
+engine independent of the wire. See the
 [transport abstraction architecture slice](docs/architecture/transport-abstraction.md).
 
 ## Feature Documentation
@@ -282,8 +281,6 @@ Webhooks remain supported as a compatibility feature while awaiting the durable 
 | POST | `/v1/blobs` | Upload raw blob bytes to the content-addressed store |
 | GET | `/v1/blobs/:hash` | Download blob bytes by SHA-256 hash |
 | GET | `/v1/blobs/:hash/info` | Get blob metadata by SHA-256 hash |
-| GET | `/v1/transport/pending` | Get pending-forwarding rows for `?transport_id=...` |
-| GET | `/v1/transport/bus/authors` | Get the highest indexed author and stream sequence per bus author |
 | POST | `/mcp` | MCP JSON-RPC 2.0 endpoint (if enabled) |
 | GET | `/v1/events` | SSE streaming (filter: `?content_type`, `?author`) |
 
@@ -638,10 +635,6 @@ src/
   blob/           Content-addressed blob storage
     mod.rs        BlobStore and BlobInfo exports
     store.rs      SHA-256-addressed filesystem persistence
-  pending/        Durable pending-forwarding retry subsystem
-    mod.rs        Pending state and scheduler module exports
-    store.rs      Pending-store module notes (CRUD is in feed/store/pending.rs)
-    scheduler.rs  Ordered retry loop for unacknowledged transport publishes
   identity/       Ed25519 keypair, signing, permission checks, Ed25519-to-X25519
   crypto/         Secret Handshake, Box Stream, Private Box
   feed/
@@ -656,7 +649,6 @@ src/
       messages.rs Message CRUD, chain validation, search, topic filtering
       peers.rs    Peer storage, follows
       health.rs   Peer health tracking
-      pending.rs  Pending forwarding and bus sequence-index persistence
       retention.rs  Retention policy enforcement, cleanup
   gossip/
     connection.rs SHS handshake over TCP, Box Stream, SecureReader/SecureWriter
@@ -677,20 +669,9 @@ src/
   transport/
     trait_def.rs  Transport trait and delivery/lifecycle contract
     gossip.rs     GossipTransport adapter
-    health.rs     Transport and bridge-queue health models
+    health.rs     Transport health model and aggregation
     filter.rs     TopicFilter definitions
     subscription.rs  SubscriptionHandle lifecycle
-    bus/
-      config.rs   NATS JetStream configuration and validation
-      consumer.rs Stream/consumer bootstrap and ordering preflight
-      subjects.rs NATS subject and durable consumer naming
-      transport.rs  BusTransport implementation
-    composite/
-      direction.rs  Per-direction bridge queues and acknowledgements
-      ingress.rs  Child subscription ingress pumps
-      egress.rs   Destination forwarding pumps
-      health.rs   Bridge queue health projection
-      transport.rs  CompositeTransport implementation
   api/
     mod.rs        Axum router setup
     response.rs   Standard API response envelope
@@ -705,7 +686,6 @@ src/
     routes_topics.rs  Topic subscriptions (GET/POST/DELETE /v1/topics)
     routes_retention.rs  Retention policy endpoints (GET/POST /v1/retention)
     routes_blobs.rs   Blob upload, download, and metadata endpoints
-    routes_transport.rs  Pending-forwarding and bus-author observability endpoints
     mcp.rs            MCP JSON-RPC 2.0 dispatcher (POST /mcp)
     mcp_tools.rs      MCP tool definitions and handlers
     mcp_registry.rs   MCP tool registry

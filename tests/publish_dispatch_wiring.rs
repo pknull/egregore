@@ -2,33 +2,21 @@
 //!
 //! These tests exercise the engine ↔ dispatcher contract end-to-end:
 //!
-//! 1. `single_transport_deployment_publishes_without_dispatcher_pending`
-//!    — gossip-only deployment (no bus-bearing transport) must NOT create
-//!    pending_forwarding rows. Amendment §C.8: pending rows are a
-//!    bus-specific durability handle.
-//!
-//! 2. `bus_transport_deployment_enqueues_pending_synchronously_in_publish_full`
-//!    — when a NATS-backend transport is attached to the engine,
-//!    `publish_full` MUST write the pending row BEFORE returning. This is
-//!    the amendment §C.8 durability guarantee that survives a crashed
+//! 1. `single_transport_deployment_publishes_through_dispatcher` — every
+//!    locally-authored publish reaches the attached transport through the
 //!    dispatcher.
 //!
-//! 3. `dispatcher_mpsc_full_does_not_lose_publish` — saturate the mpsc
+//! 2. `dispatcher_mpsc_full_does_not_lose_publish` — saturate the mpsc
 //!    with a stalled dispatcher; publish many messages; assert all of
-//!    them appear in pending_forwarding. This is the amendment §C.16
-//!    acceptance test that a dispatcher lag does NOT lose publishes.
+//!    them are durably stored. This is the amendment §C.16 acceptance
+//!    test that a dispatcher lag does NOT lose publishes.
 //!
-//! 4. `pushmanager_retirement_behavior_preserved` — gossip-only
+//! 3. `pushmanager_retirement_behavior_preserved` — gossip-only
 //!    deployment: locally-authored messages still flow through the
 //!    effective transport's `publish` path (which is the
 //!    `GossipTransport::publish` → `registry.broadcast` chain). The test
 //!    attaches a sentinel mock and asserts its `published` log
 //!    records the dispatched message.
-//!
-//! A full bus-configured end-to-end test is deferred to Step 13's
-//! testcontainer rig; this file uses a purpose-built mock with a
-//! `"nats"` backend label to exercise the engine-level branching
-//! without a live NATS server.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -45,8 +33,7 @@ use egregore::feed::store::FeedStore;
 use egregore::identity::{Identity, PublicId};
 use egregore::transport::{SubscriptionHandle, TopicFilter, Transport, TransportHealth};
 
-/// Minimal mock that reports a configurable `backend` string so tests can
-/// simulate a bus-configured deployment without a NATS testcontainer. The
+/// Minimal mock that reports a configurable `backend` string. The
 /// `publish` path records every call; tests compare the count against the
 /// number of dispatched tickets.
 struct BackendMock {
@@ -129,7 +116,6 @@ impl Transport for BackendMock {
             inflight_publishes: self.inflight.load(Ordering::Acquire),
             last_error: None,
             children: vec![],
-            bridge_queues: None,
         }
     }
 }
@@ -157,7 +143,7 @@ fn spawn_dispatcher(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn single_transport_deployment_publishes_without_dispatcher_pending() {
+async fn single_transport_deployment_publishes_through_dispatcher() {
     let (engine, identity) = setup();
     let gossip = BackendMock::new("gossip");
     engine.attach_transport(gossip.clone() as Arc<dyn Transport>);
@@ -177,13 +163,6 @@ async fn single_transport_deployment_publishes_without_dispatcher_pending() {
             .unwrap();
     }
 
-    // Gossip-only: no pending rows created (bus-specific durability).
-    let count = engine.store().pending_forwarding_count("bus").unwrap();
-    assert_eq!(
-        count, 0,
-        "gossip-only deployment must not create pending rows; got {count}"
-    );
-
     // Dispatcher processed all 5 tickets.
     tokio::time::timeout(Duration::from_secs(2), async {
         while gossip.published().len() < 5 {
@@ -196,45 +175,18 @@ async fn single_transport_deployment_publishes_without_dispatcher_pending() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn bus_transport_deployment_enqueues_pending_synchronously_in_publish_full() {
-    let (engine, identity) = setup();
-    let bus = BackendMock::new("nats");
-    engine.attach_transport(bus.clone() as Arc<dyn Transport>);
-
-    // We do NOT attach a dispatcher channel here. `publish_full` must
-    // still write the pending row synchronously (amendment §C.8
-    // durability guarantee).
-    let msg = engine
-        .publish(
-            &identity,
-            serde_json::json!({"type": "test", "n": 1}),
-            None,
-            vec![],
-        )
-        .unwrap();
-
-    let pending = engine.store().pending_forwarding_list("bus", 10).unwrap();
-    assert_eq!(
-        pending.len(),
-        1,
-        "nats-attached publish must enqueue a bus pending row BEFORE returning"
-    );
-    assert_eq!(pending[0].message_hash, msg.hash);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_mpsc_full_does_not_lose_publish() {
     let (engine, identity) = setup();
-    let bus = BackendMock::new("nats");
-    engine.attach_transport(bus.clone() as Arc<dyn Transport>);
+    let gossip = BackendMock::new("gossip");
+    engine.attach_transport(gossip.clone() as Arc<dyn Transport>);
 
     // Small mpsc capacity + stalled dispatcher = Full errors on try_send.
-    // Amendment §C.16 acceptance: all publishes land in pending even
-    // under saturated dispatcher.
-    bus.set_stall(true);
+    // Amendment §C.16 acceptance: all publishes are durably stored even
+    // under a saturated dispatcher.
+    gossip.set_stall(true);
     let (dispatch_tx, dispatch_rx) = tokio::sync::mpsc::channel::<DispatchTicket>(2);
     engine.set_dispatch_sender(dispatch_tx);
-    let _dispatcher = spawn_dispatcher(bus.clone() as Arc<dyn Transport>, dispatch_rx);
+    let _dispatcher = spawn_dispatcher(gossip.clone() as Arc<dyn Transport>, dispatch_rx);
 
     // Let the dispatcher pick up one ticket and enter its stall.
     engine
@@ -248,7 +200,7 @@ async fn dispatcher_mpsc_full_does_not_lose_publish() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Publish many more; with capacity=2 and a stalled consumer, most
-    // will hit TrySendError::Full. All MUST still create pending rows.
+    // will hit TrySendError::Full. All MUST still be stored.
     let total: u64 = 20;
     for n in 1..=total {
         engine
@@ -261,11 +213,11 @@ async fn dispatcher_mpsc_full_does_not_lose_publish() {
             .expect("publish returns Ok even under saturation");
     }
 
-    let count = engine.store().pending_forwarding_count("bus").unwrap();
+    let count = engine.store().message_count().unwrap();
     assert_eq!(
         count,
         total + 1,
-        "all publishes must appear in pending_forwarding; got {count}, expected {}",
+        "all publishes must be durably stored; got {count}, expected {}",
         total + 1
     );
 }

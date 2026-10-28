@@ -14,14 +14,12 @@
 mod health;
 mod messages;
 mod peers;
-pub mod pending;
 pub mod retention;
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,13 +31,6 @@ use crate::identity::PublicId;
 #[derive(Clone)]
 pub struct FeedStore {
     conn: Arc<Mutex<Connection>>,
-    /// Synchronous projection of the durable NATS outbox depth.
-    ///
-    /// The durable storage identifier remains `"bus"`, even though the
-    /// observable transport backend is `"nats"`. Keeping this projection
-    /// with the store ensures every enqueue/completion caller updates the
-    /// same source used by synchronous transport health snapshots.
-    bus_pending_forwarding_count: Arc<AtomicU64>,
 }
 
 /// An address-only peer record (from manual add or LAN discovery).
@@ -130,47 +121,6 @@ const SCHEMA_DDL: &str = "
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );
-    -- Phase 2 Wave 1 Step 6: pending-forwarding durable-ack tracking
-    -- (amendments §C.1, §G.2). Stores messages accepted locally but not
-    -- yet confirmed replicated to a given transport backend. Primary key
-    -- (transport_id, message_hash) enables INSERT OR IGNORE idempotent
-    -- enqueue per §G.2; the dispatcher and BusTransport::publish both
-    -- hit this path and the second caller must no-op.
-    CREATE TABLE IF NOT EXISTS pending_forwarding (
-        transport_id TEXT NOT NULL,
-        message_hash TEXT NOT NULL,
-        author TEXT NOT NULL,
-        sequence INTEGER NOT NULL,
-        enqueued_at TEXT NOT NULL,
-        last_attempt_at TEXT,
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT,
-        PRIMARY KEY (transport_id, message_hash)
-    );
-    CREATE INDEX IF NOT EXISTS idx_pending_transport ON pending_forwarding(transport_id, enqueued_at);
-    CREATE INDEX IF NOT EXISTS idx_pending_author_seq ON pending_forwarding(author, sequence);
-    -- Phase 2 Wave 1 Step 6: bus author_seq → stream_seq mapping for
-    -- request_from (amendment §C.3, §C.6). Populated on both local
-    -- publish PubAck AND subscribe ingest so local-only bus nodes still
-    -- have an index. Cleared on stream reset (amendment §G.1).
-    CREATE TABLE IF NOT EXISTS bus_author_seq_index (
-        author TEXT NOT NULL,
-        author_seq INTEGER NOT NULL,
-        stream_seq INTEGER NOT NULL,
-        indexed_at TEXT NOT NULL,
-        PRIMARY KEY (author, author_seq)
-    );
-    CREATE INDEX IF NOT EXISTS idx_bus_author_seq_stream ON bus_author_seq_index(stream_seq);
-    -- Phase 2 Wave 1 Step 6: stream identity marker for delete-and-recreate
-    -- detection (amendment §G.1). Single row per local stream_name; on
-    -- startup we compare persisted (first_ts, created_at) against the
-    -- current stream.info() — mismatch → index is cleared.
-    CREATE TABLE IF NOT EXISTS bus_stream_identity (
-        stream_name TEXT PRIMARY KEY,
-        first_ts TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        recorded_at TEXT NOT NULL
-    );
 ";
 
 impl FeedStore {
@@ -180,10 +130,8 @@ impl FeedStore {
         Self::configure_runtime_pragmas(&conn, true)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
-            bus_pending_forwarding_count: Arc::new(AtomicU64::new(0)),
         };
         store.init_schema()?;
-        store.initialize_bus_pending_forwarding_count()?;
         Ok(store)
     }
 
@@ -193,10 +141,8 @@ impl FeedStore {
         Self::configure_runtime_pragmas(&conn, false)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
-            bus_pending_forwarding_count: Arc::new(AtomicU64::new(0)),
         };
         store.init_schema()?;
-        store.initialize_bus_pending_forwarding_count()?;
         Ok(store)
     }
 
@@ -228,29 +174,6 @@ impl FeedStore {
         conn.execute_batch(SCHEMA_DDL)?;
         Self::run_post_schema_migrations(&conn)?;
         Ok(())
-    }
-
-    /// Initialize the in-memory bus outbox projection from durable state.
-    /// Called once after schema creation/migration and before the store is
-    /// returned to callers.
-    fn initialize_bus_pending_forwarding_count(&self) -> Result<()> {
-        let count = {
-            let conn = self.conn();
-            conn.query_row(
-                "SELECT COUNT(*) FROM pending_forwarding WHERE transport_id = 'bus'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )? as u64
-        };
-        self.bus_pending_forwarding_count
-            .store(count, Ordering::Release);
-        Ok(())
-    }
-
-    /// Read the durable bus outbox projection without acquiring SQLite's
-    /// mutex. This is safe for synchronous `Transport::health()` calls.
-    pub fn bus_pending_forwarding_count(&self) -> u64 {
-        self.bus_pending_forwarding_count.load(Ordering::Acquire)
     }
 
     /// Migrations that must run BEFORE SCHEMA_DDL (column additions).
@@ -380,63 +303,6 @@ impl FeedStore {
                     reason TEXT NOT NULL  -- 'expired', 'retention', 'compacted'
                 );
                 CREATE INDEX IF NOT EXISTS idx_tombstones_author_seq ON tombstones(author, sequence);",
-            )?;
-        }
-
-        // Phase 2 Wave 1 Step 6: pending_forwarding table + indexes
-        // (amendment §C.1, §G.2). Gated for upgrades of existing DBs that
-        // pre-date Phase 2; fresh DBs get the table via SCHEMA_DDL above.
-        let has_pending_forwarding: bool = conn
-            .prepare("SELECT 1 FROM pending_forwarding LIMIT 0")
-            .is_ok();
-        if !has_pending_forwarding {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS pending_forwarding (
-                    transport_id TEXT NOT NULL,
-                    message_hash TEXT NOT NULL,
-                    author TEXT NOT NULL,
-                    sequence INTEGER NOT NULL,
-                    enqueued_at TEXT NOT NULL,
-                    last_attempt_at TEXT,
-                    attempt_count INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    PRIMARY KEY (transport_id, message_hash)
-                );
-                CREATE INDEX IF NOT EXISTS idx_pending_transport ON pending_forwarding(transport_id, enqueued_at);
-                CREATE INDEX IF NOT EXISTS idx_pending_author_seq ON pending_forwarding(author, sequence);",
-            )?;
-        }
-
-        // Phase 2 Wave 1 Step 6: bus_author_seq_index (amendment §C.3, §C.6).
-        let has_bus_author_seq_index: bool = conn
-            .prepare("SELECT 1 FROM bus_author_seq_index LIMIT 0")
-            .is_ok();
-        if !has_bus_author_seq_index {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS bus_author_seq_index (
-                    author TEXT NOT NULL,
-                    author_seq INTEGER NOT NULL,
-                    stream_seq INTEGER NOT NULL,
-                    indexed_at TEXT NOT NULL,
-                    PRIMARY KEY (author, author_seq)
-                );
-                CREATE INDEX IF NOT EXISTS idx_bus_author_seq_stream ON bus_author_seq_index(stream_seq);",
-            )?;
-        }
-
-        // Phase 2 Wave 1 Step 6: bus_stream_identity (amendment §G.1 —
-        // delete-and-recreate detection).
-        let has_bus_stream_identity: bool = conn
-            .prepare("SELECT 1 FROM bus_stream_identity LIMIT 0")
-            .is_ok();
-        if !has_bus_stream_identity {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS bus_stream_identity (
-                    stream_name TEXT PRIMARY KEY,
-                    first_ts TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    recorded_at TEXT NOT NULL
-                );",
             )?;
         }
 
@@ -892,65 +758,92 @@ mod tests {
         assert_eq!(topics, vec!["llm", "programming", "rust"]);
     }
 
-    // ============ PHASE 2 WAVE 1 STEP 6: SCHEMA MIGRATION TESTS ============
+    /// Tables a 2.0.x node created for the bus transport (RFC 0001 §19 A7).
+    const BUS_TABLES: [&str; 3] = [
+        "pending_forwarding",
+        "bus_author_seq_index",
+        "bus_stream_identity",
+    ];
 
-    #[test]
-    fn phase2_schema_creates_pending_forwarding_table() {
-        let store = FeedStore::open_memory().unwrap();
-        // Table must exist so CRUD in Step 7 can target it.
-        let conn = store.conn();
-        let exists = conn
-            .prepare("SELECT 1 FROM pending_forwarding LIMIT 0")
-            .is_ok();
-        assert!(exists, "pending_forwarding table must exist after init");
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |_| Ok(()),
+        )
+        .is_ok()
     }
 
     #[test]
-    fn phase2_schema_creates_bus_author_seq_index_table() {
+    fn fresh_database_creates_no_bus_tables() {
         let store = FeedStore::open_memory().unwrap();
         let conn = store.conn();
-        let exists = conn
-            .prepare("SELECT 1 FROM bus_author_seq_index LIMIT 0")
-            .is_ok();
-        assert!(exists, "bus_author_seq_index table must exist after init");
+        for table in BUS_TABLES {
+            assert!(
+                !table_exists(&conn, table),
+                "{table} must not be created on a new database"
+            );
+        }
     }
 
     #[test]
-    fn phase2_schema_creates_bus_stream_identity_table() {
-        let store = FeedStore::open_memory().unwrap();
-        let conn = store.conn();
-        let exists = conn
-            .prepare("SELECT 1 FROM bus_stream_identity LIMIT 0")
-            .is_ok();
-        assert!(exists, "bus_stream_identity table must exist after init");
-    }
+    fn existing_bus_tables_and_rows_survive_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("feed.db");
+        drop(FeedStore::open(&path).unwrap());
 
-    #[test]
-    fn phase2_schema_creates_pending_forwarding_indexes() {
-        // Per amendment §G.2, the idempotent-enqueue INSERT OR IGNORE
-        // depends on the composite PRIMARY KEY being enforced. We cannot
-        // introspect "idempotent" here (tested in Step 7), but we can
-        // assert the supporting secondary indexes exist.
-        let store = FeedStore::open_memory().unwrap();
-        let conn = store.conn();
-        let idx_transport: bool = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_pending_transport'",
-                [],
-                |row| row.get::<_, i64>(0).map(|_| true),
+        // Recreate the bus tables with the columns egregore 2.0.1 created,
+        // with a row in each, as on a node that ran the bus-era binary.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS pending_forwarding (
+                    transport_id TEXT NOT NULL,
+                    message_hash TEXT NOT NULL,
+                    author TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    enqueued_at TEXT NOT NULL,
+                    last_attempt_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    PRIMARY KEY (transport_id, message_hash)
+                );
+                CREATE TABLE IF NOT EXISTS bus_author_seq_index (
+                    author TEXT NOT NULL,
+                    author_seq INTEGER NOT NULL,
+                    stream_seq INTEGER NOT NULL,
+                    indexed_at TEXT NOT NULL,
+                    PRIMARY KEY (author, author_seq)
+                );
+                CREATE TABLE IF NOT EXISTS bus_stream_identity (
+                    stream_name TEXT PRIMARY KEY,
+                    first_ts TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL
+                );
+                INSERT OR IGNORE INTO pending_forwarding
+                    (transport_id, message_hash, author, sequence, enqueued_at)
+                    VALUES ('bus', 'h1', '@a.ed25519', 1, '2026-07-01T00:00:00Z');
+                INSERT OR IGNORE INTO bus_author_seq_index
+                    VALUES ('@a.ed25519', 1, 7, '2026-07-01T00:00:00Z');
+                INSERT OR IGNORE INTO bus_stream_identity
+                    VALUES ('egregore-feed', '2026-07-01T00:00:00Z',
+                            '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z');",
             )
-            .unwrap_or(false);
-        let idx_author_seq: bool = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_pending_author_seq'",
-                [],
-                |row| row.get::<_, i64>(0).map(|_| true),
-            )
-            .unwrap_or(false);
-        assert!(
-            idx_transport && idx_author_seq,
-            "pending_forwarding indexes must exist (idx_pending_transport, idx_pending_author_seq)"
-        );
+            .unwrap();
+        }
+
+        let store = FeedStore::open(&path).unwrap();
+        let conn = store.conn();
+        for table in BUS_TABLES {
+            assert!(table_exists(&conn, table), "{table} must survive open");
+            let rows: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 1, "{table} rows must survive open untouched");
+        }
     }
 
     #[test]

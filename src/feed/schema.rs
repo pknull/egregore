@@ -243,6 +243,10 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "profile.v1.json",
+        // `broker` stays an accepted property: Profiles already on live feeds
+        // carry it (as `null` from gossip-only nodes), and with
+        // `additionalProperties: false` dropping it would reject them at
+        // ingest (RFC 0001 §19 A6).
         r#"{
   "content_type": "profile",
   "version": 1,
@@ -283,7 +287,9 @@ const DEFAULT_SCHEMAS: &[(&str, &str)] = &[
         // Raw string uses `r##"..."##` so the embedded `"#/$defs/..."`
         // JSON-pointer references inside the schema do not terminate
         // the Rust string literal early (the `"#` sequence would end
-        // a single-`#` raw string).
+        // a single-`#` raw string). `bridge_queues` stays accepted on
+        // transport children for node_status messages already signed with
+        // it, for the same reason as `broker` in profile/v1.
         r##"{
   "content_type": "node_status",
   "version": 1,

@@ -53,8 +53,8 @@
 //! `FeedStore::get_messages_after`, which orders by sequence ASC. Per
 //! Invariant 5 the stream ends without a distinguishable error — consumers
 //! detect gaps via the chain's `previous` hash after the stream terminates.
-//! Phase 1 does not merge live-forward events; Phase 2+ composite transport
-//! may extend this.
+//! It does not merge live-forward events; `subscribe` is the live-forward
+//! primitive.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -122,8 +122,7 @@ pub struct GossipTransport {
     /// Local identity retained for future use. Phase-1 subscribe/request_from
     /// do not touch it — the filter evaluates `msg.author` (the signed
     /// envelope's author, not our local identity), and Invariant 4 forbids
-    /// re-signing. Phase 2's composite-transport fan-in may attach local
-    /// identity to subscription metadata (ack accounting, tenancy).
+    /// re-signing.
     #[allow(dead_code)]
     identity: Identity,
     /// Engine reference. Used by `start` to wire the existing server /
@@ -329,9 +328,7 @@ impl Transport for GossipTransport {
                                 // we log and continue: for a live stream over
                                 // a 1024-capacity broadcast the subscriber
                                 // chose this position; consumers that require
-                                // strict ordering should drain promptly. Phase
-                                // 2's composite transport can upgrade to a
-                                // strict policy if needed.
+                                // strict ordering should drain promptly.
                                 //
                                 // Lag is also surfaced on /v1/status via
                                 // `TransportHealth.last_error` so operators
@@ -370,9 +367,8 @@ impl Transport for GossipTransport {
         //
         // Stream ending is NOT a distinguishable error per Invariant 5 —
         // consumers detect gaps via the chain's `previous` hash after the
-        // stream ends. For Phase 1 this is a snapshot only; Phase 2+ may
-        // extend to merge live-forward events (for now, `subscribe` is the
-        // live-forward primitive and consumers interleave the two themselves).
+        // stream ends. This is a snapshot only: `subscribe` is the
+        // live-forward primitive and consumers interleave the two themselves.
         //
         // BATCH_LIMIT is a fixed page size. On exhaustion (batch returns
         // fewer than BATCH_LIMIT) we stop. Each batch's rusqlite query runs
@@ -620,14 +616,9 @@ impl Transport for GossipTransport {
             // request_from blocking-pool join failures — see the writes in
             // those methods.
             last_error: self.last_error.read().clone(),
-            // Gossip is a leaf transport; composites (Phase 2) populate
-            // `children` themselves.
+            // Gossip is a leaf transport; only an aggregate populates
+            // `children`.
             children: vec![],
-            // Gossip is a leaf transport — no per-direction bridge queue
-            // state to report. The composite (if any) fills this field on
-            // the gossip child's health snapshot before returning to the
-            // caller.
-            bridge_queues: None,
         }
     }
 }

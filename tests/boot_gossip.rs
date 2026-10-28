@@ -122,6 +122,29 @@ fn pull_only_node_starts_gossip_once() {
     assert_gossip_started_once(&boot_log(false));
 }
 
+/// `--data-dir` wins over the config file's `data_dir`, so the node keeps its
+/// database where the command line put it.
+#[test]
+fn data_dir_flag_overrides_the_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = spawn_node(&dir, false, 0);
+    let rx = log_lines(&mut child);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(line) if line.contains(BOOT_DONE) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    child.kill().ok();
+    child.wait().ok();
+    assert!(
+        dir.path().join("egregore.db").exists(),
+        "database not under --data-dir"
+    );
+}
+
 #[test]
 fn push_node_exits_when_the_gossip_port_is_taken() {
     let held = TcpListener::bind("127.0.0.1:0").unwrap();

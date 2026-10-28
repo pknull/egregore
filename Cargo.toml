@@ -69,6 +69,10 @@ async-stream = "0.3"
 async-trait = "0.1"
 futures = "0.3"
 
+# TLS for jsonschema's HTTP $ref resolution, which builds reqwest without a
+# TLS backend of its own.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
 # Random
 rand = "0.8"
 

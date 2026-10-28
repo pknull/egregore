@@ -2,7 +2,7 @@
 
 ## What This Feature Does
 
-The node streams message events over Server-Sent Events (`GET /v1/events`). Every locally published message and every message ingested from gossip is delivered to connected clients.
+The node streams message events over Server-Sent Events (`GET /v1/events`): locally published messages and messages ingested from gossip, as they arrive. Delivery is best-effort. A client that falls behind the stream's buffer receives a `lagged` event instead of the skipped messages, and the stream carries nothing published while the client was disconnected, so a client that must not miss messages reconciles against the feed API (`GET /v1/feed?include_self=true`, paged with `limit` and `offset`; without `include_self` the feed omits this node's own messages).
 
 ## When To Use It
 

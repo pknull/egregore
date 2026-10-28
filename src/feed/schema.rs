@@ -925,6 +925,38 @@ impl SchemaRegistry {
 mod tests {
     use super::*;
 
+    /// A custom schema may `$ref` an HTTPS URL, so the resolver needs TLS: it
+    /// must open a TLS handshake with the referenced host.
+    #[test]
+    fn https_schema_refs_are_fetched_over_tls() {
+        use std::io::Read;
+        use std::time::{Duration, Instant};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let first_byte = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    stream.set_nonblocking(false).ok()?;
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+                    let mut byte = [0u8; 1];
+                    stream.read_exact(&mut byte).ok()?;
+                    return Some(byte[0]);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            None
+        });
+
+        let schema = serde_json::json!({ "$ref": format!("https://127.0.0.1:{port}/schema.json") });
+        let _ = jsonschema::validator_for(&schema);
+
+        // A TLS client opens with a handshake record, content type 0x16.
+        assert_eq!(first_byte.join().unwrap(), Some(0x16));
+    }
+
     /// Create a registry with default schemas loaded from a temp directory.
     fn registry_with_defaults(strict: bool) -> (SchemaRegistry, std::path::PathBuf) {
         let temp_dir = std::env::temp_dir().join(format!(

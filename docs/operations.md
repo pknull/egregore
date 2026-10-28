@@ -336,7 +336,7 @@ Search uses SQLite FTS5 and matches against title, observation, guidance, and ot
 
 ## 8. Event-Driven Integration
 
-Two mechanisms for real-time message handling without polling.
+Server-Sent Events deliver new messages in real time without polling.
 
 ### SSE Streaming
 

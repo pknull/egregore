@@ -758,13 +758,9 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Start gossip server
+    // Gossip server and sync loop configuration. They start once, below:
+    // through the gossip transport when push is enabled, directly otherwise.
     let gossip_bind = format!("{}:{}", config.gossip_bind, config.gossip_port);
-    tracing::info!(bind = %gossip_bind, "gossip server starting");
-    // Build the server config once so the Phase-1 `GossipTransport` (attached
-    // below) and the existing gossip-server spawn site can share it without
-    // drifting. `ServerConfig` derives `Clone`, so cloning for each consumer
-    // is free.
     let server_config = gossip::server::ServerConfig {
         bind_addr: gossip_bind,
         network_key: config.network_key_bytes(),
@@ -772,22 +768,8 @@ async fn main() -> anyhow::Result<()> {
         push_enabled: config.push_enabled,
         max_persistent_connections: config.max_persistent_connections,
     };
-    let gossip_engine = engine.clone();
-    let server_registry = registry.clone();
-    let spawn_server_config = server_config.clone();
-    tokio::spawn(async move {
-        if let Err(e) = gossip::server::run_server_with_push(
-            spawn_server_config,
-            gossip_engine,
-            server_registry,
-        )
-        .await
-        {
-            tracing::error!(error = %e, "gossip server failed");
-        }
-    });
 
-    // Start gossip sync loop (dynamic: reads DB peers each cycle)
+    // The sync loop reads DB peers each cycle.
     let mut sync_config = gossip::client::SyncConfig::new(
         config.peers.clone(),
         config.network_key_bytes(),
@@ -797,14 +779,6 @@ async fn main() -> anyhow::Result<()> {
     );
     sync_config.backoff_initial = std::time::Duration::from_secs(config.reconnect_initial_secs);
     sync_config.backoff_max = std::time::Duration::from_secs(config.reconnect_max_secs);
-
-    let sync_engine = engine.clone();
-    let sync_registry = registry.clone();
-    let spawn_sync_config = sync_config.clone();
-    tokio::spawn(async move {
-        gossip::client::run_sync_loop_with_push(spawn_sync_config, sync_engine, sync_registry)
-            .await;
-    });
 
     // Phase 1 Step 5: construct a `GossipTransport` and attach it. It is the
     // effective transport: the `publish_dispatcher` task below hands it
@@ -825,8 +799,8 @@ async fn main() -> anyhow::Result<()> {
                         registry: gossip_registry.clone(),
                         identity: identity.clone(),
                         engine: engine.clone(),
-                        server_config,
-                        sync_config,
+                        server_config: server_config.clone(),
+                        sync_config: sync_config.clone(),
                     },
                 ));
             engine.attach_transport(transport.clone());
@@ -861,12 +835,28 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Start the effective transport. `GossipTransport::start` binds its own
-    // gossip server on `server_config.bind_addr` and spawns a sync loop.
+    // Start gossip once. With push enabled, `GossipTransport::start` binds the
+    // gossip server and spawns the sync loop, and reports a bind failure, which
+    // stops the node. Without push there is no transport, so the node runs
+    // both directly.
+    tracing::info!(bind = %server_config.bind_addr, "gossip server starting");
     if let Some(t) = effective_transport.as_ref() {
-        if let Err(e) = t.start().await {
-            tracing::error!(error = %e, "effective transport start failed");
-        }
+        t.start()
+            .await
+            .map_err(|e| anyhow::anyhow!("gossip transport failed to start: {e}"))?;
+    } else {
+        let gossip_engine = engine.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                gossip::server::run_server_with_push(server_config, gossip_engine, None).await
+            {
+                tracing::error!(error = %e, "gossip server failed");
+            }
+        });
+        let sync_engine = engine.clone();
+        tokio::spawn(async move {
+            gossip::client::run_sync_loop_with_push(sync_config, sync_engine, None).await;
+        });
     }
 
     // Start LAN discovery if enabled

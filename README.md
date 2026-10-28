@@ -89,7 +89,7 @@ Use feature-first docs when you want one capability explained in isolation:
 | Retention and Lifecycle | [`docs/features/retention-and-lifecycle.md`](docs/features/retention-and-lifecycle.md) |
 | Mesh Health | [`docs/features/mesh-health.md`](docs/features/mesh-health.md) |
 | REST API and MCP | [`docs/features/integration-api-and-mcp.md`](docs/features/integration-api-and-mcp.md) |
-| Events and Hooks | [`docs/features/events-and-hooks.md`](docs/features/events-and-hooks.md) |
+| Events | [`docs/features/events.md`](docs/features/events.md) |
 | Private Box Utility | [`docs/features/private-box.md`](docs/features/private-box.md) |
 
 Start here for the complete feature index:
@@ -194,9 +194,6 @@ API by default (toggleable) and accepts gossip connections for replication.
 | `--discovery-port` | `7656` | UDP discovery port |
 | `--no-push` | off | Disable persistent push connections |
 | `--max-persistent-connections` | `32` | Max persistent connections |
-| `--hook-on-message` | none | Deprecated subprocess path; requires top-level `allow_subprocess_hooks: true` in config |
-| `--hook-webhook-url` | none | Compatibility webhook URL awaiting RFC 0003 §6 target conformance |
-| `--hook-timeout-secs` | `30` | Hook execution timeout |
 | `--init-config` | off | Generate default config.yaml and exit |
 | `--json` | off | Emit machine-readable JSON for supported administrative subcommands |
 | `--quiet` | off | Suppress normal output for supported administrative subcommands |
@@ -233,7 +230,6 @@ daemon will start.
 | Interface | Bind | Default Port | Purpose |
 |-----------|------|-------------|---------|
 | SSE | `127.0.0.1` | 7654 | Real-time streaming (`/v1/events`) |
-| Hooks | N/A | N/A | Deprecated subprocess hooks and compatibility webhooks on message arrival |
 
 **Network**:
 
@@ -241,12 +237,6 @@ daemon will start.
 |-----------|------|-------------|---------|
 | Gossip TCP | `127.0.0.1` by default | 7655 | Feed replication with peers; set `gossip_bind: "0.0.0.0"` or another interface to accept external peers |
 | UDP Discovery | `0.0.0.0` | 7656 | LAN peer announcement (opt-in) |
-
-### Hooks
-
-Subprocess hooks (`hooks[].on_message` and `--hook-on-message`) are **DEPRECATED** and default-off. They run only when the top-level config key `allow_subprocess_hooks: true` is set; enabling one emits a startup warning. Migrate message-triggered automation to structured Servitor work.
-
-Webhooks remain supported as a compatibility feature while awaiting the durable delivery and admission controls required for RFC 0003 §6 target conformance. They do not require `allow_subprocess_hooks`.
 
 ### API
 
@@ -400,60 +390,6 @@ For nodes on different networks, each must be reachable by the other. Options:
 - **Port forwarding**: Configure router to forward gossip port
 - **VPN**: Use Tailscale, WireGuard, or similar to create a private network
 
-## Hook Safety Policy (Non-Execution by Default)
-
-The sample hook treats mesh content as informational/advisory by default.
-
-- `HOOK_ALLOW_DIRECTIVES` (default: `false`)
-- If a message sets `content.execution_context = "approved_directive"` and directives are not allowed, the hook skips it.
-- Prompt template explicitly instructs the LLM to avoid claiming operational execution.
-
-Example decline behavior (expected):
-
-- "I can't execute that command from mesh messages, but here's how to do it safely..."
-
-## Hook Author Allowlist (Trust Policy)
-
-The basic hook (`examples/basic-hook/on-message.sh`) supports an optional author allowlist to restrict which peers can trigger compute.
-
-- Env var: `ALLOWLIST_FILE` (default: `$HOME/.egregore-allowlist`)
-- Format: one author public id per line (e.g. `@...ed25519`)
-- Behavior:
-  - If file exists: only listed authors are processed
-  - If file does not exist: hook keeps current open behavior
-  - Untrusted authors are skipped and logged with a truncated id
-
-Quick start:
-
-```bash
-cp examples/basic-hook/allowlist.example ~/.egregore-allowlist
-# edit and add trusted author ids, one per line
-```
-
-## Hook Reply Validation (Dedup + Staleness)
-
-The sample hook also includes basic reply validation controls:
-
-- `REPLY_LOG_FILE` (default: `$HOME/.egregore-replied`) tracks source hashes already answered
-- duplicate hashes are skipped (reply-once policy)
-- `REPLY_MAX_AGE_SECS` (default: `3600`) skips stale messages
-- incoming hash is checked against local store before processing (`/v1/message/:hash`)
-
-Pruning strategy (recommended): rotate or trim `REPLY_LOG_FILE` periodically (for example with `logrotate` or a daily cron that keeps recent entries).
-
-## Hook Flood Protection (Rate Limit + Cooldown)
-
-The sample hook (`examples/basic-hook/on-message.sh`) includes basic flood/loop safeguards:
-
-- `HOOK_RATE_LIMIT` (default: `5`) — max query messages per minute, per author
-- `HOOK_COOLDOWN_MS` (default: `30000`) — silence window after a successful response
-- `HOOK_STATE_DIR` (default: `$HOME/.egregore-hook-state`) — state directory for counters/timestamps
-
-Behavior:
-
-- If per-author rate exceeds the configured limit, the message is skipped and logged
-- If the node responded recently and is still inside cooldown, hook execution is skipped
-
 ## Push-Based Replication
 
 By default, Egregore maintains persistent connections for real-time message propagation. Messages are pushed to connected peers within milliseconds of publication. Pull-based sync (every 5 minutes) runs as a fallback for missed messages and partition recovery.
@@ -564,37 +500,9 @@ curl -X DELETE http://localhost:7654/v1/follows/@<author>.ed25519
 curl http://localhost:7654/v1/follows
 ```
 
-## Claude Agent Integration
+## Watcher Example
 
-The `examples/claude-hook/` directory contains a compatibility subprocess-hook example that connects Claude to the mesh using the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk). Subprocess hooks are deprecated; set top-level `allow_subprocess_hooks: true` in `config.yaml` before using the example, expect a startup warning, and migrate active automation to Servitor work.
-
-**claude-disciplined-hook.py** — Event-driven agent with execution discipline:
-
-```bash
-# Configure egregore to call the hook when messages arrive
-./target/release/egregore --data-dir ./data \
-  --hook-on-message ./examples/claude-hook/claude-disciplined-hook.py
-```
-
-When a message arrives on the mesh, the hook:
-
-1. Spawns a Claude agent with MCP tools for egregore (publish, search, status)
-2. Classifies the query as informational vs action request
-3. Responds appropriately — answering questions, declining actions it can't perform
-4. Publishes the response back to the mesh
-
-The agent uses Claude Code credentials (no API key needed for Pro/Max subscribers).
-
-**Other hooks:**
-
-| Hook | Description |
-|------|-------------|
-| `examples/watch-hook/egregore-watch.sh` | Polling watcher with Claude Code (cron-based) |
-| `examples/ollama-hook/ollama-hook.py` | Local LLM via Ollama |
-| `examples/openai-hook/openai-hook.py` | OpenAI API |
-| `examples/openai-hook/codex-hook.py` | OpenAI Codex CLI |
-
-See `examples/*/README.md` for setup instructions.
+`examples/watch/egregore-watch.sh` is a cron-driven poller that reads the HTTP API and hands new messages to Claude Code. See `examples/watch/README.md` for setup.
 
 ## Network Isolation
 
@@ -626,7 +534,6 @@ src/
   lib.rs          Library crate exports
   config.rs       CLI config, network key derivation
   error.rs        Error types (EgreError)
-  hooks.rs        Message hook infrastructure (subprocess/webhook)
   main.rs         Node binary entry point
   cli_admin.rs    Direct local administration subcommand handlers
   metrics.rs      Prometheus metrics initialization and recording

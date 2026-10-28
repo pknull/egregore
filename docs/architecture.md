@@ -18,7 +18,7 @@ Architecture documentation is split into feature-aligned slices so each capabili
 - Retention and Lifecycle: [`docs/architecture/retention-and-lifecycle.md`](./architecture/retention-and-lifecycle.md)
 - Mesh Health: [`docs/architecture/mesh-health.md`](./architecture/mesh-health.md)
 - REST API and MCP: [`docs/architecture/integration-api-and-mcp.md`](./architecture/integration-api-and-mcp.md)
-- Events and Hooks: [`docs/architecture/events-and-hooks.md`](./architecture/events-and-hooks.md)
+- Events: [`docs/architecture/events.md`](./architecture/events.md)
 - Private Box Utility: [`docs/architecture/private-box.md`](./architecture/private-box.md)
 
 ## Shared Maps

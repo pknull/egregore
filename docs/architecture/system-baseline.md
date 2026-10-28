@@ -19,7 +19,7 @@ Implementation anchor: `src/main.rs`.
 3. Optionally start HTTP API on loopback.
 4. Start gossip TCP server.
 5. Start gossip sync loop (outgoing).
-6. Optionally start discovery, mDNS, retention task, and hooks.
+6. Optionally start discovery, mDNS, and retention task.
 
 ## Operating Modes
 

@@ -16,11 +16,10 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use std::path::PathBuf;
 
 use egregore::api;
-use egregore::config::{Config, HookEntry};
+use egregore::config::Config;
 use egregore::feed::engine::FeedEngine;
 use egregore::feed::store::FeedStore;
 use egregore::gossip;
-use egregore::hooks::HookExecutor;
 use egregore::identity::Identity;
 use egregore::status::build_node_status;
 use egregore::telemetry::{self, LoggingConfig, OtlpConfig};
@@ -94,18 +93,6 @@ struct Cli {
     /// Gossip sync interval in seconds
     #[arg(long)]
     gossip_interval_secs: Option<u64>,
-
-    /// Path to hook script called when messages arrive (use config file for multiple hooks)
-    #[arg(long)]
-    hook_on_message: Option<PathBuf>,
-
-    /// URL to POST message JSON when messages arrive (use config file for multiple hooks)
-    #[arg(long)]
-    hook_webhook_url: Option<String>,
-
-    /// Hook timeout in seconds
-    #[arg(long)]
-    hook_timeout_secs: Option<u64>,
 
     /// Generate a default config.yaml in data-dir and exit
     #[arg(long)]
@@ -343,18 +330,6 @@ fn build_config(cli: &Cli, matches: &clap::ArgMatches) -> anyhow::Result<Config>
         config.peers.extend(cli.peer.iter().cloned());
         let mut seen = HashSet::new();
         config.peers.retain(|p| seen.insert(p.clone()));
-    }
-
-    // CLI hook flags create one additional hook entry appended to config file hooks
-    let cli_hook = HookEntry {
-        name: Some("cli".to_string()),
-        on_message: cli.hook_on_message.clone(),
-        webhook_url: cli.hook_webhook_url.clone(),
-        timeout_secs: cli.hook_timeout_secs,
-        ..Default::default()
-    };
-    if cli_hook.is_active() {
-        config.hooks.push(cli_hook);
     }
 
     // Push configuration (push is enabled by default, --no-push disables)
@@ -666,35 +641,6 @@ async fn main() -> anyhow::Result<()> {
                 std::time::Duration::from_secs(3600),
             )
             .await;
-        });
-    }
-
-    // Start hook executor if configured
-    if let Some(executor) = HookExecutor::new(config.hooks.clone(), config.allow_subprocess_hooks) {
-        let hook_count = executor.hooks().len();
-        tracing::info!(hook_count, "hook executor enabled");
-        for hook in executor.hooks() {
-            tracing::info!(
-                name = ?hook.name,
-                on_message = ?hook.on_message,
-                webhook = ?hook.webhook_url,
-                "registered hook"
-            );
-        }
-        let mut hook_rx = engine.subscribe();
-        tokio::spawn(async move {
-            loop {
-                match hook_rx.recv().await {
-                    Ok(msg) => executor.execute(&msg).await,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(
-                            skipped = n,
-                            "hook receiver lagged, some messages were not processed"
-                        );
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
         });
     }
 
